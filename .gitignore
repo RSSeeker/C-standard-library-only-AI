@@ -1,0 +1,7 @@
+*.exe
+*.o
+*.obj
+*.ilk
+*.pdb
+build/
+cls_model.json
