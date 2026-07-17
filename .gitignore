@@ -5,3 +5,4 @@
 *.pdb
 build/
 cls_model.json
+.vscode/
