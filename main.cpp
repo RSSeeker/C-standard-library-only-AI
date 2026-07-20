@@ -70,6 +70,22 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define IDC_EDIT_ATTNEMBED  3323
 #define IDC_EDIT_ATTNHEADS  3324
 
+// 早停控件
+#define IDC_CHECK_EARLYSTOP 3330
+#define IDC_EDIT_PATIENCE   3331
+#define IDC_EDIT_VALSPLIT   3332
+
+// Dropout / L2 / Test Split 控件
+#define IDC_CHECK_DROPOUT   3340
+#define IDC_EDIT_DROPOUT    3341
+#define IDC_CHECK_L2        3342
+#define IDC_EDIT_L2         3343
+#define IDC_CHECK_TESTSPLIT 3344
+#define IDC_EDIT_TESTSPLIT  3345
+
+// 清除训练数据
+#define IDC_BTN_CLEAR_DATA  3350
+
 // 数据表格
 #define IDC_LIST_DATA       3400
 #define IDC_BTN_ADD_ROW     3401
@@ -131,6 +147,8 @@ HWND g_hEditInput = nullptr;
 HWND g_hEditOutput = nullptr;
 HWND g_hOutputLayerLabel = nullptr;
 HWND g_hAddLayerBtn = nullptr;
+HWND g_hKernelLabel = nullptr;
+HWND g_hFilterLabel = nullptr;
 HWND g_hDelLayerBtn = nullptr;
 
 // 层配置区域布局
@@ -265,6 +283,8 @@ static void updateArchVisibility() {
     int showAttn = (arch == 3) ? SW_SHOW : SW_HIDE;
     ShowWindow(GetDlgItem(g_hWnd, IDC_EDIT_CNNKERNEL), showCnn);
     ShowWindow(GetDlgItem(g_hWnd, IDC_EDIT_CNNFILTERS), showCnn);
+    ShowWindow(g_hKernelLabel, showCnn);
+    ShowWindow(g_hFilterLabel, showCnn);
     ShowWindow(GetDlgItem(g_hWnd, IDC_EDIT_RNNHIDDEN), showRnn);
     ShowWindow(GetDlgItem(g_hWnd, IDC_EDIT_ATTNEMBED), showAttn);
     ShowWindow(GetDlgItem(g_hWnd, IDC_EDIT_ATTNHEADS), showAttn);
@@ -619,6 +639,28 @@ DWORD WINAPI TrainThread(LPVOID) {
     int inputDim = readInt(IDC_EDIT_INPUT, 1);
     int outputDim = readInt(IDC_EDIT_OUTPUT, 1);
 
+    // 早停参数
+    bool useEarlyStop = (SendMessageA(GetDlgItem(g_hWnd, IDC_CHECK_EARLYSTOP), BM_GETCHECK, 0, 0) == BST_CHECKED);
+    int patience = useEarlyStop ? readInt(IDC_EDIT_PATIENCE, 50) : 0;
+    double valSplit = readDouble(IDC_EDIT_VALSPLIT, 0.1);
+    if (valSplit <= 0) valSplit = 0.1;
+
+    // Dropout
+    bool useDropout = (SendMessageA(GetDlgItem(g_hWnd, IDC_CHECK_DROPOUT), BM_GETCHECK, 0, 0) == BST_CHECKED);
+    double dropoutP = useDropout ? readDouble(IDC_EDIT_DROPOUT, 0.3) : 0.0;
+    if (dropoutP < 0) dropoutP = 0.0;
+    if (dropoutP > 0.9) dropoutP = 0.9;
+
+    // L2 正则化
+    bool useL2 = (SendMessageA(GetDlgItem(g_hWnd, IDC_CHECK_L2), BM_GETCHECK, 0, 0) == BST_CHECKED);
+    double l2Lambda = useL2 ? readDouble(IDC_EDIT_L2, 0.0001) : 0.0;
+
+    // 测试集
+    bool useTestSplit = (SendMessageA(GetDlgItem(g_hWnd, IDC_CHECK_TESTSPLIT), BM_GETCHECK, 0, 0) == BST_CHECKED);
+    double testSplit = useTestSplit ? readDouble(IDC_EDIT_TESTSPLIT, 0.1) : 0.0;
+    if (testSplit < 0) testSplit = 0.0;
+    if (testSplit > 0.5) testSplit = 0.5;
+
     std::string optName = "adam";
     {
         int idx = comboIdx(IDC_CBO_OPTIMIZER);
@@ -651,6 +693,9 @@ DWORD WINAPI TrainThread(LPVOID) {
     } else {
         g_model = make_classifier(inputDim, outputDim, hidden, actName, lr, optName);
     }
+    g_model.dropout_rate = dropoutP;
+    g_model.l2_lambda = l2Lambda;
+    g_model.test_split = testSplit;
 
     std::cout << "============================================================\n";
     std::cout << "  " << ((netType=="regression")?"Regression":"Classification")
@@ -662,9 +707,17 @@ DWORD WINAPI TrainThread(LPVOID) {
     g_model.summary();
 
     if (netType == "regression") {
-        g_model.fit(g_train_x, g_train_y_real, epochs, batch, 0.1, nullptr, 50, true, true, nullptr, 0.0);
+        g_model.fit(g_train_x, g_train_y_real, epochs, batch, valSplit, nullptr, patience, true, true, nullptr, 0.0);
     } else {
-        g_model.fit(g_train_x, g_train_y_cls, epochs, batch, 0.1, 50, true, nullptr, 0.0);
+        g_model.fit(g_train_x, g_train_y_cls, epochs, batch, valSplit, patience, true, nullptr, 0.0);
+    }
+
+    if (useEarlyStop) {
+        int stoppedAt = (int)g_model.train_history.size();
+        std::cout << "\n  Training stopped at epoch " << stoppedAt;
+        if (!g_model.val_history.empty())
+            std::cout << " (best val_loss=" << g_model.val_history.back().second << ")";
+        std::cout << "\n";
     }
 
     std::cout << "\n--- Results ---\n";
@@ -699,7 +752,11 @@ DWORD WINAPI TrainThread(LPVOID) {
 static void syncUIConfig(int netType, int arch, int inputDim, int outputDim,
                          const std::vector<int>& hiddenDims,
                          int optimizer, int activation,
-                         double lr, int epochs, int batch) {
+                         double lr, int epochs, int batch,
+                         bool earlyStop = true, int patience = 50, double valSplit = 0.1,
+                         bool useDropout = false, double dropoutP = 0.3,
+                         bool useL2 = false, double l2Lambda = 0.0001,
+                         bool useTestSplit = false, double testSplit = 0.1) {
     // 网络类型
     SendMessageA(GetDlgItem(g_hWnd, IDC_CBO_NETTYPE), CB_SETCURSEL, netType, 0);
     // 架构
@@ -726,6 +783,28 @@ static void syncUIConfig(int netType, int arch, int inputDim, int outputDim,
     SetWindowTextA(GetDlgItem(g_hWnd, IDC_EDIT_EPOCHS), b1);
     snprintf(b1, 16, "%d", batch);
     SetWindowTextA(GetDlgItem(g_hWnd, IDC_EDIT_BATCH), b1);
+    // 早停
+    SendMessageA(GetDlgItem(g_hWnd, IDC_CHECK_EARLYSTOP), BM_SETCHECK,
+                 earlyStop ? BST_CHECKED : BST_UNCHECKED, 0);
+    snprintf(b1, 16, "%d", patience);
+    SetWindowTextA(GetDlgItem(g_hWnd, IDC_EDIT_PATIENCE), b1);
+    snprintf(b1, 16, "%g", valSplit);
+    SetWindowTextA(GetDlgItem(g_hWnd, IDC_EDIT_VALSPLIT), b1);
+    // Dropout
+    SendMessageA(GetDlgItem(g_hWnd, IDC_CHECK_DROPOUT), BM_SETCHECK,
+                 useDropout ? BST_CHECKED : BST_UNCHECKED, 0);
+    snprintf(b1, 16, "%g", dropoutP);
+    SetWindowTextA(GetDlgItem(g_hWnd, IDC_EDIT_DROPOUT), b1);
+    // L2
+    SendMessageA(GetDlgItem(g_hWnd, IDC_CHECK_L2), BM_SETCHECK,
+                 useL2 ? BST_CHECKED : BST_UNCHECKED, 0);
+    snprintf(b1, 16, "%g", l2Lambda);
+    SetWindowTextA(GetDlgItem(g_hWnd, IDC_EDIT_L2), b1);
+    // Test Split
+    SendMessageA(GetDlgItem(g_hWnd, IDC_CHECK_TESTSPLIT), BM_SETCHECK,
+                 useTestSplit ? BST_CHECKED : BST_UNCHECKED, 0);
+    snprintf(b1, 16, "%g", testSplit);
+    SetWindowTextA(GetDlgItem(g_hWnd, IDC_EDIT_TESTSPLIT), b1);
     // 更新数据表列
     rebuildDataColumns();
 }
@@ -1011,10 +1090,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         y += lineH + gap;
 
         // 架构子参数
-        MakeStatic(hwnd, "Kernel", leftX, y, 40, 15);
+        g_hKernelLabel = MakeStatic(hwnd, "Kernel", leftX, y, 40, 15);
+        ShowWindow(g_hKernelLabel, SW_HIDE);
         HWND ek = MakeEdit(hwnd, IDC_EDIT_CNNKERNEL, "3", leftX+42, y-2, 50, 20, ES_NUMBER);
         ShowWindow(ek, SW_HIDE);
-        MakeStatic(hwnd, "Filters", leftX+100, y, 40, 15);
+        g_hFilterLabel = MakeStatic(hwnd, "Filters", leftX+100, y, 40, 15);
+        ShowWindow(g_hFilterLabel, SW_HIDE);
         HWND ef = MakeEdit(hwnd, IDC_EDIT_CNNFILTERS, "8", leftX+142, y-2, 50, 20, ES_NUMBER);
         ShowWindow(ef, SW_HIDE);
         HWND er = MakeEdit(hwnd, IDC_EDIT_RNNHIDDEN, "8", leftX+42, y-2, 50, 20, ES_NUMBER);
@@ -1087,10 +1168,50 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         trackBelowLayer(MakeEdit(hwnd, IDC_EDIT_BATCH, "16", leftX+295, y-2, 48, 20, ES_NUMBER), y-2);
         y += lineH + gap + 4;
 
+        // ======== 早停 (Early Stopping) ========
+        {
+            HWND cbEs = CreateWindowA("BUTTON", "Early Stop",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                leftX, y-2, 80, 20, hwnd, (HMENU)(INT_PTR)IDC_CHECK_EARLYSTOP, g_hInst, nullptr);
+            trackBelowLayer(cbEs, y-2);
+            SendMessageA(cbEs, BM_SETCHECK, BST_CHECKED, 0);
+            EnableWindow(cbEs, TRUE);
+        }
+        trackBelowLayer(MakeStatic(hwnd, "Val%", leftX+84, y, 30, 15), y);
+        trackBelowLayer(MakeEdit(hwnd, IDC_EDIT_VALSPLIT, "0.1", leftX+110, y-2, 42, 20), y-2);
+        trackBelowLayer(MakeStatic(hwnd, "Patience", leftX+160, y, 50, 15), y);
+        trackBelowLayer(MakeEdit(hwnd, IDC_EDIT_PATIENCE, "50", leftX+212, y-2, 48, 20, ES_NUMBER), y-2);
+        y += lineH + gap + 4;
+
+        // ======== Dropout + L2 + Test Split ========
+        {
+            HWND cbDo = CreateWindowA("BUTTON", "Dropout",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                leftX, y-2, 68, 20, hwnd, (HMENU)(INT_PTR)IDC_CHECK_DROPOUT, g_hInst, nullptr);
+            trackBelowLayer(cbDo, y-2);
+        }
+        trackBelowLayer(MakeEdit(hwnd, IDC_EDIT_DROPOUT, "0.3", leftX+72, y-2, 42, 20), y-2);
+        {
+            HWND cbL2 = CreateWindowA("BUTTON", "L2",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                leftX+120, y-2, 38, 20, hwnd, (HMENU)(INT_PTR)IDC_CHECK_L2, g_hInst, nullptr);
+            trackBelowLayer(cbL2, y-2);
+        }
+        trackBelowLayer(MakeEdit(hwnd, IDC_EDIT_L2, "0.0001", leftX+158, y-2, 54, 20), y-2);
+        {
+            HWND cbTs = CreateWindowA("BUTTON", "Test%",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                leftX+218, y-2, 52, 20, hwnd, (HMENU)(INT_PTR)IDC_CHECK_TESTSPLIT, g_hInst, nullptr);
+            trackBelowLayer(cbTs, y-2);
+        }
+        trackBelowLayer(MakeEdit(hwnd, IDC_EDIT_TESTSPLIT, "0.1", leftX+274, y-2, 42, 20), y-2);
+        y += lineH + gap + 4;
+
         // ======== 训练数据按钮 ========
         trackBelowLayer(MakeStatic(hwnd, "Training Data", leftX, y, fieldW/2, 15), y);
-        trackBelowLayer(MakeBtn(hwnd, IDC_BTN_ADD_ROW, "+Row", leftX + fieldW - 120, y-2, 50, 20), y-2);
-        trackBelowLayer(MakeBtn(hwnd, IDC_BTN_DEL_ROW, "-Row", leftX + fieldW - 66, y-2, 50, 20), y-2);
+        trackBelowLayer(MakeBtn(hwnd, IDC_BTN_ADD_ROW,    "+Row", leftX + fieldW - 170, y-2, 48, 20), y-2);
+        trackBelowLayer(MakeBtn(hwnd, IDC_BTN_DEL_ROW,    "-Row", leftX + fieldW - 118, y-2, 48, 20), y-2);
+        trackBelowLayer(MakeBtn(hwnd, IDC_BTN_CLEAR_DATA, "Clear", leftX + fieldW - 66, y-2, 48, 20), y-2);
         y += 18;
 
         // 数据表格
@@ -1251,6 +1372,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             delDataRow();
             updateInputOutputLock();
             break;
+        case IDC_BTN_CLEAR_DATA:
+            if (g_hDataList) {
+                endCellEdit(false);
+                ListView_DeleteAllItems(g_hDataList);
+                g_has_custom_data = false;
+                g_train_x.clear();
+                g_train_y_real.clear();
+                g_train_y_cls.clear();
+                updateInputOutputLock();
+                SetStatus("Training data cleared");
+            }
+            break;
         case IDC_BTN_ADD_LAYER:
             endLayerEdit(true);
             addLayer();
@@ -1345,7 +1478,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             if (!layers.empty() && layers[0].act_type == Layer::Activation::RELU) actIdx = 1;
 
                             syncUIConfig(netType, arch, inputDim, outputDim, hiddenDims,
-                                         optIdx, actIdx, g_model.lr, ep, bt);
+                                         optIdx, actIdx, g_model.lr, ep, bt,
+                                         true, 50, 0.1,
+                                         g_model.dropout_rate > 0, g_model.dropout_rate,
+                                         g_model.l2_lambda > 0, g_model.l2_lambda,
+                                         g_model.test_split > 0, g_model.test_split);
                         }
                     } catch (...) {
                         char msg[512];

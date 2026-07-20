@@ -2013,7 +2013,8 @@ std::string generate_text(MLP& network, TextProcessor& tp,
 Model::Model(MLP net, const std::string& loss_fn,
              const std::string& optimizer_name, double lr_,
              const std::string& task_)
-    : network(std::move(net)), lr(lr_), trained(false)
+    : network(std::move(net)), lr(lr_),
+      dropout_rate(0.0), l2_lambda(0.0), test_split(0.0), trained(false)
 {
     // 自动推断 task
     if (task_ == "auto" && !network.layers.empty()) {
@@ -2117,34 +2118,49 @@ void Model::fit(const Dataset& data, int epochs, int batch_size,
                 LRScheduler* lr_scheduler, double grad_clip) {
     Dataset train_set = data;
     Dataset val_set;
+    Dataset test_set;
 
     if (val_data) {
         val_set = *val_data;
-    } else if (val_split > 0) {
-        auto splits = split_data(train_set, val_split, 0.0);
+    } else if (val_split > 0 || test_split > 0) {
+        auto splits = split_data(train_set, val_split, test_split);
         train_set = splits.splits[0];
         val_set = splits.splits[1];
+        test_set = splits.splits[2];
     }
 
     if (batch_size <= 0) batch_size = (int)train_set.size();
 
     train_history.clear();
     val_history.clear();
+    test_history.clear();
     trained = false;
     double best_val = DBL_MAX;
     int no_improve = 0;
+
+    // 创建 Dropout 层（每个隐藏层一个）
+    int n_layers = (int)network.layers.size();
+    std::vector<Dropout> dops;
+    if (dropout_rate > 0) {
+        for (int li = 0; li < n_layers - 1; ++li)
+            dops.emplace_back(dropout_rate);
+    }
+    bool use_dropout = !dops.empty();
 
     for (int epoch = 1; epoch <= epochs; ++epoch) {
         if (shuffle)
             std::shuffle(train_set.begin(), train_set.end(), rng());
 
+        // 设置 dropout 为训练模式
+        for (auto& d : dops) d.training = true;
+
         double train_loss = 0.0;
         for (int b = 0; b < (int)train_set.size(); b += batch_size) {
             int end = std::min(b + batch_size, (int)train_set.size());
             int B = end - b;
-            std::vector<Vec2D> all_gw(network.layers.size());
-            std::vector<Vec> all_gb(network.layers.size());
-            for (size_t li = 0; li < network.layers.size(); ++li) {
+            std::vector<Vec2D> all_gw(n_layers);
+            std::vector<Vec> all_gb(n_layers);
+            for (int li = 0; li < n_layers; ++li) {
                 all_gw[li].assign(network.layers[li].fan_out,
                     Vec(network.layers[li].fan_in, 0.0));
                 all_gb[li].assign(network.layers[li].fan_out, 0.0);
@@ -2152,11 +2168,19 @@ void Model::fit(const Dataset& data, int epochs, int batch_size,
 
             for (int k = b; k < end; ++k) {
                 auto& [xi, yi] = train_set[k];
-                Vec pred = forward(xi);
+
+                // === Forward 逐层 + Dropout ===
+                Vec act = xi;
+                for (int li = 0; li < n_layers; ++li) {
+                    act = network.layers[li].forward(act);
+                    if (use_dropout && li < n_layers - 1)
+                        act = dops[li].forward(act);
+                }
+                Vec pred = act;
+
                 double loss;
                 Vec grad;
                 if (task == "classification") {
-                    // yi[0] is the class index for classification via Dataset
                     int label = (int)yi[0];
                     auto [l, g] = cross_entropy_loss(pred, label);
                     loss = l; grad = g;
@@ -2166,9 +2190,12 @@ void Model::fit(const Dataset& data, int epochs, int batch_size,
                 }
                 train_loss += loss;
 
-                // 反向传播
+                // === Backward 逐层 + Dropout + L2 ===
                 Vec delta = grad;
-                for (int li = (int)network.layers.size() - 1; li >= 0; --li) {
+                for (int li = n_layers - 1; li >= 0; --li) {
+                    if (use_dropout && li < n_layers - 1)
+                        delta = dops[li].backward(delta);
+
                     auto [gw, gb, d] = network.layers[li].backward(delta);
                     for (int j = 0; j < network.layers[li].fan_out; ++j) {
                         for (int kk = 0; kk < network.layers[li].fan_in; ++kk)
@@ -2179,16 +2206,22 @@ void Model::fit(const Dataset& data, int epochs, int batch_size,
                 }
             }
 
-            // 平均梯度
+            // 平均梯度 + L2 权重衰减 + 梯度裁剪
             std::vector<GradPair> avg_grads;
-            for (size_t li = 0; li < all_gw.size(); ++li) {
+            for (int li = 0; li < n_layers; ++li) {
                 for (auto& row : all_gw[li])
                     for (auto& v : row) v /= B;
                 for (auto& v : all_gb[li]) v /= B;
+
+                // L2 正则化：对权重梯度添加 l2_lambda * w
+                if (l2_lambda > 0) {
+                    for (int j = 0; j < network.layers[li].fan_out; ++j)
+                        for (int kk = 0; kk < network.layers[li].fan_in; ++kk)
+                            all_gw[li][j][kk] += l2_lambda * network.layers[li].weights[j][kk];
+                }
                 avg_grads.push_back({all_gw[li], all_gb[li]});
             }
 
-            // 梯度裁剪
             if (grad_clip > 0) clip_grad_by_norm(avg_grads, grad_clip);
             optimizer->step(avg_grads);
         }
@@ -2222,6 +2255,29 @@ void Model::fit(const Dataset& data, int epochs, int batch_size,
             std::cout << "\n";
         }
     }
+
+    // === 测试集评估 ===
+    if (!test_set.empty()) {
+        // 推理时关闭 dropout
+        for (auto& d : dops) d.training = false;
+        double test_l = evaluate(test_set);
+        test_history.push_back({(int)train_history.size(), test_l});
+        if (verbose) {
+            std::cout << "\n--- Test Set Evaluation ---\n"
+                      << "  Test samples: " << test_set.size() << "\n"
+                      << "  Test loss: " << test_l << "\n";
+            if (task == "classification") {
+                int correct = 0;
+                for (auto& [xi, yi] : test_set) {
+                    Vec pred_t = forward(xi);
+                    int pred_cls = (int)(std::max_element(pred_t.begin(), pred_t.end()) - pred_t.begin());
+                    if (pred_cls == (int)yi[0]) ++correct;
+                }
+                std::cout << "  Test accuracy: " << 100.0 * correct / test_set.size() << "%\n";
+            }
+        }
+    }
+
     trained = true;
 }
 
@@ -2252,9 +2308,10 @@ void Model::fit(const std::vector<Vec>& x, const std::vector<int>& y,
 // === Save / Load ===
 void Model::save(const std::string& filepath, int epochs, int batch) {
     std::ofstream f(filepath);
-    // 新格式：CONFIG: task loss_name opt_name lr epochs batch
+    // 新格式：CONFIG: task loss_name opt_name lr epochs batch dropout l2 test_split
     f << "CONFIG: " << task << " " << loss_name << " " << opt_name << " "
-      << lr << " " << epochs << " " << batch << "\n";
+      << lr << " " << epochs << " " << batch << " "
+      << dropout_rate << " " << l2_lambda << " " << test_split << "\n";
     // 层数和每层结构
     f << network.layers.size() << "\n";
     for (size_t li = 0; li < network.layers.size(); ++li) {
@@ -2298,13 +2355,20 @@ Model Model::load(const std::string& filepath, const std::string& loss_fn,
     std::string opt_name_loaded = optimizer_name;
     double lr_loaded = lr_;
     int epochs_loaded = -1, batch_loaded = -1;
+    double dropout_loaded = 0.0, l2_loaded = 0.0, test_split_loaded = 0.0;
 
     bool is_new_format = (first_line.rfind("CONFIG:", 0) == 0);
     if (is_new_format) {
-        // 解析 CONFIG: task loss_name opt_name lr epochs batch
+        // 解析 CONFIG: task loss_name opt_name lr epochs batch dropout l2 test_split
         std::istringstream iss(first_line.substr(7));
         iss >> task_str >> loss_name_loaded >> opt_name_loaded >> lr_loaded;
-        if (iss >> epochs_loaded) iss >> batch_loaded;
+        if (iss >> epochs_loaded) {
+            iss >> batch_loaded;
+            // 尝试读取可选字段
+            iss >> dropout_loaded;
+            iss >> l2_loaded;
+            iss >> test_split_loaded;
+        }
     }
 
     int num_layers;
@@ -2359,6 +2423,9 @@ Model Model::load(const std::string& filepath, const std::string& loss_fn,
     }
     // 用文件中的配置构造 Model
     Model m(mlp, loss_name_loaded, opt_name_loaded, lr_loaded, task_str);
+    m.dropout_rate = dropout_loaded;
+    m.l2_lambda = l2_loaded;
+    m.test_split = test_split_loaded;
     if (out_epochs) *out_epochs = epochs_loaded;
     if (out_batch) *out_batch = batch_loaded;
     return m;
@@ -2368,8 +2435,10 @@ void Model::summary() {
     std::cout << "==================================================\n"
               << "  Model (" << task << ")\n"
               << "  Loss: " << loss_name << "  |  Optimizer: "
-              << opt_name << "(lr=" << lr << ")\n"
-              << "==================================================\n";
+              << opt_name << "(lr=" << lr << ")\n";
+    if (dropout_rate > 0) std::cout << "  Dropout: " << dropout_rate << "\n";
+    if (l2_lambda > 0) std::cout << "  L2 Lambda: " << l2_lambda << "\n";
+    std::cout << "==================================================\n";
     int total = 0;
     for (size_t i = 0; i < network.layers.size(); ++i) {
         auto& L = network.layers[i];

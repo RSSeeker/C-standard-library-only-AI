@@ -594,13 +594,17 @@ public:
     std::string opt_name;     // "adam", "sgd", etc.
     std::unique_ptr<Optimizer> optimizer;
     double lr;
+    double dropout_rate;
+    double l2_lambda;
+    double test_split;
     bool trained;
 
     // History: [(epoch, train_loss), ...]
     std::vector<std::pair<int, double>> train_history;
     std::vector<std::pair<int, double>> val_history;
+    std::vector<std::pair<int, double>> test_history;
 
-    Model() = default;
+    Model() : dropout_rate(0.0), l2_lambda(0.0), test_split(0.0) {}
 
     // loss_fn: "mse" | "cross_entropy" | "ce"
     // optimizer_name: "adam" | "sgd" | "sgd_momentum" | "rmsprop"
