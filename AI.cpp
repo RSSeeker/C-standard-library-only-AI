@@ -2250,8 +2250,12 @@ void Model::fit(const std::vector<Vec>& x, const std::vector<int>& y,
 }
 
 // === Save / Load ===
-void Model::save(const std::string& filepath) {
+void Model::save(const std::string& filepath, int epochs, int batch) {
     std::ofstream f(filepath);
+    // 新格式：CONFIG: task loss_name opt_name lr epochs batch
+    f << "CONFIG: " << task << " " << loss_name << " " << opt_name << " "
+      << lr << " " << epochs << " " << batch << "\n";
+    // 层数和每层结构
     f << network.layers.size() << "\n";
     for (size_t li = 0; li < network.layers.size(); ++li) {
         auto& L = network.layers[li];
@@ -2260,7 +2264,7 @@ void Model::save(const std::string& filepath) {
         if (L.act_type == Layer::Activation::SOFTMAX)  act_str = "softmax";
         if (L.act_type == Layer::Activation::LINEAR)   act_str = "linear";
         f << L.fan_in << " " << L.fan_out << " " << act_str << "\n";
-        // 权重：每行 fan_out 行，每行 fan_in 个数（空格分隔）
+        // 权重
         for (int j = 0; j < L.fan_out; ++j) {
             for (int k = 0; k < L.fan_in; ++k) {
                 if (k > 0) f << " ";
@@ -2280,13 +2284,34 @@ void Model::save(const std::string& filepath) {
 }
 
 Model Model::load(const std::string& filepath, const std::string& loss_fn,
-                  const std::string& optimizer_name, double lr_) {
+                  const std::string& optimizer_name, double lr_,
+                  int* out_epochs, int* out_batch) {
     std::ifstream f(filepath);
     if (!f.is_open())
         throw std::runtime_error("Cannot open file: " + filepath);
 
+    std::string first_line;
+    std::getline(f, first_line);
+
+    std::string task_str = "regression";
+    std::string loss_name_loaded = loss_fn;
+    std::string opt_name_loaded = optimizer_name;
+    double lr_loaded = lr_;
+    int epochs_loaded = -1, batch_loaded = -1;
+
+    bool is_new_format = (first_line.rfind("CONFIG:", 0) == 0);
+    if (is_new_format) {
+        // 解析 CONFIG: task loss_name opt_name lr epochs batch
+        std::istringstream iss(first_line.substr(7));
+        iss >> task_str >> loss_name_loaded >> opt_name_loaded >> lr_loaded;
+        if (iss >> epochs_loaded) iss >> batch_loaded;
+    }
+
     int num_layers;
-    f >> num_layers;
+    if (is_new_format)
+        f >> num_layers;
+    else
+        num_layers = std::stoi(first_line);  // 旧格式：第一行就是层数
 
     std::vector<int> fan_ins, fan_outs;
     std::vector<std::string> acts;
@@ -2332,7 +2357,11 @@ Model Model::load(const std::string& filepath, const std::string& loss_fn,
         l.biases = all_b[i];
         mlp.layers.push_back(l);
     }
-    return Model(mlp, loss_fn, optimizer_name, lr_);
+    // 用文件中的配置构造 Model
+    Model m(mlp, loss_name_loaded, opt_name_loaded, lr_loaded, task_str);
+    if (out_epochs) *out_epochs = epochs_loaded;
+    if (out_batch) *out_batch = batch_loaded;
+    return m;
 }
 
 void Model::summary() {

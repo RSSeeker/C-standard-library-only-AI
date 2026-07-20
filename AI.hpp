@@ -635,11 +635,13 @@ public:
              int patience = 50, bool verbose = true,
              LRScheduler* lr_scheduler = nullptr, double grad_clip = 0.0);
 
-    void save(const std::string& filepath);
+    void save(const std::string& filepath, int epochs = -1, int batch = -1);
     static Model load(const std::string& filepath,
                       const std::string& loss_fn = "mse",
                       const std::string& optimizer_name = "adam",
-                      double lr_ = 0.01);
+                      double lr_ = 0.01,
+                      int* out_epochs = nullptr,
+                      int* out_batch = nullptr);
     void summary();
     std::string to_string() const;
 };
