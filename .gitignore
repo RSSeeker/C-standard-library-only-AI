@@ -6,3 +6,4 @@
 build/
 cls_model.json
 .vscode/
+demo_model.aimodel
