@@ -1634,6 +1634,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         FillRect(hdc, &rc, whiteBr);
         return 1;
     }
+    case WM_GETMINMAXINFO: {
+        // 左侧面板 440 + 间距 20 + 右侧输出最低 200 + 右侧边距 16 = 676
+        // 高度：output 区域最低 100 + 顶部 36 + status 区 ≈ 200
+        MINMAXINFO* mmi = (MINMAXINFO*)lp;
+        mmi->ptMinTrackSize.x = 700;
+        mmi->ptMinTrackSize.y = 400;
+        break;
+    }
     case WM_SIZE: {
         int h = HIWORD(lp);
         // 设置垂直滚动条
