@@ -612,6 +612,43 @@ public:
           const std::string& optimizer_name = "adam", double lr_ = 0.01,
           const std::string& task_ = "auto");
 
+    Model(Model&& other) noexcept
+        : network(std::move(other.network)),
+          task(std::move(other.task)),
+          loss_name(std::move(other.loss_name)),
+          opt_name(std::move(other.opt_name)),
+          optimizer(std::move(other.optimizer)),
+          lr(other.lr),
+          dropout_rate(other.dropout_rate),
+          l2_lambda(other.l2_lambda),
+          test_split(other.test_split),
+          trained(other.trained),
+          train_history(std::move(other.train_history)),
+          val_history(std::move(other.val_history)),
+          test_history(std::move(other.test_history)) {
+        if (optimizer) optimizer->model = &network;
+    }
+
+    Model& operator=(Model&& other) noexcept {
+        if (this != &other) {
+            network = std::move(other.network);
+            task = std::move(other.task);
+            loss_name = std::move(other.loss_name);
+            opt_name = std::move(other.opt_name);
+            optimizer = std::move(other.optimizer);
+            lr = other.lr;
+            dropout_rate = other.dropout_rate;
+            l2_lambda = other.l2_lambda;
+            test_split = other.test_split;
+            trained = other.trained;
+            train_history = std::move(other.train_history);
+            val_history = std::move(other.val_history);
+            test_history = std::move(other.test_history);
+            if (optimizer) optimizer->model = &network;
+        }
+        return *this;
+    }
+
     Vec forward(const Vec& x);
     Vec predict_one(const Vec& x);
     std::vector<Vec> predict(const std::vector<Vec>& x);

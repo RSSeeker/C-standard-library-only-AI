@@ -27,6 +27,9 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define CLR_RED        RGB(220, 38, 38)
 #define CLR_INPUT_BG   RGB(243, 244, 246)
 #define CLR_OUTPUT_BG  RGB(248, 249, 250)
+#define CLR_CHART_LINE  RGB(59, 130, 246)
+#define CLR_CHART_VAL   RGB(220, 150, 50)
+#define CLR_CHART_GRID  RGB(230, 232, 235)
 
 // 控件 ID
 #define IDC_OUTPUT          3001
@@ -41,11 +44,10 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 // 示例按钮
 #define IDC_EX_REGRESSION   3201
 #define IDC_EX_CLASSIFY     3202
-#define IDC_EX_SAVELOAD     3203
-#define IDC_EX_GRADCLIP     3204
-#define IDC_EX_QUICKTRAIN   3205
-#define IDC_EX_CNN          3206
-#define IDC_EX_RUNALL       3207
+#define IDC_EX_GRADCLIP     3203
+#define IDC_EX_QUICKTRAIN   3204
+#define IDC_EX_CNN          3205
+#define IDC_EX_RUNALL       3206
 
 // 参数编辑
 #define IDC_EDIT_LR         3301
@@ -167,6 +169,11 @@ int  g_contentH = 0;
 // 左侧面板
 int g_leftPanelW = 440;
 HWND g_hScrollPanel = nullptr;
+
+// 折线图
+RECT g_chartRect = {0,0,0,0};
+std::vector<std::pair<int,double>> g_lossChartTrain;
+std::vector<std::pair<int,double>> g_lossChartVal;
 
 // ============ 默认示例数据 ============
 static void loadDefaultRegData() {
@@ -596,7 +603,173 @@ static void recalcContentHeight() {
     if (g_contentH < 100) g_contentH = 100;
 }
 
-// 重新定位右侧输出/状态区域（它不参与左侧垂直滚动）
+// 绘制 loss 折线图
+static void drawLossChart(HDC hdc, RECT& cr) {
+    if (cr.right - cr.left < 50 || cr.bottom - cr.top < 30) return;
+    int x0 = cr.left, y0 = cr.top, cw = cr.right - cr.left, ch = cr.bottom - cr.top;
+
+    // 保存 DC 原始状态
+    int savedDc = SaveDC(hdc);
+
+    // 背景 + 边框
+    HBRUSH whiteBr = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    FillRect(hdc, &cr, whiteBr);
+    {
+        HPEN borderPen = CreatePen(PS_SOLID, 1, CLR_CHART_GRID);
+        HGDIOBJ oldPen = SelectObject(hdc, borderPen);
+        HGDIOBJ oldBr2 = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        Rectangle(hdc, x0, y0, cr.right, cr.bottom);
+        SelectObject(hdc, oldBr2);
+        SelectObject(hdc, oldPen);
+        DeleteObject(borderPen);
+    }
+
+    // 标题
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, CLR_TEXT_DIM);
+    TextOutA(hdc, x0 + 8, y0 + 4, "Loss Curve", 10);
+
+    // 合并 train + val 数据找范围
+    struct DataPt { int epoch; double loss; };
+    std::vector<DataPt> trainPts, valPts;
+    for (auto& p : g_lossChartTrain) trainPts.push_back({p.first, p.second});
+    for (auto& p : g_lossChartVal)   valPts.push_back({p.first, p.second});
+
+    int totalPts = (int)(trainPts.size() + valPts.size());
+    if (totalPts == 0) {
+        SetTextColor(hdc, CLR_TEXT_DIM);
+        TextOutA(hdc, x0 + 20, y0 + ch/2 - 8, "(loss data after training)", 26);
+        RestoreDC(hdc, savedDc);
+        return;
+    }
+
+    int minEp = 999999, maxEp = -1;
+    double minLoss = 1e18, maxLoss = -1e18;
+    for (auto& d : trainPts) { if (d.epoch < minEp) minEp = d.epoch; if (d.epoch > maxEp) maxEp = d.epoch; if (d.loss < minLoss) minLoss = d.loss; if (d.loss > maxLoss) maxLoss = d.loss; }
+    for (auto& d : valPts)   { if (d.epoch < minEp) minEp = d.epoch; if (d.epoch > maxEp) maxEp = d.epoch; if (d.loss < minLoss) minLoss = d.loss; if (d.loss > maxLoss) maxLoss = d.loss; }
+    if (maxEp == minEp) maxEp = minEp + 1;
+    double lossRange = maxLoss - minLoss;
+    if (lossRange < 1e-8) lossRange = 1.0;
+    minLoss -= lossRange * 0.1;
+    maxLoss += lossRange * 0.1;
+    lossRange = maxLoss - minLoss;
+
+    // 绘图区域边距
+    int marginL = 50, marginR = 24, marginT = 22, marginB = 32;
+    int px0 = x0 + marginL, py0 = y0 + marginT;
+    int pw = cw - marginL - marginR, ph = ch - marginT - marginB;
+    if (pw < 10 || ph < 10) { RestoreDC(hdc, savedDc); return; }
+
+    // 网格线
+    {
+        HPEN gridPen = CreatePen(PS_SOLID, 1, CLR_CHART_GRID);
+        HGDIOBJ oldPen = SelectObject(hdc, gridPen);
+        int gridY = 4;
+        for (int i = 0; i <= gridY; i++) {
+            int y = py0 + ph * i / gridY;
+            MoveToEx(hdc, px0, y, nullptr); LineTo(hdc, px0 + pw, y);
+        }
+        int gridX = 6;
+        for (int i = 0; i <= gridX; i++) {
+            int x = px0 + pw * i / gridX;
+            MoveToEx(hdc, x, py0, nullptr); LineTo(hdc, x, py0 + ph);
+        }
+        SelectObject(hdc, oldPen);
+        DeleteObject(gridPen);
+    }
+
+    // Y 轴标签
+    SetTextColor(hdc, CLR_TEXT_DIM);
+    char buf[32];
+    for (int i = 0; i <= 4; i++) {
+        double v = maxLoss - (maxLoss - minLoss) * i / 4.0;
+        snprintf(buf, sizeof(buf), "%.3f", v);
+        int tw = (int)strlen(buf) * 7;
+        TextOutA(hdc, px0 - tw - 4, py0 + ph * i / 4 - 7, buf, (int)strlen(buf));
+    }
+    // X 轴标签
+    for (int i = 0; i <= 6; i++) {
+        int ep = minEp + (maxEp - minEp) * i / 6;
+        snprintf(buf, sizeof(buf), "%d", ep);
+        int tw = (int)strlen(buf) * 7;
+        TextOutA(hdc, px0 + pw * i / 6 - tw/2, py0 + ph + 5, buf, (int)strlen(buf));
+    }
+
+    auto toScreen = [&](double ep, double loss) -> POINT {
+        POINT pt;
+        pt.x = px0 + (int)((ep - minEp) / (double)(maxEp - minEp) * pw);
+        pt.y = py0 + (int)((maxLoss - loss) / lossRange * ph);
+        return pt;
+    };
+
+    // 绘制 train loss 折线
+    if (!trainPts.empty()) {
+        HPEN trainPen = CreatePen(PS_SOLID, 2, CLR_CHART_LINE);
+        HGDIOBJ oldPen = SelectObject(hdc, trainPen);
+        POINT prev = toScreen((double)trainPts[0].epoch, trainPts[0].loss);
+        MoveToEx(hdc, prev.x, prev.y, nullptr);
+        for (size_t i = 1; i < trainPts.size(); i++) {
+            POINT pt = toScreen((double)trainPts[i].epoch, trainPts[i].loss);
+            LineTo(hdc, pt.x, pt.y);
+        }
+        SelectObject(hdc, oldPen);
+        DeleteObject(trainPen);
+
+        // 数据点小圆
+        if (trainPts.size() <= 100) {
+            HBRUSH ptBr = CreateSolidBrush(CLR_CHART_LINE);
+            HGDIOBJ oldBr = SelectObject(hdc, ptBr);
+            HPEN nullPen = (HPEN)GetStockObject(NULL_PEN);
+            HGDIOBJ oldPen2 = SelectObject(hdc, nullPen);
+            for (auto& d : trainPts) {
+                POINT pt = toScreen((double)d.epoch, d.loss);
+                Ellipse(hdc, pt.x - 2, pt.y - 2, pt.x + 3, pt.y + 3);
+            }
+            SelectObject(hdc, oldPen2);
+            SelectObject(hdc, oldBr);
+            DeleteObject(ptBr);
+        }
+    }
+
+    // 绘制 val loss 折线
+    if (!valPts.empty()) {
+        HPEN valPen = CreatePen(PS_DASH, 2, CLR_CHART_VAL);
+        HGDIOBJ oldPen = SelectObject(hdc, valPen);
+        POINT prev = toScreen((double)valPts[0].epoch, valPts[0].loss);
+        MoveToEx(hdc, prev.x, prev.y, nullptr);
+        for (size_t i = 1; i < valPts.size(); i++) {
+            POINT pt = toScreen((double)valPts[i].epoch, valPts[i].loss);
+            LineTo(hdc, pt.x, pt.y);
+        }
+        SelectObject(hdc, oldPen);
+        DeleteObject(valPen);
+    }
+
+    // 图例
+    int legendY = y0 + ch - 16;
+    {
+        HPEN legTrain = CreatePen(PS_SOLID, 2, CLR_CHART_LINE);
+        HGDIOBJ oldPen = SelectObject(hdc, legTrain);
+        MoveToEx(hdc, x0 + 10, legendY, nullptr); LineTo(hdc, x0 + 30, legendY);
+        SelectObject(hdc, oldPen);
+        DeleteObject(legTrain);
+    }
+    SetTextColor(hdc, CLR_TEXT);
+    TextOutA(hdc, x0 + 34, legendY - 7, "train", 5);
+
+    if (!valPts.empty()) {
+        HPEN legVal = CreatePen(PS_DASH, 2, CLR_CHART_VAL);
+        HGDIOBJ oldPen = SelectObject(hdc, legVal);
+        MoveToEx(hdc, x0 + 75, legendY, nullptr); LineTo(hdc, x0 + 95, legendY);
+        SelectObject(hdc, oldPen);
+        DeleteObject(legVal);
+        TextOutA(hdc, x0 + 99, legendY - 7, "val", 3);
+    }
+
+    RestoreDC(hdc, savedDc);
+}
+
+// 重新定位右侧输出/状态/图表区域（不参与左侧垂直滚动）
 static void layoutRightPanel() {
     if (!g_hWnd || !g_hOutput) return;
     RECT cr;
@@ -605,14 +778,19 @@ static void layoutRightPanel() {
     int h = cr.bottom;
     int rightX = g_leftPanelW + 20;
     int outW = w - rightX - 16;
-    int outH = h - 100;
     if (outW < 200) outW = 200;
-    if (outH < 100) outH = 100;
-    MoveWindow(g_hOutput, rightX, 36, outW, outH, TRUE);
-    MoveWindow(g_hStatus, rightX, outH + 42, outW, 17, TRUE);
-}
 
-// ============ 输入输出层锁定 ============
+    // 输出框占 35%，图表占剩余空间
+    int availH = h - 36 - 24;  // 顶部 36，底部 24 留给 status
+    if (availH < 120) availH = 120;
+    int outH = std::max(80, availH * 33 / 100);
+    int chartTop = 36 + outH + 8;
+    int chartBottom = h - 24;
+    g_chartRect = {rightX, chartTop, rightX + outW, chartBottom};
+
+    MoveWindow(g_hOutput, rightX, 36, outW, outH, TRUE);
+    MoveWindow(g_hStatus, rightX, h - 19, outW, 17, TRUE);
+}
 static void updateInputOutputLock() {
     if (!g_hEditInput || !g_hEditOutput) return;
     int rows = g_hDataList ? (int)ListView_GetItemCount(g_hDataList) : 0;
@@ -862,24 +1040,6 @@ static void runDemo(const std::string& name) {
         std::cout << "  Accuracy: " << 100.0*ok/g_train_x.size() << "%\n";
         g_task = "classification";
         populateDataTable(g_train_x, {}, g_train_y_cls, true);
-    } else if (name == "Save & Load") {
-        syncUIConfig(1, 0, 3, 3, {8,8}, 0, 0, 0.01, 2000, 2);
-        if (!g_trained && g_model.network.layers.empty()) {
-            loadDefaultClsData();
-            g_model = make_classifier(3, 3, {8,8}, "leaky_relu", 0.01);
-            g_model.fit(g_train_x, g_train_y_cls, 2000, 2, 0.2, 30);
-            g_trained = true;
-        }
-        g_model.save("demo_model.aimodel", 2000, 2);
-        Model loaded = Model::load("demo_model.aimodel", "mse", "adam");
-        int ok = 0;
-        for (size_t i = 0; i < g_train_x.size(); ++i) {
-            int p = loaded.predict_class(g_train_x[i]);
-            if (p == g_train_y_cls[i]) ++ok;
-            std::cout << "  pred: " << p << "  actual: " << g_train_y_cls[i]
-                      << "  " << (p == g_train_y_cls[i] ? "OK" : "FAIL") << "\n";
-        }
-        std::cout << "  Accuracy (loaded): " << 100.0*ok/g_train_x.size() << "%\n";
     } else if (name == "Gradient Clip") {
         syncUIConfig(0, 0, 5, 2, {8,8,4}, 0, 0, 0.01, 300, 2);
         loadDefaultRegData();
@@ -889,16 +1049,22 @@ static void runDemo(const std::string& name) {
         std::cout << "  Final loss: " << m.train_history.back().second
                   << "  |  LR: " << m.optimizer->lr << "\n";
         std::cout << "  R^2: " << m.score(g_train_x, g_train_y_real) << "\n";
+        g_model = std::move(m);
+        g_task = "regression";
     } else if (name == "Quick Train") {
         syncUIConfig(0, 0, 5, 2, {16,8}, 0, 0, 0.01, 300, 2);
         loadDefaultRegData();
         Model qr = quick_train(g_train_x, g_train_y_real, "regression", {16,8}, 300, 2);
         std::cout << "  Regression R^2 = " << qr.score(g_train_x, g_train_y_real) << "\n";
+        g_model = std::move(qr);
+        g_task = "regression";
         loadDefaultClsData();
         Model qc = quick_train(g_train_x, g_train_y_cls, {16}, 300, 2);
         std::cout << "  Classification acc = " << qc.score(g_train_x, g_train_y_cls) * 100 << "%\n";
     } else if (name == "CNN") {
         syncUIConfig(1, 1, 4, 2, {}, 0, 0, 0.01, 500, 2);
+        g_model = Model();
+        g_task = "classification";
         Conv2d conv(1, 2, 2, 1);
         MaxPool2d pool(2);
         Flatten flatten;
@@ -958,20 +1124,6 @@ static void runDemo(const std::string& name) {
                 }
                 std::cout << "  Accuracy: " << 100.0*ok/g_train_x.size() << "%\n";
                 g_task = "classification";
-            } else if (subName == "Save & Load") {
-                loadDefaultClsData();
-                g_model = make_classifier(3, 3, {8,8}, "leaky_relu", 0.01);
-                g_model.fit(g_train_x, g_train_y_cls, 2000, 2, 0.2, 30);
-                g_model.save("demo_model.aimodel", 2000, 2);
-                Model loaded = Model::load("demo_model.aimodel", "mse", "adam");
-                int ok = 0;
-                for (size_t i = 0; i < g_train_x.size(); ++i) {
-                    int p = loaded.predict_class(g_train_x[i]);
-                    if (p == g_train_y_cls[i]) ++ok;
-                    std::cout << "  pred: " << p << "  actual: " << g_train_y_cls[i]
-                              << "  " << (p == g_train_y_cls[i] ? "OK" : "FAIL") << "\n";
-                }
-                std::cout << "  Accuracy (loaded): " << 100.0*ok/g_train_x.size() << "%\n";
             } else if (subName == "Gradient Clip") {
                 loadDefaultRegData();
                 Model m = make_regressor(5, 2, {8,8,4}, "leaky_relu", 0.01);
@@ -980,14 +1132,20 @@ static void runDemo(const std::string& name) {
                 std::cout << "  Final loss: " << m.train_history.back().second
                           << "  |  LR: " << m.optimizer->lr << "\n";
                 std::cout << "  R^2: " << m.score(g_train_x, g_train_y_real) << "\n";
+                g_model = std::move(m);
+                g_task = "regression";
             } else if (subName == "Quick Train") {
                 loadDefaultRegData();
                 Model qr = quick_train(g_train_x, g_train_y_real, "regression", {16,8}, 300, 2);
                 std::cout << "  Regression R^2 = " << qr.score(g_train_x, g_train_y_real) << "\n";
+                g_model = std::move(qr);
+                g_task = "regression";
                 loadDefaultClsData();
                 Model qc = quick_train(g_train_x, g_train_y_cls, {16}, 300, 2);
                 std::cout << "  Classification acc = " << qc.score(g_train_x, g_train_y_cls) * 100 << "%\n";
             } else if (subName == "CNN") {
+                g_model = Model();
+                g_task = "classification";
                 Conv2d conv(1, 2, 2, 1);
                 MaxPool2d pool(2);
                 Flatten flatten;
@@ -1016,13 +1174,16 @@ static void runDemo(const std::string& name) {
 
         runSubDemo("Regression");
         runSubDemo("Classification");
-        runSubDemo("Save & Load");
         runSubDemo("Gradient Clip");
         runSubDemo("Quick Train");
         runSubDemo("CNN");
         AppendText(g_hOutput, "\r\n========== ALL DONE ==========\r\n\r\n");
         SendMessage(g_hProgress, PBM_SETPOS, 100, 0);
         SetStatus("All demos completed");
+        // 同步图表
+        g_lossChartTrain = g_model.train_history;
+        g_lossChartVal = g_model.val_history;
+        InvalidateRect(g_hWnd, &g_chartRect, FALSE);
         return;
     }
 
@@ -1031,6 +1192,10 @@ static void runDemo(const std::string& name) {
     g_trained = true;
     SendMessage(g_hProgress, PBM_SETPOS, 100, 0);
     SetStatus(name + " completed");
+    // 同步图表（空历史也会刷新，显示占位文字）
+    g_lossChartTrain = g_model.train_history;
+    g_lossChartVal = g_model.val_history;
+    InvalidateRect(g_hWnd, &g_chartRect, FALSE);
 }
 
 // ============ 自定义绘制颜色 ============
@@ -1251,11 +1416,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         int btnH = 22, exW = fieldW/2 - 4;
         trackBelowLayer(MakeBtn(hwnd, IDC_EX_REGRESSION, "Regression", leftX, y, exW, btnH), y);
         trackBelowLayer(MakeBtn(hwnd, IDC_EX_CLASSIFY, "Classification", leftX+exW+8, y, exW, btnH), y); y += btnH+2;
-        trackBelowLayer(MakeBtn(hwnd, IDC_EX_SAVELOAD, "Save & Load", leftX, y, exW, btnH), y);
-        trackBelowLayer(MakeBtn(hwnd, IDC_EX_GRADCLIP, "Gradient Clip", leftX+exW+8, y, exW, btnH), y); y += btnH+2;
-        trackBelowLayer(MakeBtn(hwnd, IDC_EX_QUICKTRAIN, "Quick Train", leftX, y, exW, btnH), y);
-        trackBelowLayer(MakeBtn(hwnd, IDC_EX_CNN, "CNN", leftX+exW+8, y, exW, btnH), y); y += btnH+2;
-        trackBelowLayer(MakeBtn(hwnd, IDC_EX_RUNALL, "RUN ALL", leftX, y, fieldW, 28), y);
+        trackBelowLayer(MakeBtn(hwnd, IDC_EX_GRADCLIP, "Gradient Clip", leftX, y, exW, btnH), y);
+        trackBelowLayer(MakeBtn(hwnd, IDC_EX_QUICKTRAIN, "Quick Train", leftX+exW+8, y, exW, btnH), y); y += btnH+2;
+        trackBelowLayer(MakeBtn(hwnd, IDC_EX_CNN, "CNN", leftX, y, exW, btnH), y);
+        trackBelowLayer(MakeBtn(hwnd, IDC_EX_RUNALL, "RUN ALL", leftX+exW+8, y, exW, btnH), y); y += btnH+2;
         y += 32;
 
         // ======== 推理 ========
@@ -1400,6 +1564,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (!g_training) {
                 endCellEdit(true);
                 ClearOutput(g_hOutput);
+                g_lossChartTrain.clear();
+                g_lossChartVal.clear();
+                InvalidateRect(hwnd, &g_chartRect, FALSE);
                 g_capture.str(""); g_capture.clear();
                 SendMessage(g_hProgress, PBM_SETMARQUEE, TRUE, 30);
                 SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
@@ -1557,7 +1724,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // 示例
         case IDC_EX_REGRESSION: runDemo("Regression"); break;
         case IDC_EX_CLASSIFY:   runDemo("Classification"); break;
-        case IDC_EX_SAVELOAD:   runDemo("Save & Load"); break;
         case IDC_EX_GRADCLIP:   runDemo("Gradient Clip"); break;
         case IDC_EX_QUICKTRAIN: runDemo("Quick Train"); break;
         case IDC_EX_CNN:        runDemo("CNN"); break;
@@ -1577,6 +1743,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SendMessage(g_hProgress, PBM_SETMARQUEE, FALSE, 0);
         SendMessage(g_hProgress, PBM_SETPOS, 100, 0);
         SetStatus("Training complete");
+        // 同步 loss 历史到图表数据
+        g_lossChartTrain = g_model.train_history;
+        g_lossChartVal   = g_model.val_history;
+        InvalidateRect(hwnd, &g_chartRect, FALSE);
         break;
     case WM_USER_UPDATE_PROGRESS:
         SendMessage(g_hProgress, PBM_SETPOS, (WPARAM)wp, 0);
@@ -1625,6 +1795,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetBkColor(hdc, CLR_INPUT_BG);
         SetTextColor(hdc, CLR_TEXT);
         return (LRESULT)g_hBrushInput;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        if (g_chartRect.right > g_chartRect.left && g_chartRect.bottom > g_chartRect.top) {
+            drawLossChart(hdc, g_chartRect);
+        }
+        EndPaint(hwnd, &ps);
+        break;
     }
     case WM_ERASEBKGND: {
         HDC hdc = (HDC)wp;
@@ -1676,13 +1855,41 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (newPos > maxPos) newPos = maxPos;
         if (newPos != (int)si.nPos) {
             int delta = si.nPos - newPos;
-            ScrollWindowEx(hwnd, 0, delta, NULL, NULL, NULL, NULL,
-                SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
+            // 批量移动左侧面板子控件：先禁用重绘，移动后统一刷新，避免快速滚动错位
+            RECT rcClient;
+            GetClientRect(hwnd, &rcClient);
+            RECT rcLeft = {0, 0, g_leftPanelW + 18, rcClient.bottom};
+
+            std::vector<HWND> leftChildren;
+            for (HWND child = GetWindow(hwnd, GW_CHILD); child;
+                 child = GetWindow(child, GW_HWNDNEXT)) {
+                if (child == g_hOutput || child == g_hStatus) continue;
+                RECT rc;
+                GetWindowRect(child, &rc);
+                MapWindowPoints(HWND_DESKTOP, hwnd, (POINT*)&rc, 2);
+                if (rc.left < g_leftPanelW + 20) {
+                    leftChildren.push_back(child);
+                    SendMessage(child, WM_SETREDRAW, FALSE, 0);
+                }
+            }
+
+            for (HWND child : leftChildren) {
+                RECT rc;
+                GetWindowRect(child, &rc);
+                MapWindowPoints(HWND_DESKTOP, hwnd, (POINT*)&rc, 2);
+                SetWindowPos(child, NULL, rc.left, rc.top + delta, 0, 0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+            }
+
+            for (HWND child : leftChildren) {
+                SendMessage(child, WM_SETREDRAW, TRUE, 0);
+            }
+            RedrawWindow(hwnd, &rcLeft, NULL,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+
             si.nPos = newPos;
             SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
             g_scrollY = newPos;
-            UpdateWindow(hwnd);
-            layoutRightPanel();  // 右侧面板不参与滚动，移回正确位置
         }
         break;
     }

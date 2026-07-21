@@ -2248,7 +2248,8 @@ void Model::fit(const Dataset& data, int epochs, int batch_size,
 
         if (lr_scheduler) lr_scheduler->step(epoch);
 
-        if (verbose && epoch % std::max(1, epochs / 10) == 0) {
+        int report_every = std::max(1, std::min(epochs / 10, 50));
+        if (verbose && (epoch == 1 || epoch % report_every == 0 || epoch == epochs)) {
             std::cout << "Epoch " << epoch << "/" << epochs
                       << " | loss=" << std::fixed << std::setprecision(6) << train_loss;
             if (val_l >= 0) std::cout << " | val_loss=" << val_l;
