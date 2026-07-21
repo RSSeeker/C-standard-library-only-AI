@@ -1849,7 +1849,17 @@ SplitResult split_data(const Dataset& data, double val_ratio,
 
     int n = (int)shuffled.size();
     int n_test = (int)(n * test_ratio);
-    int n_val = (int)(n * val_ratio);
+    int n_val  = (int)(n * val_ratio);
+
+    // 对小数据集：保证至少 1 个样本到 val/test（如果 ratio > 0 且样本充足）
+    if (n_test == 0 && test_ratio > 0 && n >= 3) n_test = 1;
+    if (n_val  == 0 && val_ratio  > 0 && n >= (n_test + 2)) n_val = 1;
+    // 确保 train_set 至少还有 1 个样本
+    if (n_test + n_val >= n) {
+        if (n_test > 0 && n_val > 0) { n_val = n - n_test - 1; if (n_val < 1) n_val = 1; }
+        else if (n_val > 0) n_val = n - 1;
+        else if (n_test > 0) n_test = n - 1;
+    }
 
     SplitResult result;
     result.splits.resize(3);
@@ -2066,15 +2076,22 @@ std::vector<int> Model::predict_classes(const std::vector<Vec>& x) {
 
 double Model::evaluate(const Dataset& data) {
     double total = 0.0;
+    int n = 0;
     for (auto& [xi, yi] : data) {
         Vec pred = forward(xi);
-        if (loss_name == "mse" || loss_name == "ce") {
-            auto [loss, _] = (loss_name == "mse")
-                ? mse_loss(pred, yi) : cross_entropy_loss_vec(pred, yi);
+        if (loss_name == "mse") {
+            auto [loss, _] = mse_loss(pred, yi);
             total += loss;
+            n++;
+        } else if (loss_name == "cross_entropy" || loss_name == "ce") {
+            // 分类：yi 是 Vec(1, label)，用整数 label 版交叉熵
+            int label = std::max(0, std::min((int)pred.size() - 1, (int)yi[0]));
+            auto [loss, _] = cross_entropy_loss(pred, label);
+            total += loss;
+            n++;
         }
     }
-    return total / std::max(1, (int)data.size());
+    return total / std::max(1, n);
 }
 
 double Model::evaluate(const std::vector<Vec>& x, const std::vector<Vec>& y) {

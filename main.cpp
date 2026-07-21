@@ -105,6 +105,9 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define WM_USER_UPDATE_PROGRESS (WM_USER + 102)
 #define WM_USER_EDIT_CELL       (WM_USER + 103)
 
+// 图表实时更新定时器
+#define IDT_CHART_UPDATE        201
+
 // ============ 全局状态 ============
 HINSTANCE g_hInst   = nullptr;
 HWND      g_hWnd    = nullptr;
@@ -174,6 +177,9 @@ HWND g_hScrollPanel = nullptr;
 RECT g_chartRect = {0,0,0,0};
 std::vector<std::pair<int,double>> g_lossChartTrain;
 std::vector<std::pair<int,double>> g_lossChartVal;
+int g_chartHoverEpoch = -1;       // 鼠标悬停对应的 epoch，-1 表示未悬停
+double g_chartHoverTrainLoss = 0;
+double g_chartHoverValLoss = -1;  // -1 表示无 val 数据点
 
 // ============ 默认示例数据 ============
 static void loadDefaultRegData() {
@@ -270,8 +276,8 @@ static int readInt(int id, int def = 0) {
 static int readSeed() {
     char buf[64];
     GetWindowTextA(GetDlgItem(g_hWnd, IDC_EDIT_SEED), buf, 64);
-    if (buf[0] == 0) return rand();
-    try { return std::stoi(buf); } catch (...) { return rand(); }
+    if (buf[0] == 0) return (int)std::random_device{}();
+    try { return std::stoi(buf); } catch (...) { return (int)std::random_device{}(); }
 }
 static std::string readStr(int id, const char* def = "") {
     char buf[512];
@@ -678,6 +684,19 @@ static void drawLossChart(HDC hdc, RECT& cr) {
         DeleteObject(gridPen);
     }
 
+    // loss=0 参考线（如果 0 在可视范围内）
+    if (minLoss < 0 && maxLoss > 0) {
+        HPEN zeroPen = CreatePen(PS_DOT, 1, RGB(180, 180, 180));
+        HGDIOBJ oldPen = SelectObject(hdc, zeroPen);
+        int zy = py0 + (int)(maxLoss / lossRange * ph);
+        MoveToEx(hdc, px0, zy, nullptr); LineTo(hdc, px0 + pw, zy);
+        SelectObject(hdc, oldPen);
+        DeleteObject(zeroPen);
+        // 标注 "0"
+        SetTextColor(hdc, RGB(160, 160, 160));
+        TextOutA(hdc, px0 - 16, zy - 7, "0", 1);
+    }
+
     // Y 轴标签
     SetTextColor(hdc, CLR_TEXT_DIM);
     char buf[32];
@@ -764,6 +783,34 @@ static void drawLossChart(HDC hdc, RECT& cr) {
         SelectObject(hdc, oldPen);
         DeleteObject(legVal);
         TextOutA(hdc, x0 + 99, legendY - 7, "val", 3);
+    }
+
+    // === 悬停提示 ===
+    if (g_chartHoverEpoch >= 0 && totalPts > 0) {
+        POINT cursorPt = toScreen((double)g_chartHoverEpoch, 0);
+        int vx = cursorPt.x;
+        // 垂直指示线
+        HPEN hovPen = CreatePen(PS_DOT, 1, RGB(150, 150, 160));
+        HGDIOBJ oldPen = SelectObject(hdc, hovPen);
+        MoveToEx(hdc, vx, py0, nullptr); LineTo(hdc, vx, py0 + ph);
+        SelectObject(hdc, oldPen);
+        DeleteObject(hovPen);
+
+        // 构造文字
+        char tipBuf[128];
+        int lines = 0;
+        snprintf(tipBuf, sizeof(tipBuf), "epoch=%d", g_chartHoverEpoch);
+        TextOutA(hdc, vx + 5, py0 + 2, tipBuf, (int)strlen(tipBuf));
+        lines++;
+        snprintf(tipBuf, sizeof(tipBuf), "train=%.4f", g_chartHoverTrainLoss);
+        TextOutA(hdc, vx + 5, py0 + 2 + lines * 15, tipBuf, (int)strlen(tipBuf));
+        lines++;
+        if (g_chartHoverValLoss >= 0) {
+            SetTextColor(hdc, CLR_CHART_VAL);
+            snprintf(tipBuf, sizeof(tipBuf), "val=%.4f", g_chartHoverValLoss);
+            TextOutA(hdc, vx + 5, py0 + 2 + lines * 15, tipBuf, (int)strlen(tipBuf));
+            SetTextColor(hdc, CLR_TEXT);
+        }
     }
 
     RestoreDC(hdc, savedDc);
@@ -1570,6 +1617,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_capture.str(""); g_capture.clear();
                 SendMessage(g_hProgress, PBM_SETMARQUEE, TRUE, 30);
                 SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
+                SetTimer(hwnd, IDT_CHART_UPDATE, 200, nullptr);
                 g_hThread = CreateThread(nullptr, 0, TrainThread, nullptr, 0, nullptr);
                 SetStatus("Training started...");
             }
@@ -1731,12 +1779,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     }
+    case WM_TIMER:
+        if (wp == IDT_CHART_UPDATE && g_training) {
+            bool changed = false;
+            if ((int)g_model.train_history.size() != (int)g_lossChartTrain.size()) {
+                g_lossChartTrain = g_model.train_history;
+                changed = true;
+            }
+            if ((int)g_model.val_history.size() != (int)g_lossChartVal.size()) {
+                g_lossChartVal = g_model.val_history;
+                changed = true;
+            }
+            if (changed) InvalidateRect(hwnd, &g_chartRect, FALSE);
+        }
+        break;
     case WM_USER_UPDATE_OUTPUT: {
         std::string* s = (std::string*)lp;
         if (s) { AppendText(g_hOutput, *s); delete s; }
         break;
     }
     case WM_USER_TRAINING_DONE:
+        KillTimer(hwnd, IDT_CHART_UPDATE);
         g_training = false;
         g_trained = true;
         if (g_hThread) { CloseHandle(g_hThread); g_hThread = nullptr; }
@@ -1819,6 +1882,56 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         MINMAXINFO* mmi = (MINMAXINFO*)lp;
         mmi->ptMinTrackSize.x = 700;
         mmi->ptMinTrackSize.y = 400;
+        break;
+    }
+    case WM_MOUSEMOVE: {
+        int mx = LOWORD(lp), my = HIWORD(lp);
+        int prevEpoch = g_chartHoverEpoch;
+        if (mx >= g_chartRect.left && mx <= g_chartRect.right &&
+            my >= g_chartRect.top && my <= g_chartRect.bottom) {
+            int total = (int)(g_lossChartTrain.size() + g_lossChartVal.size());
+            if (total > 0) {
+                int minEp = 999999, maxEp = -1;
+                for (auto& p : g_lossChartTrain) {
+                    if (p.first < minEp) minEp = p.first;
+                    if (p.first > maxEp) maxEp = p.first;
+                }
+                for (auto& p : g_lossChartVal) {
+                    if (p.first < minEp) minEp = p.first;
+                    if (p.first > maxEp) maxEp = p.first;
+                }
+                if (maxEp == minEp) maxEp = minEp + 1;
+
+                int marginL = 50, marginR = 24;
+                int cw = g_chartRect.right - g_chartRect.left;
+                int pw = cw - marginL - marginR;
+                int px0 = g_chartRect.left + marginL;
+
+                double epochF = minEp + (mx - px0) * (double)(maxEp - minEp) / std::max(1, pw);
+                int nearestEp = (int)std::round(epochF);
+                if (nearestEp < minEp) nearestEp = minEp;
+                if (nearestEp > maxEp) nearestEp = maxEp;
+
+                g_chartHoverTrainLoss = 0;
+                double bestDist = 1e18;
+                for (auto& p : g_lossChartTrain) {
+                    double d = std::abs(p.first - nearestEp);
+                    if (d < bestDist) { bestDist = d; g_chartHoverTrainLoss = p.second; }
+                }
+                g_chartHoverValLoss = -1;
+                bestDist = 1e18;
+                for (auto& p : g_lossChartVal) {
+                    double d = std::abs(p.first - nearestEp);
+                    if (d < bestDist) { bestDist = d; g_chartHoverValLoss = p.second; }
+                }
+                g_chartHoverEpoch = nearestEp;
+            }
+        } else {
+            g_chartHoverEpoch = -1;
+        }
+        if (prevEpoch != g_chartHoverEpoch) {
+            InvalidateRect(hwnd, &g_chartRect, FALSE);
+        }
         break;
     }
     case WM_SIZE: {
