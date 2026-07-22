@@ -16,6 +16,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup MinGW-w64
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+
       - name: Compile with MinGW
         run: |
           g++ -std=c++17 -O2 -Wall -mwindows -static -o ai.exe main.cpp AI.cpp -lcomctl32
