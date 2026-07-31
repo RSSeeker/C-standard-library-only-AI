@@ -962,6 +962,8 @@ static DWORD WINAPI TrainThread(LPVOID param) {
 
 // ============ 快速 Demo ============
 
+static void runDemo(const std::string& name);
+
 static DWORD WINAPI DemoThread(LPVOID param) {
     std::string* name = (std::string*)param;
     runDemo(*name);
