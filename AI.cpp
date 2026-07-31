@@ -2165,6 +2165,10 @@ void Model::fit(const Dataset& data, int epochs, int batch_size,
     bool use_dropout = !dops.empty();
 
     for (int epoch = 1; epoch <= epochs; ++epoch) {
+        if (stop_flag && stop_flag->load()) {
+            if (verbose) std::cout << "Training stopped by user at epoch " << epoch << "\n";
+            break;
+        }
         if (shuffle)
             std::shuffle(train_set.begin(), train_set.end(), rng());
 
@@ -2244,12 +2248,18 @@ void Model::fit(const Dataset& data, int epochs, int batch_size,
         }
 
         train_loss /= train_set.size();
-        train_history.push_back({epoch, train_loss});
+        {
+            std::lock_guard<std::mutex> lock(history_mutex);
+            train_history.push_back({epoch, train_loss});
+        }
 
         double val_l = -1;
         if (!val_set.empty()) {
             val_l = evaluate(val_set);
-            val_history.push_back({epoch, val_l});
+            {
+                std::lock_guard<std::mutex> lock(history_mutex);
+                val_history.push_back({epoch, val_l});
+            }
 
             if (patience > 0) {
                 if (val_l < best_val - 1e-12) {
@@ -2279,7 +2289,10 @@ void Model::fit(const Dataset& data, int epochs, int batch_size,
         // 推理时关闭 dropout
         for (auto& d : dops) d.training = false;
         double test_l = evaluate(test_set);
-        test_history.push_back({(int)train_history.size(), test_l});
+        {
+            std::lock_guard<std::mutex> lock(history_mutex);
+            test_history.push_back({(int)train_history.size(), test_l});
+        }
         if (verbose) {
             std::cout << "\n--- Test Set Evaluation ---\n"
                       << "  Test samples: " << test_set.size() << "\n"

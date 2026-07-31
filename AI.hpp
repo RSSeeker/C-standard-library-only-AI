@@ -32,6 +32,8 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <set>
+#include <mutex>
+#include <atomic>
 
 namespace ai {
 
@@ -603,6 +605,9 @@ public:
     std::vector<std::pair<int, double>> train_history;
     std::vector<std::pair<int, double>> val_history;
     std::vector<std::pair<int, double>> test_history;
+
+    mutable std::mutex history_mutex;
+    std::atomic<bool>* stop_flag = nullptr;
 
     Model() : dropout_rate(0.0), l2_lambda(0.0), test_split(0.0) {}
 

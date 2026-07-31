@@ -8,6 +8,8 @@
 #include <vector>
 #include <map>
 #include <ctime>
+#include <atomic>
+#include <mutex>
 
 using namespace ai;
 
@@ -104,6 +106,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define WM_USER_TRAINING_DONE   (WM_USER + 101)
 #define WM_USER_UPDATE_PROGRESS (WM_USER + 102)
 #define WM_USER_EDIT_CELL       (WM_USER + 103)
+#define WM_USER_DEMO_DONE       (WM_USER + 104)
 
 // 图表实时更新定时器
 #define IDT_CHART_UPDATE        201
@@ -122,7 +125,9 @@ HFONT     g_hFontGrid  = nullptr;
 // 训练状态
 Model     g_model;
 bool      g_trained  = false;
-bool      g_training = false;
+std::atomic<bool> g_training{false};
+std::atomic<bool> g_stopRequested{false};
+std::atomic<bool> g_demoRunning{false};
 HANDLE    g_hThread  = nullptr;
 std::string g_task = "regression";
 
@@ -280,8 +285,8 @@ static int readSeed() {
     try { return std::stoi(buf); } catch (...) { return (int)std::random_device{}(); }
 }
 static std::string readStr(int id, const char* def = "") {
-    char buf[512];
-    GetWindowTextA(GetDlgItem(g_hWnd, id), buf, 512);
+    char buf[4096];
+    GetWindowTextA(GetDlgItem(g_hWnd, id), buf, 4096);
     return buf[0] ? std::string(buf) : std::string(def);
 }
 static int comboIdx(int id) {
@@ -847,97 +852,79 @@ static void updateInputOutputLock() {
 }
 
 // ============ 训练线程 ============
-DWORD WINAPI TrainThread(LPVOID) {
+
+struct TrainParams {
+    std::string netType;
+    double lr;
+    int epochs;
+    int batch;
+    int inputDim;
+    int outputDim;
+    bool useEarlyStop;
+    int patience;
+    double valSplit;
+    bool useDropout;
+    double dropoutP;
+    bool useL2;
+    double l2Lambda;
+    bool useTestSplit;
+    double testSplit;
+    std::string optName;
+    std::string actName;
+    std::vector<Vec> train_x;
+    std::vector<Vec> train_y_real;
+    std::vector<int> train_y_cls;
+    bool has_custom_data;
+    std::vector<int> hidden;
+    unsigned seed;
+};
+
+static DWORD WINAPI TrainThread(LPVOID param) {
+    TrainParams* tp = (TrainParams*)param;
+
     g_training = true;
-    seed(readSeed());
+    seed(tp->seed);
     BeginCapture();
 
-    std::string netType = "regression";
-    {
-        int idx = comboIdx(IDC_CBO_NETTYPE);
-        if (idx == 1) netType = "classification";
-    }
+    g_train_x = tp->train_x;
+    g_train_y_real = tp->train_y_real;
+    g_train_y_cls = tp->train_y_cls;
+    g_has_custom_data = tp->has_custom_data;
 
-    double lr = readDouble(IDC_EDIT_LR, 0.01);
-    int epochs = readInt(IDC_EDIT_EPOCHS, 500);
-    int batch = readInt(IDC_EDIT_BATCH, 16);
-    int inputDim = readInt(IDC_EDIT_INPUT, 1);
-    int outputDim = readInt(IDC_EDIT_OUTPUT, 1);
-
-    // 早停参数
-    bool useEarlyStop = (SendMessageA(GetDlgItem(g_hWnd, IDC_CHECK_EARLYSTOP), BM_GETCHECK, 0, 0) == BST_CHECKED);
-    int patience = useEarlyStop ? readInt(IDC_EDIT_PATIENCE, 50) : 0;
-    double valSplit = readDouble(IDC_EDIT_VALSPLIT, 0.1);
-    if (valSplit <= 0) valSplit = 0.1;
-
-    // Dropout
-    bool useDropout = (SendMessageA(GetDlgItem(g_hWnd, IDC_CHECK_DROPOUT), BM_GETCHECK, 0, 0) == BST_CHECKED);
-    double dropoutP = useDropout ? readDouble(IDC_EDIT_DROPOUT, 0.3) : 0.0;
-    if (dropoutP < 0) dropoutP = 0.0;
-    if (dropoutP > 0.9) dropoutP = 0.9;
-
-    // L2 正则化
-    bool useL2 = (SendMessageA(GetDlgItem(g_hWnd, IDC_CHECK_L2), BM_GETCHECK, 0, 0) == BST_CHECKED);
-    double l2Lambda = useL2 ? readDouble(IDC_EDIT_L2, 0.0001) : 0.0;
-
-    // 测试集
-    bool useTestSplit = (SendMessageA(GetDlgItem(g_hWnd, IDC_CHECK_TESTSPLIT), BM_GETCHECK, 0, 0) == BST_CHECKED);
-    double testSplit = useTestSplit ? readDouble(IDC_EDIT_TESTSPLIT, 0.1) : 0.0;
-    if (testSplit < 0) testSplit = 0.0;
-    if (testSplit > 0.5) testSplit = 0.5;
-
-    std::string optName = "adam";
-    {
-        int idx = comboIdx(IDC_CBO_OPTIMIZER);
-        if (idx == 1) optName = "sgd";
-        else if (idx == 2) optName = "sgd_momentum";
-        else if (idx == 3) optName = "rmsprop";
-    }
-
-    std::string actName = "leaky_relu";
-    {
-        int idx = comboIdx(IDC_CBO_ACTIVATION);
-        if (idx == 1) actName = "relu";
-    }
-
-    // 从表格读取数据
-    readDataFromTable();
-    auto hidden = getLayerDims();
-
-    if (!g_has_custom_data || g_train_x.empty()) {
+    if (!tp->has_custom_data || g_train_x.empty()) {
         loadDefaultRegData();
-        if (netType == "classification") {
+        if (tp->netType == "classification") {
             loadDefaultClsData();
-            inputDim = 3; outputDim = 3;
-            hidden = {16};
         }
+        tp->hidden = {16};
     }
 
-    if (netType == "regression") {
-        g_model = make_regressor(inputDim, outputDim, hidden, actName, lr, optName);
+    if (tp->netType == "regression") {
+        g_model = make_regressor(tp->inputDim, tp->outputDim, tp->hidden, tp->actName, tp->lr, tp->optName);
     } else {
-        g_model = make_classifier(inputDim, outputDim, hidden, actName, lr, optName);
+        g_model = make_classifier(tp->inputDim, tp->outputDim, tp->hidden, tp->actName, tp->lr, tp->optName);
     }
-    g_model.dropout_rate = dropoutP;
-    g_model.l2_lambda = l2Lambda;
-    g_model.test_split = testSplit;
+    g_model.dropout_rate = tp->dropoutP;
+    g_model.l2_lambda = tp->l2Lambda;
+    g_model.test_split = tp->testSplit;
+    g_model.stop_flag = &g_stopRequested;
 
     std::cout << "============================================================\n";
-    std::cout << "  " << ((netType=="regression")?"Regression":"Classification")
-              << "  |  Optimizer: " << optName
-              << "  |  LR: " << lr
-              << "  |  Epochs: " << epochs
-              << "  |  Batch: " << batch << "\n";
+    std::cout << "  " << ((tp->netType=="regression")?"Regression":"Classification")
+              << "  |  Optimizer: " << tp->optName
+              << "  |  LR: " << tp->lr
+              << "  |  Epochs: " << tp->epochs
+              << "  |  Batch: " << tp->batch << "\n";
     std::cout << "============================================================\n";
     g_model.summary();
 
-    if (netType == "regression") {
-        g_model.fit(g_train_x, g_train_y_real, epochs, batch, valSplit, nullptr, patience, true, true, nullptr, 0.0);
+    if (tp->netType == "regression") {
+        g_model.fit(g_train_x, g_train_y_real, tp->epochs, tp->batch, tp->valSplit, nullptr, tp->patience, true, true, nullptr, 0.0);
     } else {
-        g_model.fit(g_train_x, g_train_y_cls, epochs, batch, valSplit, patience, true, nullptr, 0.0);
+        g_model.fit(g_train_x, g_train_y_cls, tp->epochs, tp->batch, tp->valSplit, tp->patience, true, nullptr, 0.0);
     }
 
-    if (useEarlyStop) {
+    if (tp->useEarlyStop) {
         int stoppedAt = (int)g_model.train_history.size();
         std::cout << "\n  Training stopped at epoch " << stoppedAt;
         if (!g_model.val_history.empty())
@@ -946,7 +933,7 @@ DWORD WINAPI TrainThread(LPVOID) {
     }
 
     std::cout << "\n--- Results ---\n";
-    if (netType == "regression") {
+    if (tp->netType == "regression") {
         double r2 = g_model.score(g_train_x, g_train_y_real);
         std::cout << "  R^2 = " << r2 << "\n";
         for (size_t i = 0; i < g_train_x.size(); ++i) {
@@ -965,13 +952,22 @@ DWORD WINAPI TrainThread(LPVOID) {
         std::cout << "  Accuracy: " << 100.0*ok/g_train_x.size() << "%\n";
     }
 
+    g_model.stop_flag = nullptr;
     std::string out = EndCapture();
     PostMessage(g_hWnd, WM_USER_UPDATE_OUTPUT, 0, (LPARAM)new std::string(out));
     PostMessage(g_hWnd, WM_USER_TRAINING_DONE, 0, 0);
+    delete tp;
     return 0;
 }
 
 // ============ 快速 Demo ============
+
+static DWORD WINAPI DemoThread(LPVOID param) {
+    std::string* name = (std::string*)param;
+    runDemo(*name);
+    delete name;
+    return 0;
+}
 
 // 将示例配置同步到 UI 控件
 static void syncUIConfig(int netType, int arch, int inputDim, int outputDim,
@@ -1061,7 +1057,9 @@ static void runDemo(const std::string& name) {
         loadDefaultRegData();
         g_model = make_regressor(5, 2, {6,6,6,6,5,4,3}, "leaky_relu", 0.01);
         g_model.summary();
+        g_model.stop_flag = &g_stopRequested;
         g_model.fit(g_train_x, g_train_y_real, 2000, 2, 0.2, nullptr, 50);
+        g_model.stop_flag = nullptr;
         double r2 = g_model.score(g_train_x, g_train_y_real);
         std::cout << "\n  R^2 = " << r2 << "\n";
         for (size_t i = 0; i < g_train_x.size(); ++i) {
@@ -1076,7 +1074,9 @@ static void runDemo(const std::string& name) {
         loadDefaultClsData();
         g_model = make_classifier(3, 3, {8,8}, "leaky_relu", 0.01);
         g_model.summary();
+        g_model.stop_flag = &g_stopRequested;
         g_model.fit(g_train_x, g_train_y_cls, 2000, 2, 0.2, 50);
+        g_model.stop_flag = nullptr;
         int ok = 0;
         for (size_t i = 0; i < g_train_x.size(); ++i) {
             int p = g_model.predict_class(g_train_x[i]);
@@ -1092,7 +1092,9 @@ static void runDemo(const std::string& name) {
         loadDefaultRegData();
         Model m = make_regressor(5, 2, {8,8,4}, "leaky_relu", 0.01);
         StepLR sch(m.optimizer.get(), 100, 0.5);
+        m.stop_flag = &g_stopRequested;
         m.fit(g_train_x, g_train_y_real, 300, 2, 0.0, nullptr, 0, true, true, &sch, 1.0);
+        m.stop_flag = nullptr;
         std::cout << "  Final loss: " << m.train_history.back().second
                   << "  |  LR: " << m.optimizer->lr << "\n";
         std::cout << "  R^2: " << m.score(g_train_x, g_train_y_real) << "\n";
@@ -1148,7 +1150,9 @@ static void runDemo(const std::string& name) {
                 loadDefaultRegData();
                 g_model = make_regressor(5, 2, {6,6,6,6,5,4,3}, "leaky_relu", 0.01);
                 g_model.summary();
+                g_model.stop_flag = &g_stopRequested;
                 g_model.fit(g_train_x, g_train_y_real, 2000, 2, 0.2, nullptr, 50);
+                g_model.stop_flag = nullptr;
                 double r2 = g_model.score(g_train_x, g_train_y_real);
                 std::cout << "\n  R^2 = " << r2 << "\n";
                 for (size_t i = 0; i < g_train_x.size(); ++i) {
@@ -1161,7 +1165,9 @@ static void runDemo(const std::string& name) {
                 loadDefaultClsData();
                 g_model = make_classifier(3, 3, {8,8}, "leaky_relu", 0.01);
                 g_model.summary();
+                g_model.stop_flag = &g_stopRequested;
                 g_model.fit(g_train_x, g_train_y_cls, 2000, 2, 0.2, 50);
+                g_model.stop_flag = nullptr;
                 int ok = 0;
                 for (size_t i = 0; i < g_train_x.size(); ++i) {
                     int p = g_model.predict_class(g_train_x[i]);
@@ -1175,7 +1181,9 @@ static void runDemo(const std::string& name) {
                 loadDefaultRegData();
                 Model m = make_regressor(5, 2, {8,8,4}, "leaky_relu", 0.01);
                 StepLR sch(m.optimizer.get(), 100, 0.5);
+                m.stop_flag = &g_stopRequested;
                 m.fit(g_train_x, g_train_y_real, 300, 2, 0.0, nullptr, 0, true, true, &sch, 1.0);
+                m.stop_flag = nullptr;
                 std::cout << "  Final loss: " << m.train_history.back().second
                           << "  |  LR: " << m.optimizer->lr << "\n";
                 std::cout << "  R^2: " << m.score(g_train_x, g_train_y_real) << "\n";
@@ -1228,32 +1236,33 @@ static void runDemo(const std::string& name) {
         SendMessage(g_hProgress, PBM_SETPOS, 100, 0);
         SetStatus("All demos completed");
         // 同步图表
-        g_lossChartTrain = g_model.train_history;
-        g_lossChartVal = g_model.val_history;
+        {
+            std::lock_guard<std::mutex> lock(g_model.history_mutex);
+            g_lossChartTrain = g_model.train_history;
+            g_lossChartVal = g_model.val_history;
+        }
         InvalidateRect(g_hWnd, &g_chartRect, FALSE);
         return;
     }
 
     std::string out = EndCapture();
-    AppendText(g_hOutput, out);
+    PostMessage(g_hWnd, WM_USER_UPDATE_OUTPUT, 0, (LPARAM)new std::string(out));
     g_trained = true;
-    SendMessage(g_hProgress, PBM_SETPOS, 100, 0);
-    SetStatus(name + " completed");
-    // 同步图表（空历史也会刷新，显示占位文字）
-    g_lossChartTrain = g_model.train_history;
-    g_lossChartVal = g_model.val_history;
-    InvalidateRect(g_hWnd, &g_chartRect, FALSE);
+    PostMessage(g_hWnd, WM_USER_UPDATE_PROGRESS, 100, 0);
+    PostMessage(g_hWnd, WM_USER_DEMO_DONE, 0, (LPARAM)new std::string(name));
 }
 
 // ============ 自定义绘制颜色 ============
 static HBRUSH g_hBrushPanel    = nullptr;
 static HBRUSH g_hBrushInput    = nullptr;
 static HBRUSH g_hBrushWhite    = nullptr;
+static HBRUSH g_hBrushOutput   = nullptr;
 
 static void initBrushes() {
     g_hBrushPanel = CreateSolidBrush(CLR_PANEL_BG);
     g_hBrushInput = CreateSolidBrush(CLR_INPUT_BG);
     g_hBrushWhite = CreateSolidBrush(CLR_BG);
+    g_hBrushOutput = CreateSolidBrush(CLR_OUTPUT_BG);
 }
 
 // ============ 窗口过程 ============
@@ -1615,15 +1624,59 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_lossChartVal.clear();
                 InvalidateRect(hwnd, &g_chartRect, FALSE);
                 g_capture.str(""); g_capture.clear();
+                g_stopRequested = false;
                 SendMessage(g_hProgress, PBM_SETMARQUEE, TRUE, 30);
                 SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
                 SetTimer(hwnd, IDT_CHART_UPDATE, 200, nullptr);
-                g_hThread = CreateThread(nullptr, 0, TrainThread, nullptr, 0, nullptr);
+
+                TrainParams* tp = new TrainParams();
+                tp->netType = comboIdx(IDC_CBO_NETTYPE) == 1 ? "classification" : "regression";
+                tp->lr = readDouble(IDC_EDIT_LR, 0.01);
+                tp->epochs = readInt(IDC_EDIT_EPOCHS, 500);
+                tp->batch = readInt(IDC_EDIT_BATCH, 16);
+                tp->inputDim = readInt(IDC_EDIT_INPUT, 1);
+                tp->outputDim = readInt(IDC_EDIT_OUTPUT, 1);
+                tp->useEarlyStop = (SendMessageA(GetDlgItem(hwnd, IDC_CHECK_EARLYSTOP), BM_GETCHECK, 0, 0) == BST_CHECKED);
+                tp->patience = tp->useEarlyStop ? readInt(IDC_EDIT_PATIENCE, 50) : 0;
+                tp->valSplit = readDouble(IDC_EDIT_VALSPLIT, 0.1);
+                if (tp->valSplit <= 0) tp->valSplit = 0.1;
+                tp->useDropout = (SendMessageA(GetDlgItem(hwnd, IDC_CHECK_DROPOUT), BM_GETCHECK, 0, 0) == BST_CHECKED);
+                tp->dropoutP = tp->useDropout ? readDouble(IDC_EDIT_DROPOUT, 0.3) : 0.0;
+                if (tp->dropoutP < 0) tp->dropoutP = 0.0;
+                if (tp->dropoutP > 0.9) tp->dropoutP = 0.9;
+                tp->useL2 = (SendMessageA(GetDlgItem(hwnd, IDC_CHECK_L2), BM_GETCHECK, 0, 0) == BST_CHECKED);
+                tp->l2Lambda = tp->useL2 ? readDouble(IDC_EDIT_L2, 0.0001) : 0.0;
+                tp->useTestSplit = (SendMessageA(GetDlgItem(hwnd, IDC_CHECK_TESTSPLIT), BM_GETCHECK, 0, 0) == BST_CHECKED);
+                tp->testSplit = tp->useTestSplit ? readDouble(IDC_EDIT_TESTSPLIT, 0.1) : 0.0;
+                if (tp->testSplit < 0) tp->testSplit = 0.0;
+                if (tp->testSplit > 0.5) tp->testSplit = 0.5;
+                {
+                    int idx = comboIdx(IDC_CBO_OPTIMIZER);
+                    if (idx == 1) tp->optName = "sgd";
+                    else if (idx == 2) tp->optName = "sgd_momentum";
+                    else if (idx == 3) tp->optName = "rmsprop";
+                    else tp->optName = "adam";
+                }
+                tp->actName = comboIdx(IDC_CBO_ACTIVATION) == 1 ? "relu" : "leaky_relu";
+                readDataFromTable();
+                tp->hidden = getLayerDims();
+                tp->train_x = g_train_x;
+                tp->train_y_real = g_train_y_real;
+                tp->train_y_cls = g_train_y_cls;
+                tp->has_custom_data = g_has_custom_data;
+                tp->seed = readSeed();
+
+                g_hThread = CreateThread(nullptr, 0, TrainThread, tp, 0, nullptr);
                 SetStatus("Training started...");
             }
             break;
         case IDC_BTN_STOP:
-            SetStatus("Training in progress (stop not supported in current version)");
+            if (g_training) {
+                g_stopRequested = true;
+                SetStatus("Stopping training...");
+            } else {
+                SetStatus("No training in progress");
+            }
             break;
 
         case IDC_BTN_SAVE:
@@ -1770,11 +1823,56 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         }
         // 示例
-        case IDC_EX_REGRESSION: runDemo("Regression"); break;
-        case IDC_EX_CLASSIFY:   runDemo("Classification"); break;
-        case IDC_EX_GRADCLIP:   runDemo("Gradient Clip"); break;
-        case IDC_EX_QUICKTRAIN: runDemo("Quick Train"); break;
-        case IDC_EX_CNN:        runDemo("CNN"); break;
+        case IDC_EX_REGRESSION: {
+            if (g_training || g_demoRunning) break;
+            g_demoRunning = true;
+            g_stopRequested = false;
+            ClearOutput(g_hOutput);
+            SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
+            CreateThread(nullptr, 0, DemoThread, new std::string("Regression"), 0, nullptr);
+            SetStatus("Running Regression demo...");
+            break;
+        }
+        case IDC_EX_CLASSIFY: {
+            if (g_training || g_demoRunning) break;
+            g_demoRunning = true;
+            g_stopRequested = false;
+            ClearOutput(g_hOutput);
+            SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
+            CreateThread(nullptr, 0, DemoThread, new std::string("Classification"), 0, nullptr);
+            SetStatus("Running Classification demo...");
+            break;
+        }
+        case IDC_EX_GRADCLIP: {
+            if (g_training || g_demoRunning) break;
+            g_demoRunning = true;
+            g_stopRequested = false;
+            ClearOutput(g_hOutput);
+            SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
+            CreateThread(nullptr, 0, DemoThread, new std::string("Gradient Clip"), 0, nullptr);
+            SetStatus("Running Gradient Clip demo...");
+            break;
+        }
+        case IDC_EX_QUICKTRAIN: {
+            if (g_training || g_demoRunning) break;
+            g_demoRunning = true;
+            g_stopRequested = false;
+            ClearOutput(g_hOutput);
+            SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
+            CreateThread(nullptr, 0, DemoThread, new std::string("Quick Train"), 0, nullptr);
+            SetStatus("Running Quick Train demo...");
+            break;
+        }
+        case IDC_EX_CNN: {
+            if (g_training || g_demoRunning) break;
+            g_demoRunning = true;
+            g_stopRequested = false;
+            ClearOutput(g_hOutput);
+            SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
+            CreateThread(nullptr, 0, DemoThread, new std::string("CNN"), 0, nullptr);
+            SetStatus("Running CNN demo...");
+            break;
+        }
         case IDC_EX_RUNALL:     runDemo("Run All"); break;
         }
         break;
@@ -1782,13 +1880,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == IDT_CHART_UPDATE && g_training) {
             bool changed = false;
-            if ((int)g_model.train_history.size() != (int)g_lossChartTrain.size()) {
-                g_lossChartTrain = g_model.train_history;
-                changed = true;
-            }
-            if ((int)g_model.val_history.size() != (int)g_lossChartVal.size()) {
-                g_lossChartVal = g_model.val_history;
-                changed = true;
+            {
+                std::lock_guard<std::mutex> lock(g_model.history_mutex);
+                if ((int)g_model.train_history.size() != (int)g_lossChartTrain.size()) {
+                    g_lossChartTrain = g_model.train_history;
+                    changed = true;
+                }
+                if ((int)g_model.val_history.size() != (int)g_lossChartVal.size()) {
+                    g_lossChartVal = g_model.val_history;
+                    changed = true;
+                }
             }
             if (changed) InvalidateRect(hwnd, &g_chartRect, FALSE);
         }
@@ -1802,18 +1903,38 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         KillTimer(hwnd, IDT_CHART_UPDATE);
         g_training = false;
         g_trained = true;
+        g_stopRequested = false;
         if (g_hThread) { CloseHandle(g_hThread); g_hThread = nullptr; }
         SendMessage(g_hProgress, PBM_SETMARQUEE, FALSE, 0);
         SendMessage(g_hProgress, PBM_SETPOS, 100, 0);
         SetStatus("Training complete");
         // 同步 loss 历史到图表数据
-        g_lossChartTrain = g_model.train_history;
-        g_lossChartVal   = g_model.val_history;
+        {
+            std::lock_guard<std::mutex> lock(g_model.history_mutex);
+            g_lossChartTrain = g_model.train_history;
+            g_lossChartVal   = g_model.val_history;
+        }
         InvalidateRect(hwnd, &g_chartRect, FALSE);
         break;
     case WM_USER_UPDATE_PROGRESS:
         SendMessage(g_hProgress, PBM_SETPOS, (WPARAM)wp, 0);
         break;
+    case WM_USER_DEMO_DONE: {
+        g_demoRunning = false;
+        // 同步图表（在主线程安全执行）
+        {
+            std::lock_guard<std::mutex> lock(g_model.history_mutex);
+            g_lossChartTrain = g_model.train_history;
+            g_lossChartVal = g_model.val_history;
+        }
+        InvalidateRect(hwnd, &g_chartRect, FALSE);
+        std::string* name = (std::string*)lp;
+        if (name) {
+            SetStatus(*name + " completed");
+            delete name;
+        }
+        break;
+    }
 
     case WM_CTLCOLORSTATIC: {
         HDC hdc = (HDC)wp;
@@ -1852,8 +1973,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (ctrl == g_hOutput) {
             SetBkColor(hdc, CLR_OUTPUT_BG);
             SetTextColor(hdc, CLR_TEXT);
-            static HBRUSH hOutBr = CreateSolidBrush(CLR_OUTPUT_BG);
-            return (LRESULT)hOutBr;
+            return (LRESULT)g_hBrushOutput;
         }
         SetBkColor(hdc, CLR_INPUT_BG);
         SetTextColor(hdc, CLR_TEXT);
@@ -1939,12 +2059,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // 设置垂直滚动条
         int maxPos = g_contentH - h + 20;
         if (maxPos < 0) maxPos = 0;
-        SCROLLINFO si = {sizeof(SCROLLINFO), SIF_RANGE | SIF_PAGE};
+        if (g_scrollY > maxPos) g_scrollY = maxPos;
+        SCROLLINFO si = {sizeof(SCROLLINFO), SIF_RANGE | SIF_PAGE | SIF_POS};
         si.nMin = 0;
         si.nMax = g_contentH;
         si.nPage = h;
+        si.nPos = g_scrollY;
         SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
-        if (g_scrollY > maxPos) g_scrollY = maxPos;
 
         layoutRightPanel();
         InvalidateRect(hwnd, nullptr, TRUE);
@@ -2017,13 +2138,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_DESTROY:
         endCellEdit(false);
+        g_stopRequested = true;
+        if (g_hThread) {
+            WaitForSingleObject(g_hThread, 2000);
+            CloseHandle(g_hThread);
+            g_hThread = nullptr;
+        }
         if (g_hFontMono)  DeleteObject(g_hFontMono);
         if (g_hFontUI)    DeleteObject(g_hFontUI);
         if (g_hFontTitle) DeleteObject(g_hFontTitle);
         if (g_hFontGrid)  DeleteObject(g_hFontGrid);
-        if (g_hBrushPanel) DeleteObject(g_hBrushPanel);
-        if (g_hBrushInput) DeleteObject(g_hBrushInput);
-        if (g_hBrushWhite) DeleteObject(g_hBrushWhite);
+        if (g_hBrushPanel)  DeleteObject(g_hBrushPanel);
+        if (g_hBrushInput)  DeleteObject(g_hBrushInput);
+        if (g_hBrushWhite)  DeleteObject(g_hBrushWhite);
+        if (g_hBrushOutput) DeleteObject(g_hBrushOutput);
         PostQuitMessage(0);
         break;
     default:
