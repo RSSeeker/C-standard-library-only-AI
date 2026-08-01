@@ -4,17 +4,27 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build:
+  build-mingw:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
@@ -28,7 +38,71 @@ jobs:
       - name: Compile with MinGW
         shell: msys2 {0}
         run: |
-          g++ -std=c++17 -O2 -Wall -mwindows -static -o ai.exe main.cpp AI.cpp -lcomctl32
+          g++ -std=c++17 -O2 -Wall -mwindows -static -o ai.exe main.cpp AI.cpp -lcomctl32 -lcomdlg32
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          Compress-Archive -Path ai.exe -DestinationPath ai-mingw64.zip
+
+      - name: Upload MinGW artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-mingw64
+          path: |
+            ai.exe
+            ai-mingw64.zip
+
+  build-msvc:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build with MSVC
+        run: |
+          cmake --build build --config Release
+
+      - name: Package artifact
+        shell: pwsh
+        run: |
+          Copy-Item build/Release/ai.exe ai-msvc.exe
+          Compress-Archive -Path ai-msvc.exe -DestinationPath ai-msvc.zip
+
+      - name: Upload MSVC artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-msvc
+          path: |
+            ai-msvc.exe
+            ai-msvc.zip
+
+  release:
+    needs: [build-mingw, build-msvc]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure
+        shell: bash
+        run: ls -R artifacts/
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd artifacts
+          find . -name "*.exe" -o -name "*.zip" | sort | while read f; do
+            sha256sum "$f" >> checksums.txt
+          done
 
       - name: Create Release and Upload
         uses: softprops/action-gh-release@v2
@@ -38,6 +112,16 @@ jobs:
             ## ${{ github.ref_name }}
 
             自动构建版本，由 GitHub Actions 编译并发布。
-          files: ai.exe
+
+            ### 构建版本
+            - **ai-mingw64.zip** — MinGW-w64 静态编译（无运行时依赖）
+            - **ai-msvc.zip** — MSVC 编译（需要 VC++ 运行时）
+
+            ### 校验和
+            见下方 `checksums.txt`。
+          files: |
+            artifacts/**/ai*.exe
+            artifacts/**/ai*.zip
+            artifacts/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

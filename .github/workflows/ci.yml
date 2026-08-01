@@ -9,7 +9,7 @@ on:
       - master
 
 jobs:
-  build:
+  build-mingw:
     runs-on: windows-latest
 
     steps:
@@ -28,10 +28,31 @@ jobs:
       - name: Compile with MinGW
         shell: msys2 {0}
         run: |
-          g++ -std=c++17 -O2 -Wall -mwindows -static -o ai.exe main.cpp AI.cpp -lcomctl32
+          g++ -std=c++17 -O2 -Wall -mwindows -static -o ai.exe main.cpp AI.cpp -lcomctl32 -lcomdlg32
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ai-build
+          name: ai-mingw64
           path: ai.exe
+
+  build-msvc:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build with MSVC
+        run: |
+          cmake --build build --config Release
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-msvc
+          path: build/Release/ai.exe
