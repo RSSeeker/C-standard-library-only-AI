@@ -6,10 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(ai WIN32 main.cpp AI.cpp)
 
+target_link_libraries(ai PRIVATE comctl32)
+
 if (MSVC)
     target_compile_options(ai PRIVATE /utf-8)
-else()
-    target_link_libraries(ai comctl32)
 endif()
 
 target_include_directories(ai PRIVATE ${CMAKE_SOURCE_DIR})

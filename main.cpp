@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <algorithm>
 #include <sstream>
 #include <string>
 #include <iomanip>
@@ -10,6 +11,9 @@
 #include <ctime>
 #include <atomic>
 #include <mutex>
+
+#undef min
+#undef max
 
 using namespace ai;
 
