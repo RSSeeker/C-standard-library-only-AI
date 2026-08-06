@@ -107,6 +107,40 @@ int main() {
 }
 ```
 
+### Transformer 端到端训练
+
+`TransformerModel` 提供可端到端训练的 Transformer 分类器：
+Embedding → 位置编码 → TransformerEncoder → 平均池化 → 线性分类头。
+Attention、FeedForward、LayerNorm 的 γ/β、Embedding 与分类头的所有参数都会参与训练
+（通过通用参数优化器 `ParamOptimizer`，也可用它对 BatchNorm / RNN 等组件的参数做自定义训练）。
+
+```cpp
+// 序列分类：token 索引序列 -> 类别
+TransformerModel model(/*vocab=*/20, /*d_model=*/32, /*heads=*/2,
+                       /*d_ff=*/64, /*layers=*/1, /*num_classes=*/3,
+                       /*lr=*/0.002, "adam");
+
+std::vector<std::vector<int>> X = {{1,2,3,4}, {5,6,7,8}, /* ... */};
+std::vector<int> Y = {0, 1, /* ... */};
+
+model.fit(X, Y, /*epochs=*/50, /*batch_size=*/16, /*val_split=*/0.2);
+int cls = model.predict_class({1, 2, 3, 4});
+```
+
+`RecurrentModel` 提供可端到端训练的 RNN / LSTM / GRU 序列分类器（最后一步隐状态 → 分类头），
+同样支持 `fit` / `predict` / `save` / `load`：
+
+```cpp
+RecurrentModel rnn("lstm", /*input_size=*/2, /*hidden=*/16, /*layers=*/1,
+                   /*num_classes=*/3, /*lr=*/0.01, "adam");
+
+std::vector<std::vector<Vec>> X = {{{0.1,0.2},{0.3,0.4}}, /* ... */};
+std::vector<int> Y = {0, /* ... */};
+rnn.fit(X, Y, 50, 16, 0.2);
+```
+
+两个模型的 `save` / `load` 均为自定义文本格式，往返精度为双精度全精度。
+
 ---
 
 ## GUI 使用说明

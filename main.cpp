@@ -890,6 +890,7 @@ static DWORD WINAPI TrainThread(LPVOID param) {
     seed(tp->seed);
     BeginCapture();
 
+    try {
     g_train_x = tp->train_x;
     g_train_y_real = tp->train_y_real;
     g_train_y_cls = tp->train_y_cls;
@@ -957,6 +958,23 @@ static DWORD WINAPI TrainThread(LPVOID param) {
     }
 
     g_model.stop_flag = nullptr;
+    } catch (const std::exception& e) {
+        std::cout << "\n[!] Training error: " << e.what() << "\n";
+        g_model.stop_flag = nullptr;
+        std::string out = EndCapture();
+        PostMessage(g_hWnd, WM_USER_UPDATE_OUTPUT, 0, (LPARAM)new std::string(out));
+        PostMessage(g_hWnd, WM_USER_TRAINING_DONE, 0, 0);
+        delete tp;
+        return 0;
+    } catch (...) {
+        std::cout << "\n[!] Training error: unknown exception\n";
+        g_model.stop_flag = nullptr;
+        std::string out = EndCapture();
+        PostMessage(g_hWnd, WM_USER_UPDATE_OUTPUT, 0, (LPARAM)new std::string(out));
+        PostMessage(g_hWnd, WM_USER_TRAINING_DONE, 0, 0);
+        delete tp;
+        return 0;
+    }
     std::string out = EndCapture();
     PostMessage(g_hWnd, WM_USER_UPDATE_OUTPUT, 0, (LPARAM)new std::string(out));
     PostMessage(g_hWnd, WM_USER_TRAINING_DONE, 0, 0);
@@ -1039,6 +1057,7 @@ static void syncUIConfig(int netType, int arch, int inputDim, int outputDim,
 static void runDemo(const std::string& name) {
     if (g_training) return;
 
+    try {
     // 从表格加载数据
     readDataFromTable();
 
@@ -1248,6 +1267,22 @@ static void runDemo(const std::string& name) {
             g_lossChartVal = g_model.val_history;
         }
         InvalidateRect(g_hWnd, &g_chartRect, FALSE);
+        PostMessage(g_hWnd, WM_USER_DEMO_DONE, 0, (LPARAM)new std::string(name));
+        return;
+    }
+
+    } catch (const std::exception& e) {
+        std::string err = std::string("\r\n[!] Demo error: ") + e.what() + "\r\n";
+        AppendText(g_hOutput, err);
+        SetStatus(std::string("Demo failed: ") + e.what());
+        g_trained = false;
+        PostMessage(g_hWnd, WM_USER_DEMO_DONE, 0, (LPARAM)new std::string(name));
+        return;
+    } catch (...) {
+        AppendText(g_hOutput, "\r\n[!] Demo error: unknown exception\r\n");
+        SetStatus("Demo failed");
+        g_trained = false;
+        PostMessage(g_hWnd, WM_USER_DEMO_DONE, 0, (LPARAM)new std::string(name));
         return;
     }
 
@@ -1879,7 +1914,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetStatus("Running CNN demo...");
             break;
         }
-        case IDC_EX_RUNALL:     runDemo("Run All"); break;
+        case IDC_EX_RUNALL: {
+            if (g_training || g_demoRunning) break;
+            g_demoRunning = true;
+            g_stopRequested = false;
+            ClearOutput(g_hOutput);
+            SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
+            CreateThread(nullptr, 0, DemoThread, new std::string("Run All"), 0, nullptr);
+            SetStatus("Running all demos...");
+            break;
+        }
         }
         break;
     }

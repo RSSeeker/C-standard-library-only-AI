@@ -2,6 +2,8 @@ name: Build and Release
 
 on:
   push:
+    branches:
+      - master
     tags:
       - 'v*'
   workflow_dispatch:
@@ -14,6 +16,9 @@ jobs:
     runs-on: windows-latest
     outputs:
       version: ${{ steps.version.outputs.VERSION }}
+      tag_name: ${{ steps.version.outputs.TAG_NAME }}
+      is_prerelease: ${{ steps.version.outputs.PRERELEASE }}
+      release_name: ${{ steps.version.outputs.RELEASE_NAME }}
 
     steps:
       - name: Checkout
@@ -23,8 +28,20 @@ jobs:
         id: version
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#v}"
+            echo "TAG_NAME=${TAG}" >> "$GITHUB_OUTPUT"
+            echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "PRERELEASE=false" >> "$GITHUB_OUTPUT"
+            echo "RELEASE_NAME=${TAG}" >> "$GITHUB_OUTPUT"
+          else
+            SHA="${GITHUB_SHA::7}"
+            echo "TAG_NAME=pre-${SHA}" >> "$GITHUB_OUTPUT"
+            echo "VERSION=pre-${SHA}" >> "$GITHUB_OUTPUT"
+            echo "PRERELEASE=true" >> "$GITHUB_OUTPUT"
+            echo "RELEASE_NAME=Pre-release ${SHA}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Setup MSYS2
         uses: msys2/setup-msys2@v2
@@ -107,15 +124,17 @@ jobs:
       - name: Create Release and Upload
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
+          tag_name: ${{ needs.build-mingw.outputs.tag_name }}
+          name: ${{ needs.build-mingw.outputs.release_name }}
+          prerelease: ${{ needs.build-mingw.outputs.is_prerelease }}
           body: |
-            ## ${{ github.ref_name }}
+            ## ${{ needs.build-mingw.outputs.version }}
 
             自动构建版本，由 GitHub Actions 编译并发布。
 
             ### 构建版本
-            - **ai-mingw64.zip** — MinGW-w64 静态编译（无运行时依赖）
-            - **ai-msvc.zip** — MSVC 编译（需要 VC++ 运行时）
+            - **ai-mingw64.zip / ai.exe** — MinGW-w64 静态编译（无运行时依赖）
+            - **ai-msvc.zip / ai-msvc.exe** — MSVC 编译（需要 VC++ 运行库）
 
             ### 校验和
             见下方 `checksums.txt`。

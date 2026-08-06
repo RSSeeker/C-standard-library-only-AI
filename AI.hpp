@@ -11,7 +11,7 @@
   - MSE / CrossEntropy 损失函数
   - 梯度裁剪 / 学习率调度器
   - 训练管线 + Early Stopping + DataLoader
-  - 模型保存 / 加载（JSON）
+  - 模型保存 / 加载（自定义文本格式）
   - 高层 sklearn 风格 API（Model / make_classifier / make_regressor / quick_train）
 ================================================================================
 */
@@ -289,6 +289,8 @@ class RNN {
 public:
     int input_size, hidden_size, num_layers;
     std::vector<RNNCell> cells;
+    // BPTT 缓存：每层每时间步（Cell 本身只缓存最后一次调用）
+    std::vector<std::vector<Vec>> cache_x, cache_h_prev, cache_tanh_z, cache_h_t;
     RNN(int in_sz, int hid_sz, int n_layers = 1);
     std::pair<std::vector<Vec>, std::vector<Vec>> forward(const std::vector<Vec>& x_seq);
     std::vector<Vec> backward(const std::vector<Vec>& dh_seq);
@@ -298,6 +300,11 @@ class LSTM {
 public:
     int input_size, hidden_size, num_layers;
     std::vector<LSTMCell> cells;
+    // BPTT 缓存
+    std::vector<std::vector<Vec>> cache_x, cache_h_prev, cache_c_prev;
+    std::vector<std::vector<Vec>> cache_i_g, cache_f_g, cache_g_g, cache_o_g;
+    std::vector<std::vector<Vec>> cache_i_s, cache_f_s, cache_g_t, cache_o_s;
+    std::vector<std::vector<Vec>> cache_c_t, cache_h_t;
     LSTM(int in_sz, int hid_sz, int n_layers = 1);
     std::pair<std::vector<Vec>, std::pair<std::vector<Vec>, std::vector<Vec>>>
         forward(const std::vector<Vec>& x_seq);
@@ -308,6 +315,10 @@ class GRU {
 public:
     int input_size, hidden_size, num_layers;
     std::vector<GRUCell> cells;
+    // BPTT 缓存
+    std::vector<std::vector<Vec>> cache_x, cache_h_prev;
+    std::vector<std::vector<Vec>> cache_z_g, cache_r_g, cache_n_g;
+    std::vector<std::vector<Vec>> cache_z_s, cache_r_s, cache_n_t, cache_h_t;
     GRU(int in_sz, int hid_sz, int n_layers = 1);
     std::pair<std::vector<Vec>, std::vector<Vec>> forward(const std::vector<Vec>& x_seq);
     std::vector<Vec> backward(const std::vector<Vec>& dh_seq);
@@ -355,6 +366,9 @@ public:
     FeedForward ff;
     LayerNorm ln1, ln2;
     int d_model;
+    // LayerNorm 是逐位置调用的，这里按位置保存其缓存
+    std::vector<Vec> ln1_x_centered, ln2_x_centered;
+    std::vector<double> ln1_inv_std, ln2_inv_std;
 
     TransformerEncoderLayer(int d_model_, int num_heads, int d_ff);
     Vec3D forward(const Vec3D& x);
@@ -482,6 +496,35 @@ public:
     std::vector<Vec> cache_b;
     RMSprop(MLP* m, double lr_ = 0.01, double beta_ = 0.9, double eps_ = 1e-8);
     void step(const std::vector<GradPair>& grads) override;
+};
+
+// ============================================================================
+//  通用参数优化器 — 可直接作用于任意组件的参数（Transformer / BN / LN / RNN 等）
+// ============================================================================
+struct ParamRef {
+    double* value;
+    double* grad;
+};
+
+class ParamOptimizer {
+public:
+    enum Type { ADAM, SGD, RMSPROP };
+
+    ParamOptimizer(Type t, double lr_ = 0.001);
+
+    void add(double* value, double* grad);
+    void step(double scale = 1.0);   // scale 用于平均 batch 梯度（1/batch_size）
+    void zero_grad();
+    void set_lr(double lr_) { lr = lr_; }
+    double get_lr() const { return lr; }
+
+private:
+    struct State { double m = 0.0, v = 0.0; };
+    Type type;
+    double lr;
+    int t = 0;
+    std::vector<ParamRef> params;
+    std::unordered_map<const double*, State> state;
 };
 
 // ============================================================================
@@ -690,6 +733,102 @@ public:
                       int* out_batch = nullptr);
     void summary();
     std::string to_string() const;
+};
+
+// ============================================================================
+//  TransformerModel — 可端到端训练的 Transformer 分类器
+//  Embedding → PositionalEncoding → TransformerEncoder → MeanPool → Linear Head
+//  训练范围：attention / FF / LayerNorm(γ,β) / Embedding / Head 全部参数
+// ============================================================================
+class TransformerModel {
+public:
+    int vocab_size, d_model, num_heads, d_ff, num_layers, num_classes;
+    std::string task = "classification";
+    double lr;
+    std::string opt_name;
+    Embedding emb;
+    PositionalEncoding pe;
+    TransformerEncoder enc;
+    Layer head;   // d_model -> num_classes (linear)
+
+    std::vector<std::pair<int, double>> train_history;
+    std::vector<std::pair<int, double>> val_history;
+    std::atomic<bool>* stop_flag = nullptr;
+
+    TransformerModel(int vocab_sz, int d_model_, int num_heads_, int d_ff_,
+                     int num_layers_, int num_classes_,
+                     double lr_ = 0.001, const std::string& opt = "adam");
+
+    Vec forward_logits(const std::vector<int>& seq);
+    Vec predict(const std::vector<int>& seq);       // softmax 概率
+    int predict_class(const std::vector<int>& seq);
+    double score(const std::vector<std::vector<int>>& x,
+                 const std::vector<int>& y);        // 分类准确率
+    // 反向传播单个样本（梯度累积到组件成员 / head_gw / head_gb）
+    void backward_sample(const std::vector<int>& seq, const Vec& grad);
+    const Vec2D& head_grad_w() const { return head_gw; }
+    const Vec& head_grad_b() const { return head_gb; }
+    void collect_params(ParamOptimizer& po);
+
+    void fit(const std::vector<std::vector<int>>& x,
+             const std::vector<int>& y,
+             int epochs = 50, int batch_size = 8,
+             double val_split = 0.0, int patience = 10,
+             bool verbose = true);
+    void save(const std::string& filepath) const;
+    static TransformerModel load(const std::string& filepath);
+    void summary() const;
+
+private:
+    Vec2D head_gw;   // 分类头梯度累积（Layer 不内建梯度缓冲）
+    Vec head_gb;
+};
+
+// ============================================================================
+//  RecurrentModel — 可端到端训练的 RNN / LSTM / GRU 序列分类器
+//  最后一个时间步的隐状态 → Linear Head → Softmax
+// ============================================================================
+class RecurrentModel {
+public:
+    std::string rnn_type;   // "rnn" | "lstm" | "gru"
+    int input_size, hidden_size, num_layers, num_classes;
+    double lr;
+    std::string opt_name;
+    std::unique_ptr<RNN> rnn;
+    std::unique_ptr<LSTM> lstm;
+    std::unique_ptr<GRU> gru;
+    Layer head;   // hidden_size -> num_classes (linear)
+
+    std::vector<std::pair<int, double>> train_history;
+    std::vector<std::pair<int, double>> val_history;
+    std::atomic<bool>* stop_flag = nullptr;
+
+    RecurrentModel(const std::string& type, int in_sz, int hid_sz, int n_layers,
+                   int num_classes_,
+                   double lr_ = 0.01, const std::string& opt = "adam");
+
+    Vec forward_logits(const std::vector<Vec>& seq);
+    Vec predict(const std::vector<Vec>& seq);
+    int predict_class(const std::vector<Vec>& seq);
+    double score(const std::vector<std::vector<Vec>>& x,
+                 const std::vector<int>& y);
+    void backward_sample(const std::vector<Vec>& seq, const Vec& grad);
+    const Vec2D& head_grad_w() const { return head_gw; }
+    const Vec& head_grad_b() const { return head_gb; }
+    void collect_params(ParamOptimizer& po);
+
+    void fit(const std::vector<std::vector<Vec>>& x,
+             const std::vector<int>& y,
+             int epochs = 50, int batch_size = 8,
+             double val_split = 0.0, int patience = 10,
+             bool verbose = true);
+    void save(const std::string& filepath) const;
+    static RecurrentModel load(const std::string& filepath);
+    void summary() const;
+
+private:
+    Vec2D head_gw;
+    Vec head_gb;
 };
 
 // 工厂函数

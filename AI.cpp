@@ -52,6 +52,10 @@ Vec Layer::_softmax_deriv(const Vec& z) {
 }
 
 Vec Layer::forward(const Vec& x) {
+    if ((int)x.size() != fan_in)
+        throw std::runtime_error("Layer::forward: input dim " +
+                                 std::to_string(x.size()) +
+                                 " != expected fan_in " + std::to_string(fan_in));
     input = x;
     z.resize(fan_out);
     for (int j = 0; j < fan_out; ++j) {
@@ -94,7 +98,15 @@ std::tuple<Vec2D, Vec, Vec> Layer::backward(const Vec& delta) {
         for (int j = 0; j < fan_out; ++j)
             d_z[j] = delta[j] * relu_deriv(z[j]);
         break;
-    case Activation::SOFTMAX:
+    case Activation::SOFTMAX: {
+        // 完整 softmax Jacobian：d_z_i = a_i * (delta_i - sum_j delta_j * a_j)
+        double dot = 0.0;
+        for (int j = 0; j < fan_out; ++j) dot += delta[j] * a[j];
+        d_z.resize(fan_out);
+        for (int j = 0; j < fan_out; ++j)
+            d_z[j] = a[j] * (delta[j] - dot);
+        break;
+    }
     case Activation::LINEAR:
         d_z = delta;
         break;
@@ -121,6 +133,10 @@ std::tuple<Vec2D, Vec, Vec> Layer::backward(const Vec& delta) {
 // ============================================================================
 MLP::MLP(const std::vector<int>& sizes,
          const std::vector<Layer::Activation>& activations) {
+    if (sizes.size() < 2)
+        throw std::runtime_error("MLP requires at least 2 layer sizes");
+    if (activations.size() != sizes.size() - 1)
+        throw std::runtime_error("MLP: activation count must equal layer count");
     for (size_t i = 0; i < sizes.size() - 1; ++i) {
         bool is_out = (i == sizes.size() - 2);
         layers.emplace_back(sizes[i], sizes[i + 1], activations[i], is_out);
@@ -178,10 +194,12 @@ Conv2d::Conv2d(int in_c, int out_c, int kernel_sz, int stride_, int pad_)
                 for (int w = 0; w < kernel_sz; ++w)
                     weights[oc][ic][h][w] = randn(std_dev);
     biases.assign(out_channels, 0.0);
-    grad_w = weights;   // 同形状
+    // 梯度必须从 0 开始（不能复制随机权重）
+    grad_w.assign(out_channels,
+        Vec3D(in_channels, Vec2D(kernel_sz, Vec(kernel_sz, 0.0))));
     grad_b.assign(out_channels, 0.0);
-    grad_w_acc = weights;
-    grad_b_acc = biases;
+    grad_w_acc = grad_w;
+    grad_b_acc.assign(out_channels, 0.0);
 }
 
 Vec3D Conv2d::forward(const Vec3D& x) {
@@ -419,12 +437,13 @@ std::tuple<Vec, Vec, Vec> BatchNorm1d::backward(const Vec& dout) {
     // 完整链式求导（通过 mean 和 var 的间接依赖）
     // d_gamma_i = dout_i * x_hat_i
     // d_beta_i  = dout_i
-    // dx_i = gamma_i * inv_std * (dout_i - mean(dout) - x_hat_i * mean(dout * x_hat))
+    // dx_i = inv_std * (d_xhat_i - mean(d_xhat) - x_hat_i * mean(d_xhat * x_hat))
+    // 其中 d_xhat_i = dout_i * gamma_i
     Vec d_gamma(dim), d_beta(dim), dx(dim);
 
     Vec d_xhat(dim);
-    double mean_dout = 0.0;
-    double mean_dout_xhat = 0.0;
+    double mean_dxhat = 0.0;
+    double mean_dxhat_xhat = 0.0;
     for (int i = 0; i < dim; ++i) {
         d_gamma[i] = dout[i] * x_hat[i];
         d_beta[i] = dout[i];
@@ -432,14 +451,14 @@ std::tuple<Vec, Vec, Vec> BatchNorm1d::backward(const Vec& dout) {
         grad_beta[i] += d_beta[i];
 
         d_xhat[i] = dout[i] * gamma[i];
-        mean_dout += dout[i];
-        mean_dout_xhat += dout[i] * gamma[i] * x_hat[i];
+        mean_dxhat += d_xhat[i];
+        mean_dxhat_xhat += d_xhat[i] * x_hat[i];
     }
-    mean_dout /= dim;
-    mean_dout_xhat /= dim;
+    mean_dxhat /= dim;
+    mean_dxhat_xhat /= dim;
 
     for (int i = 0; i < dim; ++i) {
-        dx[i] = gamma[i] * inv_std * (dout[i] - mean_dout - x_hat[i] * mean_dout_xhat);
+        dx[i] = inv_std * (d_xhat[i] - mean_dxhat - x_hat[i] * mean_dxhat_xhat);
     }
 
     return {d_gamma, d_beta, dx};
@@ -779,12 +798,15 @@ Vec GRUCell::forward(const Vec& x, const Vec& h_prev_) {
 
 std::pair<Vec, Vec> GRUCell::backward(const Vec& dh) {
     int H = hidden_size;
-    Vec d_z(H), d_n(H), d_r(H);
+    // 注意：必须先算完全部 d_n，再算 d_r（d_r 依赖所有 d_n[k]）
+    Vec d_z(H), d_n(H);
     for (int j = 0; j < H; ++j) {
         d_z[j] = dh[j] * (n_tanh[j] - h_prev[j]) * z_sig[j] * (1.0 - z_sig[j]);
         d_n[j] = dh[j] * z_sig[j] * (1.0 - n_tanh[j] * n_tanh[j]);
-        // d_r via r gate * h_prev affecting n: sum over all k of d_n[k] * W_hh_n[k][j] * h_prev[j] * r_sig'[j]
-        d_r[j] = 0.0;
+    }
+    // d_r via r gate * h_prev affecting n: sum over all k of d_n[k] * W_hh_n[k][j] * h_prev[j] * r_sig'[j]
+    Vec d_r(H, 0.0);
+    for (int j = 0; j < H; ++j) {
         for (int k = 0; k < H; ++k)
             d_r[j] += d_n[k] * W_hh[2 * H + k][j] * h_prev[j] * r_sig[j] * (1.0 - r_sig[j]);
     }
@@ -841,13 +863,22 @@ RNN::RNN(int in_sz, int hid_sz, int n_layers)
 }
 
 std::pair<std::vector<Vec>, std::vector<Vec>> RNN::forward(const std::vector<Vec>& x_seq) {
+    int T = (int)x_seq.size();
+    cache_x.assign(T, std::vector<Vec>(num_layers));
+    cache_h_prev.assign(T, std::vector<Vec>(num_layers));
+    cache_tanh_z.assign(T, std::vector<Vec>(num_layers));
+    cache_h_t.assign(T, std::vector<Vec>(num_layers));
     std::vector<Vec> outputs;
     std::vector<Vec> hiddens(num_layers, Vec(hidden_size, 0.0));
-    for (size_t t = 0; t < x_seq.size(); ++t) {
+    for (int t = 0; t < T; ++t) {
         Vec inp = x_seq[t];
         for (int l = 0; l < num_layers; ++l) {
             inp = cells[l].forward(inp, hiddens[l]);
             hiddens[l] = inp;
+            cache_x[t][l] = cells[l].x_t;
+            cache_h_prev[t][l] = cells[l].h_prev;
+            cache_tanh_z[t][l] = cells[l].tanh_z;
+            cache_h_t[t][l] = cells[l].h_t;
         }
         outputs.push_back(inp);
     }
@@ -864,6 +895,10 @@ std::vector<Vec> RNN::backward(const std::vector<Vec>& dh_seq) {
         for (int l = num_layers - 1; l >= 0; --l) {
             for (int i = 0; i < hidden_size; ++i)
                 dh[i] += dh_next[l][i];
+            cells[l].x_t = cache_x[t][l];
+            cells[l].h_prev = cache_h_prev[t][l];
+            cells[l].tanh_z = cache_tanh_z[t][l];
+            cells[l].h_t = cache_h_t[t][l];
             auto [dx, dh_prev] = cells[l].backward(dh);
             dh_next[l] = dh_prev;
             if (l == 0) dx_seq[t] = dx;
@@ -881,14 +916,42 @@ LSTM::LSTM(int in_sz, int hid_sz, int n_layers)
 
 std::pair<std::vector<Vec>, std::pair<std::vector<Vec>, std::vector<Vec>>>
 LSTM::forward(const std::vector<Vec>& x_seq) {
+    int T = (int)x_seq.size();
+    cache_x.assign(T, std::vector<Vec>(num_layers));
+    cache_h_prev.assign(T, std::vector<Vec>(num_layers));
+    cache_c_prev.assign(T, std::vector<Vec>(num_layers));
+    cache_i_g.assign(T, std::vector<Vec>(num_layers));
+    cache_f_g.assign(T, std::vector<Vec>(num_layers));
+    cache_g_g.assign(T, std::vector<Vec>(num_layers));
+    cache_o_g.assign(T, std::vector<Vec>(num_layers));
+    cache_i_s.assign(T, std::vector<Vec>(num_layers));
+    cache_f_s.assign(T, std::vector<Vec>(num_layers));
+    cache_g_t.assign(T, std::vector<Vec>(num_layers));
+    cache_o_s.assign(T, std::vector<Vec>(num_layers));
+    cache_c_t.assign(T, std::vector<Vec>(num_layers));
+    cache_h_t.assign(T, std::vector<Vec>(num_layers));
     std::vector<Vec> outputs;
     std::vector<Vec> h(num_layers, Vec(hidden_size, 0.0));
     std::vector<Vec> c(num_layers, Vec(hidden_size, 0.0));
-    for (auto& x : x_seq) {
+    for (int t = 0; t < T; ++t) {
+        auto& x = x_seq[t];
         Vec inp = x;
         for (int l = 0; l < num_layers; ++l) {
             auto [h_out, c_out] = cells[l].forward(inp, h[l], c[l]);
             h[l] = h_out; c[l] = c_out;
+            cache_x[t][l] = cells[l].x_t;
+            cache_h_prev[t][l] = cells[l].h_prev;
+            cache_c_prev[t][l] = cells[l].c_prev;
+            cache_i_g[t][l] = cells[l].i_gate;
+            cache_f_g[t][l] = cells[l].f_gate;
+            cache_g_g[t][l] = cells[l].g_gate;
+            cache_o_g[t][l] = cells[l].o_gate;
+            cache_i_s[t][l] = cells[l].i_sig;
+            cache_f_s[t][l] = cells[l].f_sig;
+            cache_g_t[t][l] = cells[l].g_tanh;
+            cache_o_s[t][l] = cells[l].o_sig;
+            cache_c_t[t][l] = cells[l].c_t;
+            cache_h_t[t][l] = cells[l].h_t;
             inp = h_out;
         }
         outputs.push_back(inp);
@@ -906,6 +969,19 @@ void LSTM::backward(const std::vector<Vec>& dh_seq) {
         for (int l = num_layers - 1; l >= 0; --l) {
             for (int i = 0; i < hidden_size; ++i)
                 dh_cur[i] += dh_next[l][i];
+            cells[l].x_t = cache_x[t][l];
+            cells[l].h_prev = cache_h_prev[t][l];
+            cells[l].c_prev = cache_c_prev[t][l];
+            cells[l].i_gate = cache_i_g[t][l];
+            cells[l].f_gate = cache_f_g[t][l];
+            cells[l].g_gate = cache_g_g[t][l];
+            cells[l].o_gate = cache_o_g[t][l];
+            cells[l].i_sig = cache_i_s[t][l];
+            cells[l].f_sig = cache_f_s[t][l];
+            cells[l].g_tanh = cache_g_t[t][l];
+            cells[l].o_sig = cache_o_s[t][l];
+            cells[l].c_t = cache_c_t[t][l];
+            cells[l].h_t = cache_h_t[t][l];
             auto [dx, dh_prev, dc_prev] = cells[l].backward(dh_cur, dc_next[l]);
             dh_next[l] = dh_prev;
             dc_next[l] = dc_prev;
@@ -921,13 +997,33 @@ GRU::GRU(int in_sz, int hid_sz, int n_layers)
 }
 
 std::pair<std::vector<Vec>, std::vector<Vec>> GRU::forward(const std::vector<Vec>& x_seq) {
+    int T = (int)x_seq.size();
+    cache_x.assign(T, std::vector<Vec>(num_layers));
+    cache_h_prev.assign(T, std::vector<Vec>(num_layers));
+    cache_z_g.assign(T, std::vector<Vec>(num_layers));
+    cache_r_g.assign(T, std::vector<Vec>(num_layers));
+    cache_n_g.assign(T, std::vector<Vec>(num_layers));
+    cache_z_s.assign(T, std::vector<Vec>(num_layers));
+    cache_r_s.assign(T, std::vector<Vec>(num_layers));
+    cache_n_t.assign(T, std::vector<Vec>(num_layers));
+    cache_h_t.assign(T, std::vector<Vec>(num_layers));
     std::vector<Vec> outputs;
     std::vector<Vec> h(num_layers, Vec(hidden_size, 0.0));
-    for (auto& x : x_seq) {
+    for (int t = 0; t < T; ++t) {
+        auto& x = x_seq[t];
         Vec inp = x;
         for (int l = 0; l < num_layers; ++l) {
             inp = cells[l].forward(inp, h[l]);
             h[l] = inp;
+            cache_x[t][l] = cells[l].x_t;
+            cache_h_prev[t][l] = cells[l].h_prev;
+            cache_z_g[t][l] = cells[l].z_gate;
+            cache_r_g[t][l] = cells[l].r_gate;
+            cache_n_g[t][l] = cells[l].n_gate;
+            cache_z_s[t][l] = cells[l].z_sig;
+            cache_r_s[t][l] = cells[l].r_sig;
+            cache_n_t[t][l] = cells[l].n_tanh;
+            cache_h_t[t][l] = cells[l].h_t;
         }
         outputs.push_back(inp);
     }
@@ -944,6 +1040,15 @@ std::vector<Vec> GRU::backward(const std::vector<Vec>& dh_seq) {
         for (int l = num_layers - 1; l >= 0; --l) {
             for (int i = 0; i < hidden_size; ++i)
                 dh[i] += dh_next[l][i];
+            cells[l].x_t = cache_x[t][l];
+            cells[l].h_prev = cache_h_prev[t][l];
+            cells[l].z_gate = cache_z_g[t][l];
+            cells[l].r_gate = cache_r_g[t][l];
+            cells[l].n_gate = cache_n_g[t][l];
+            cells[l].z_sig = cache_z_s[t][l];
+            cells[l].r_sig = cache_r_s[t][l];
+            cells[l].n_tanh = cache_n_t[t][l];
+            cells[l].h_t = cache_h_t[t][l];
             auto [dx, dh_prev] = cells[l].backward(dh);
             dh_next[l] = dh_prev;
             if (l == 0) dx_seq[t] = dx;
@@ -959,6 +1064,9 @@ std::vector<Vec> GRU::backward(const std::vector<Vec>& dh_seq) {
 MultiHeadAttention::MultiHeadAttention(int d_model_, int num_heads_)
     : d_model(d_model_), num_heads(num_heads_), d_k(d_model_ / num_heads_)
 {
+    if (d_model_ <= 0 || num_heads_ <= 0 || d_model_ % num_heads_ != 0)
+        throw std::runtime_error("MultiHeadAttention: d_model must be positive "
+                                 "and divisible by num_heads");
     double std_dev = std::sqrt(2.0 / d_model);
     auto init_mat = [&](Vec2D& m) {
         m.assign(d_model, Vec(d_model));
@@ -996,34 +1104,33 @@ Vec3D MultiHeadAttention::forward(const Vec3D& x) {
     k_mat = matmul(W_k, b_k);
     v_mat = matmul(W_v, b_v);
 
-    // Scaled Dot-Product Attention
+    // Scaled Dot-Product Attention（每个 head 独立计算）
     double scale = 1.0 / std::sqrt((double)d_k);
     attn_weights.resize(seq_len, Vec2D(seq_len, Vec(num_heads)));
     Vec3D attn_out(seq_len, Vec2D(num_heads, Vec(d_k)));
 
     for (int s = 0; s < seq_len; ++s) {
-        // attention scores
-        Vec scores(seq_len);
-        for (int j = 0; j < seq_len; ++j) {
-            double dot = 0.0;
-            for (int h = 0; h < num_heads; ++h)
+        for (int h = 0; h < num_heads; ++h) {
+            // 该 head 的 attention scores
+            Vec scores(seq_len);
+            for (int j = 0; j < seq_len; ++j) {
+                double dot = 0.0;
                 for (int k = 0; k < d_k; ++k)
                     dot += q_mat[s][h][k] * k_mat[j][h][k];
-            scores[j] = dot * scale;
-        }
-        // softmax over j
-        double mx = *std::max_element(scores.begin(), scores.end());
-        double sum = 0.0;
-        for (int j = 0; j < seq_len; ++j) {
-            scores[j] = std::exp(scores[j] - mx);
-            sum += scores[j];
-        }
-        for (int j = 0; j < seq_len; ++j) {
-            scores[j] /= sum;
-            attn_weights[s][j] = Vec(num_heads, scores[j]);
-        }
-        // weighted sum
-        for (int h = 0; h < num_heads; ++h) {
+                scores[j] = dot * scale;
+            }
+            // softmax over j
+            double mx = *std::max_element(scores.begin(), scores.end());
+            double sum = 0.0;
+            for (int j = 0; j < seq_len; ++j) {
+                scores[j] = std::exp(scores[j] - mx);
+                sum += scores[j];
+            }
+            for (int j = 0; j < seq_len; ++j) {
+                scores[j] /= sum;
+                attn_weights[s][j][h] = scores[j];
+            }
+            // weighted sum
             for (int k = 0; k < d_k; ++k) {
                 double val = 0.0;
                 for (int j = 0; j < seq_len; ++j)
@@ -1087,32 +1194,33 @@ Vec3D MultiHeadAttention::backward(const Vec3D& dout) {
             for (int k = 0; k < d_k; ++k)
                 d_attn_out[s][h][k] = d_concat[s][h * d_k + k];
 
-    // === 3. dV 和 d_scores ===
-    // attn_out[s][h][k] = sum_j scores[s][j] * v_mat[j][h][k]
+    // === 3. dV 和 d_scores（每个 head 独立）===
+    // attn_out[s][h][k] = sum_j scores[s][j][h] * v_mat[j][h][k]
     Vec3D d_v(seq_len, Vec2D(num_heads, Vec(d_k, 0.0)));
-    Vec2D d_scores(seq_len, Vec(seq_len, 0.0));
+    Vec3D d_scores(seq_len, Vec2D(seq_len, Vec(num_heads, 0.0)));  // [s][j][h]
     for (int s = 0; s < seq_len; ++s) {
         for (int j = 0; j < seq_len; ++j) {
-            double score = attn_weights[s][j][0]; // 所有 head 共享同一 attention
             for (int h = 0; h < num_heads; ++h) {
                 for (int k = 0; k < d_k; ++k) {
-                    d_v[j][h][k] += d_attn_out[s][h][k] * score;
-                    d_scores[s][j] += d_attn_out[s][h][k] * v_mat[j][h][k];
+                    d_v[j][h][k] += d_attn_out[s][h][k] * attn_weights[s][j][h];
+                    d_scores[s][j][h] += d_attn_out[s][h][k] * v_mat[j][h][k];
                 }
             }
         }
     }
 
-    // === 4. Softmax 反向 ===
-    // score[s] = softmax(raw[s]),  raw[s][j] = scale * dot[s][j]
-    Vec2D d_dot(seq_len, Vec(seq_len, 0.0));
+    // === 4. Softmax 反向（每个 head 独立）===
+    // score[s][h] = softmax(raw[s][h]),  raw[s][j][h] = scale * dot[s][j][h]
+    Vec3D d_dot(seq_len, Vec2D(seq_len, Vec(num_heads, 0.0)));
     for (int s = 0; s < seq_len; ++s) {
-        double sum_ws = 0.0;
-        for (int j = 0; j < seq_len; ++j)
-            sum_ws += attn_weights[s][j][0] * d_scores[s][j];
-        for (int j = 0; j < seq_len; ++j) {
-            double d_raw = attn_weights[s][j][0] * (d_scores[s][j] - sum_ws);
-            d_dot[s][j] = d_raw * scale;
+        for (int h = 0; h < num_heads; ++h) {
+            double sum_ws = 0.0;
+            for (int j = 0; j < seq_len; ++j)
+                sum_ws += attn_weights[s][j][h] * d_scores[s][j][h];
+            for (int j = 0; j < seq_len; ++j) {
+                double d_raw = attn_weights[s][j][h] * (d_scores[s][j][h] - sum_ws);
+                d_dot[s][j][h] = d_raw * scale;
+            }
         }
     }
 
@@ -1121,8 +1229,8 @@ Vec3D MultiHeadAttention::backward(const Vec3D& dout) {
     Vec3D d_key(seq_len, Vec2D(num_heads, Vec(d_k, 0.0)));
     for (int s = 0; s < seq_len; ++s) {
         for (int j = 0; j < seq_len; ++j) {
-            double dd = d_dot[s][j];
             for (int h = 0; h < num_heads; ++h) {
+                double dd = d_dot[s][j][h];
                 for (int k = 0; k < d_k; ++k) {
                     d_quer[s][h][k] += dd * k_mat[j][h][k];
                     d_key[j][h][k] += dd * q_mat[s][h][k];
@@ -1256,8 +1364,13 @@ Vec3D TransformerEncoderLayer::forward(const Vec3D& x) {
     int seq_len = (int)x.size();
     // LayerNorm + Attention + Residual
     Vec3D ln1_out(seq_len, Vec2D(1, Vec(d_model)));
-    for (int s = 0; s < seq_len; ++s)
+    ln1_x_centered.resize(seq_len);
+    ln1_inv_std.resize(seq_len);
+    for (int s = 0; s < seq_len; ++s) {
         ln1_out[s][0] = ln1.forward(x[s][0]);
+        ln1_x_centered[s] = ln1.x_centered;
+        ln1_inv_std[s] = ln1.inv_std;
+    }
     Vec3D attn_out = attn.forward(ln1_out);
     // Residual
     Vec3D res1(seq_len, Vec2D(1, Vec(d_model)));
@@ -1267,8 +1380,13 @@ Vec3D TransformerEncoderLayer::forward(const Vec3D& x) {
 
     // LayerNorm + FF + Residual
     Vec3D ln2_out(seq_len, Vec2D(1, Vec(d_model)));
-    for (int s = 0; s < seq_len; ++s)
+    ln2_x_centered.resize(seq_len);
+    ln2_inv_std.resize(seq_len);
+    for (int s = 0; s < seq_len; ++s) {
         ln2_out[s][0] = ln2.forward(res1[s][0]);
+        ln2_x_centered[s] = ln2.x_centered;
+        ln2_inv_std[s] = ln2.inv_std;
+    }
     Vec3D ff_out = ff.forward(ln2_out);
     Vec3D res2(seq_len, Vec2D(1, Vec(d_model)));
     for (int s = 0; s < seq_len; ++s)
@@ -1300,6 +1418,8 @@ Vec3D TransformerEncoderLayer::backward(const Vec3D& dout) {
         // 残差路径直传
         d_res1[s][0] = dout[s][0];
         // LN2 backward (使用 forward 中缓存的 x_centered, inv_std)
+        ln2.x_centered = ln2_x_centered[s];
+        ln2.inv_std = ln2_inv_std[s];
         auto [dg, db, dx_ln2] = ln2.backward(d_ln2_out[s][0]);
         for (int i = 0; i < d_model; ++i)
             d_res1[s][0][i] += dx_ln2[i];
@@ -1318,6 +1438,8 @@ Vec3D TransformerEncoderLayer::backward(const Vec3D& dout) {
         // 残差路径直传
         dx[s][0] = d_res1[s][0];
         // LN1 backward
+        ln1.x_centered = ln1_x_centered[s];
+        ln1.inv_std = ln1_inv_std[s];
         auto [dg, db, dxi] = ln1.backward(d_ln1_out[s][0]);
         for (int i = 0; i < d_model; ++i)
             dx[s][0][i] += dxi[i];
@@ -1378,6 +1500,8 @@ PositionalEncoding::PositionalEncoding(int d_model_, int max_len)
 
 Vec3D PositionalEncoding::forward(const Vec3D& x) {
     int seq_len = (int)x.size();
+    if (seq_len > (int)pe.size())
+        throw std::runtime_error("PositionalEncoding: sequence longer than max_len");
     Vec3D out = x;
     for (int s = 0; s < seq_len; ++s)
         for (int i = 0; i < d_model; ++i)
@@ -1400,8 +1524,11 @@ Embedding::Embedding(int vocab_sz, int embed_dim_)
 Vec2D Embedding::forward(const std::vector<int>& indices) {
     indices_cache = indices;
     Vec2D out(indices.size(), Vec(embed_dim));
-    for (size_t i = 0; i < indices.size(); ++i)
+    for (size_t i = 0; i < indices.size(); ++i) {
+        if (indices[i] < 0 || indices[i] >= vocab_size)
+            throw std::out_of_range("Embedding::forward: index out of range");
         out[i] = weight[indices[i]];
+    }
     return out;
 }
 
@@ -1524,8 +1651,11 @@ Vec SequentialOp::forward(const Vec& x) {
         return out;
     }
     case DROPOUT: {
-        if (p <= 0) return x;
         drop_mask.resize(dim);
+        if (p <= 0) {
+            std::fill(drop_mask.begin(), drop_mask.end(), 1.0);
+            return x;
+        }
         Vec out(dim);
         double scale = 1.0 / (1.0 - p);
         for (int i = 0; i < dim; ++i) {
@@ -1596,6 +1726,7 @@ Vec SequentialOp::backward(const Vec& dout) {
         return dx;
     }
     case DROPOUT: {
+        if (p <= 0 || (int)drop_mask.size() != dim) return dout;
         Vec dx(dim);
         for (int i = 0; i < dim; ++i)
             dx[i] = dout[i] * drop_mask[i];
@@ -1742,6 +1873,43 @@ void RMSprop::step(const std::vector<GradPair>& grads) {
 }
 
 // ============================================================================
+//  ParamOptimizer — 通用参数优化器
+// ============================================================================
+ParamOptimizer::ParamOptimizer(Type t, double lr_) : type(t), lr(lr_) {}
+
+void ParamOptimizer::add(double* value, double* grad) {
+    params.push_back({value, grad});
+}
+
+void ParamOptimizer::step(double scale) {
+    ++t;
+    double bc1 = 1.0 - std::pow(0.9, t);
+    double bc2 = 1.0 - std::pow(0.999, t);
+    for (auto& pr : params) {
+        double g = (*pr.grad) * scale;
+        auto& st = state[pr.value];
+        switch (type) {
+        case ADAM:
+            st.m = 0.9 * st.m + 0.1 * g;
+            st.v = 0.999 * st.v + 0.001 * g * g;
+            *pr.value -= lr * (st.m / bc1) / (std::sqrt(st.v / bc2) + 1e-8);
+            break;
+        case SGD:
+            *pr.value -= lr * g;
+            break;
+        case RMSPROP:
+            st.v = 0.9 * st.v + 0.1 * g * g;
+            *pr.value -= lr * g / (std::sqrt(st.v) + 1e-8);
+            break;
+        }
+    }
+}
+
+void ParamOptimizer::zero_grad() {
+    for (auto& pr : params) *pr.grad = 0.0;
+}
+
+// ============================================================================
 //  Loss Functions
 // ============================================================================
 std::pair<double, Vec> mse_loss(const Vec& pred, const Vec& target) {
@@ -1757,9 +1925,11 @@ std::pair<double, Vec> mse_loss(const Vec& pred, const Vec& target) {
 }
 
 std::pair<double, Vec> cross_entropy_loss(const Vec& pred, int target_idx) {
-    double loss = -std::log(std::max(pred[target_idx], 1e-15));
+    // 防御性钳制，避免调用方传越界标签导致 UB
+    int t = std::max(0, std::min((int)pred.size() - 1, target_idx));
+    double loss = -std::log(std::max(pred[t], 1e-15));
     Vec grad = pred;
-    grad[target_idx] -= 1.0;
+    grad[t] -= 1.0;
     return {loss, grad};
 }
 
@@ -1843,9 +2013,9 @@ void CosineAnnealingLR::step(int epoch) {
 // ============================================================================
 SplitResult split_data(const Dataset& data, double val_ratio,
                         double test_ratio, int seed_) {
-    seed(seed_);
+    std::mt19937 local_rng(seed_);
     Dataset shuffled = data;
-    std::shuffle(shuffled.begin(), shuffled.end(), rng());
+    std::shuffle(shuffled.begin(), shuffled.end(), local_rng);
 
     int n = (int)shuffled.size();
     int n_test = (int)(n * test_ratio);
@@ -1977,6 +2147,13 @@ Vec softmax(const Vec& logits) {
 }
 
 Vec softmax_with_temp(const Vec& logits, double temperature) {
+    if (temperature <= 0 || std::isnan(temperature)) {
+        // 温度 <= 0：贪心采样（one-hot argmax）
+        Vec out(logits.size(), 0.0);
+        if (!logits.empty())
+            out[std::max_element(logits.begin(), logits.end()) - logits.begin()] = 1.0;
+        return out;
+    }
     if (temperature == 1.0) return softmax(logits);
     Vec scaled(logits.size());
     for (size_t i = 0; i < logits.size(); ++i)
@@ -1997,6 +2174,7 @@ int sample_index(const Vec& probs) {
 std::string generate_text(MLP& network, TextProcessor& tp,
                           const std::string& start_str,
                           int length, int window_size, double temp) {
+    if (tp.chars.empty() || tp.vocab_size == 0) return start_str;
     std::string generated = start_str;
     for (int _ = 0; _ < length; ++_) {
         std::string context = generated.substr(
@@ -2106,6 +2284,7 @@ double Model::evaluate(const std::vector<Vec>& x, const std::vector<Vec>& y) {
 
 double Model::score(const std::vector<Vec>& x, const std::vector<Vec>& y) {
     // R² for regression
+    if (x.empty() || x.size() != y.size() || y[0].empty()) return 0.0;
     auto preds = predict(x);
     double ss_res = 0.0, ss_tot = 0.0;
     double y_mean = 0.0;
@@ -2122,6 +2301,7 @@ double Model::score(const std::vector<Vec>& x, const std::vector<Vec>& y) {
 
 double Model::score(const std::vector<Vec>& x, const std::vector<int>& y) {
     // accuracy for classification
+    if (x.empty() || x.size() != y.size()) return 0.0;
     int correct = 0;
     for (size_t i = 0; i < x.size(); ++i)
         if (predict_class(x[i]) == y[i]) ++correct;
@@ -2152,6 +2332,12 @@ void Model::fit(const Dataset& data, int epochs, int batch_size,
     val_history.clear();
     test_history.clear();
     trained = false;
+
+    if (train_set.empty()) {
+        if (verbose) std::cout << "Model::fit: empty training set, skipped\n";
+        return;
+    }
+
     double best_val = DBL_MAX;
     int no_improve = 0;
 
@@ -2203,6 +2389,10 @@ void Model::fit(const Dataset& data, int epochs, int batch_size,
                 Vec grad;
                 if (task == "classification") {
                     int label = (int)yi[0];
+                    if (label < 0 || label >= (int)pred.size())
+                        throw std::runtime_error(
+                            "Model::fit: class label " + std::to_string(label) +
+                            " out of range [0, " + std::to_string(pred.size()) + ")");
                     auto [l, g] = cross_entropy_loss(pred, label);
                     loss = l; grad = g;
                 } else {
@@ -2340,6 +2530,7 @@ void Model::fit(const std::vector<Vec>& x, const std::vector<int>& y,
 void Model::save(const std::string& filepath, int epochs, int batch) {
     std::ofstream f(filepath);
     // 新格式：CONFIG: task loss_name opt_name lr epochs batch dropout l2 test_split
+    f << std::setprecision(17);
     f << "CONFIG: " << task << " " << loss_name << " " << opt_name << " "
       << lr << " " << epochs << " " << batch << " "
       << dropout_rate << " " << l2_lambda << " " << test_split << "\n";
@@ -2491,6 +2682,565 @@ std::string Model::to_string() const {
     oss << "Model(task=" << task << ", loss=" << loss_name
         << ", opt=" << opt_name << ", lr=" << lr << ")";
     return oss.str();
+}
+
+// ============================================================================
+//  TransformerModel — 可端到端训练的 Transformer 分类器
+// ============================================================================
+TransformerModel::TransformerModel(int vocab_sz, int d_model_, int num_heads_,
+                                   int d_ff_, int num_layers_, int num_classes_,
+                                   double lr_, const std::string& opt)
+    : vocab_size(vocab_sz), d_model(d_model_), num_heads(num_heads_),
+      d_ff(d_ff_), num_layers(num_layers_), num_classes(num_classes_),
+      lr(lr_), opt_name(opt),
+      emb(vocab_sz, d_model_),
+      pe(d_model_),
+      enc(d_model_, num_heads_, d_ff_, num_layers_),
+      head(d_model_, num_classes_, Layer::Activation::LINEAR, true)
+{
+    head_gw.assign(num_classes_, Vec(d_model_, 0.0));
+    head_gb.assign(num_classes_, 0.0);
+}
+
+Vec TransformerModel::forward_logits(const std::vector<int>& seq) {
+    if (seq.empty())
+        throw std::runtime_error("TransformerModel: empty sequence");
+    Vec2D emb_out = emb.forward(seq);
+    int seq_len = (int)seq.size();
+    Vec3D x3(seq_len, Vec2D(1, Vec(d_model)));
+    for (int s = 0; s < seq_len; ++s)
+        x3[s][0] = emb_out[s];
+    x3 = pe.forward(x3);
+    x3 = enc.forward(x3);
+    // Mean pooling over sequence
+    Vec pooled(d_model, 0.0);
+    for (int s = 0; s < seq_len; ++s)
+        for (int i = 0; i < d_model; ++i)
+            pooled[i] += x3[s][0][i];
+    for (int i = 0; i < d_model; ++i)
+        pooled[i] /= seq_len;
+    return head.forward(pooled);
+}
+
+Vec TransformerModel::predict(const std::vector<int>& seq) {
+    return softmax(forward_logits(seq));
+}
+
+int TransformerModel::predict_class(const std::vector<int>& seq) {
+    Vec probs = predict(seq);
+    return (int)(std::max_element(probs.begin(), probs.end()) - probs.begin());
+}
+
+void TransformerModel::backward_sample(const std::vector<int>& seq,
+                                       const Vec& grad) {
+    int seq_len = (int)seq.size();
+    // 分类头反向（Layer 不内建梯度缓冲，这里累积到成员）
+    auto [hw, hb, d_pooled] = head.backward(grad);
+    for (int j = 0; j < num_classes; ++j) {
+        head_gb[j] += hb[j];
+        for (int i = 0; i < d_model; ++i)
+            head_gw[j][i] += hw[j][i];
+    }
+    // MeanPool 反向：把 d_pooled 均摊到每个位置
+    Vec3D d_enc(seq_len, Vec2D(1, Vec(d_model, 0.0)));
+    for (int s = 0; s < seq_len; ++s)
+        for (int i = 0; i < d_model; ++i)
+            d_enc[s][0][i] = d_pooled[i] / seq_len;
+    Vec3D d_x3 = enc.backward(d_enc);
+    Vec2D d_emb(seq_len, Vec(d_model, 0.0));
+    for (int s = 0; s < seq_len; ++s)
+        d_emb[s] = d_x3[s][0];
+    emb.backward(d_emb);
+}
+
+void TransformerModel::collect_params(ParamOptimizer& po) {
+    // Embedding
+    for (int i = 0; i < vocab_size; ++i)
+        for (int j = 0; j < d_model; ++j)
+            po.add(&emb.weight[i][j], &emb.grad_w[i][j]);
+    // Encoder 各层
+    for (auto& L : enc.layers) {
+        auto& a = L.attn;
+        for (int i = 0; i < d_model; ++i) {
+            for (int j = 0; j < d_model; ++j) {
+                po.add(&a.W_q[i][j], &a.grad_W_q[i][j]);
+                po.add(&a.W_k[i][j], &a.grad_W_k[i][j]);
+                po.add(&a.W_v[i][j], &a.grad_W_v[i][j]);
+                po.add(&a.W_o[i][j], &a.grad_W_o[i][j]);
+            }
+            po.add(&a.b_q[i], &a.grad_b_q[i]);
+            po.add(&a.b_k[i], &a.grad_b_k[i]);
+            po.add(&a.b_v[i], &a.grad_b_v[i]);
+            po.add(&a.b_o[i], &a.grad_b_o[i]);
+        }
+        auto& f = L.ff;
+        for (int i = 0; i < d_ff; ++i)
+            for (int j = 0; j < d_model; ++j)
+                po.add(&f.W1[i][j], &f.grad_W1[i][j]);
+        for (int i = 0; i < d_model; ++i)
+            for (int j = 0; j < d_ff; ++j)
+                po.add(&f.W2[i][j], &f.grad_W2[i][j]);
+        for (int i = 0; i < d_ff; ++i)
+            po.add(&f.b1[i], &f.grad_b1[i]);
+        for (int i = 0; i < d_model; ++i)
+            po.add(&f.b2[i], &f.grad_b2[i]);
+        // LayerNorm γ/β
+        for (int i = 0; i < d_model; ++i) {
+            po.add(&L.ln1.gamma[i], &L.ln1.grad_gamma[i]);
+            po.add(&L.ln1.beta[i], &L.ln1.grad_beta[i]);
+            po.add(&L.ln2.gamma[i], &L.ln2.grad_gamma[i]);
+            po.add(&L.ln2.beta[i], &L.ln2.grad_beta[i]);
+        }
+    }
+    // 分类头
+    for (int j = 0; j < num_classes; ++j) {
+        for (int i = 0; i < d_model; ++i)
+            po.add(&head.weights[j][i], &head_gw[j][i]);
+        po.add(&head.biases[j], &head_gb[j]);
+    }
+}
+
+void TransformerModel::fit(const std::vector<std::vector<int>>& x,
+                           const std::vector<int>& y,
+                           int epochs, int batch_size,
+                           double val_split, int patience, bool verbose) {
+    int n = (int)x.size();
+    if (n == 0 || x.size() != y.size()) {
+        if (verbose) std::cout << "TransformerModel::fit: empty/mismatched data\n";
+        return;
+    }
+    if (batch_size <= 0) batch_size = n;
+
+    // 划分 train/val（局部 RNG，不污染全局种子）
+    std::vector<int> idx(n);
+    std::iota(idx.begin(), idx.end(), 0);
+    std::mt19937 local_rng(42);
+    std::shuffle(idx.begin(), idx.end(), local_rng);
+    int n_val = (int)(n * val_split);
+    if (n_val > 0 && n - n_val < 1) n_val = 0;
+    std::vector<int> train_idx(idx.begin() + n_val, idx.end());
+    std::vector<int> val_idx(idx.begin(), idx.begin() + n_val);
+    if (train_idx.empty()) train_idx = idx;
+
+    ParamOptimizer po(opt_name == "sgd" ? ParamOptimizer::SGD
+                    : opt_name == "rmsprop" ? ParamOptimizer::RMSPROP
+                                            : ParamOptimizer::ADAM,
+                      lr);
+    collect_params(po);
+
+    train_history.clear();
+    val_history.clear();
+    double best_val_acc = -1.0;
+    int no_improve = 0;
+
+    for (int epoch = 1; epoch <= epochs; ++epoch) {
+        if (stop_flag && stop_flag->load()) {
+            if (verbose) std::cout << "Training stopped by user at epoch " << epoch << "\n";
+            break;
+        }
+        std::shuffle(train_idx.begin(), train_idx.end(), rng());
+        double total_loss = 0.0;
+
+        for (int b = 0; b < (int)train_idx.size(); b += batch_size) {
+            int end = std::min(b + batch_size, (int)train_idx.size());
+            int B = end - b;
+            po.zero_grad();
+            double batch_loss = 0.0;
+            for (int k = b; k < end; ++k) {
+                int si = train_idx[k];
+                Vec logits = forward_logits(x[si]);
+                Vec probs = softmax(logits);
+                int label = y[si];
+                double loss = -std::log(std::max(probs[label], 1e-15));
+                batch_loss += loss;
+                Vec grad = probs;
+                grad[label] -= 1.0;
+                backward_sample(x[si], grad);
+            }
+            po.step(1.0 / B);
+            total_loss += batch_loss;
+        }
+
+        double avg_loss = total_loss / train_idx.size();
+        train_history.push_back({epoch, avg_loss});
+
+        double val_acc = -1.0;
+        if (!val_idx.empty()) {
+            int ok = 0;
+            for (int si : val_idx)
+                if (predict_class(x[si]) == y[si]) ++ok;
+            val_acc = (double)ok / val_idx.size();
+            val_history.push_back({epoch, 1.0 - val_acc});
+            if (patience > 0) {
+                if (val_acc > best_val_acc + 1e-12) {
+                    best_val_acc = val_acc;
+                    no_improve = 0;
+                } else if (++no_improve >= patience) {
+                    if (verbose) std::cout << "Early stopping at epoch " << epoch << "\n";
+                    break;
+                }
+            }
+        }
+
+        int report_every = std::max(1, std::min(epochs / 10, 50));
+        if (verbose && (epoch == 1 || epoch % report_every == 0 || epoch == epochs)) {
+            std::cout << "Epoch " << epoch << "/" << epochs
+                      << " | loss=" << std::fixed << std::setprecision(6) << avg_loss;
+            if (val_acc >= 0) std::cout << " | val_acc=" << val_acc;
+            std::cout << "\n";
+        }
+    }
+}
+
+double TransformerModel::score(const std::vector<std::vector<int>>& x,
+                               const std::vector<int>& y) {
+    if (x.empty() || x.size() != y.size()) return 0.0;
+    int ok = 0;
+    for (size_t i = 0; i < x.size(); ++i)
+        if (predict_class(x[i]) == y[i]) ++ok;
+    return (double)ok / x.size();
+}
+
+void TransformerModel::summary() const {
+    std::cout << "==================================================\n"
+              << "  TransformerModel (" << task << ")\n"
+              << "  vocab=" << vocab_size << " d_model=" << d_model
+              << " heads=" << num_heads << " d_ff=" << d_ff
+              << " layers=" << num_layers << " classes=" << num_classes << "\n"
+              << "  Optimizer: " << opt_name << " (lr=" << lr << ")\n"
+              << "==================================================\n";
+}
+
+void TransformerModel::save(const std::string& filepath) const {
+    std::ofstream f(filepath);
+    if (!f) throw std::runtime_error("Cannot open file for save: " + filepath);
+    f << std::setprecision(17);
+    f << "TMODEL1\n";
+    f << vocab_size << " " << d_model << " " << num_heads << " " << d_ff << " "
+      << num_layers << " " << num_classes << " " << lr << " " << opt_name << "\n";
+    auto dump = [&](const Vec2D& w) {
+        for (auto& r : w) {
+            for (size_t i = 0; i < r.size(); ++i) {
+                if (i) f << " ";
+                f << r[i];
+            }
+            f << "\n";
+        }
+    };
+    auto dump1 = [&](const Vec& v) {
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (i) f << " ";
+            f << v[i];
+        }
+        f << "\n";
+    };
+    dump(emb.weight);
+    for (auto& L : enc.layers) {
+        dump(L.attn.W_q); dump(L.attn.W_k); dump(L.attn.W_v); dump(L.attn.W_o);
+        dump1(L.attn.b_q); dump1(L.attn.b_k); dump1(L.attn.b_v); dump1(L.attn.b_o);
+        dump(L.ff.W1); dump(L.ff.W2);
+        dump1(L.ff.b1); dump1(L.ff.b2);
+        dump1(L.ln1.gamma); dump1(L.ln1.beta);
+        dump1(L.ln2.gamma); dump1(L.ln2.beta);
+    }
+    dump(head.weights);
+    dump1(head.biases);
+    f.close();
+    std::cout << "TransformerModel saved to " << filepath << "\n";
+}
+
+TransformerModel TransformerModel::load(const std::string& filepath) {
+    std::ifstream f(filepath);
+    if (!f) throw std::runtime_error("Cannot open file: " + filepath);
+    std::string magic;
+    f >> magic;
+    if (magic != "TMODEL1")
+        throw std::runtime_error("Not a TransformerModel file: " + filepath);
+    int vs, dm, nh, df, nl, nc;
+    double lr_;
+    std::string opt;
+    f >> vs >> dm >> nh >> df >> nl >> nc >> lr_ >> opt;
+    TransformerModel m(vs, dm, nh, df, nl, nc, lr_, opt);
+    auto load = [&](Vec2D& w) {
+        for (auto& r : w) for (auto& v : r) f >> v;
+    };
+    auto load1 = [&](Vec& v) {
+        for (auto& x : v) f >> x;
+    };
+    load(m.emb.weight);
+    for (auto& L : m.enc.layers) {
+        load(L.attn.W_q); load(L.attn.W_k); load(L.attn.W_v); load(L.attn.W_o);
+        load1(L.attn.b_q); load1(L.attn.b_k); load1(L.attn.b_v); load1(L.attn.b_o);
+        load(L.ff.W1); load(L.ff.W2);
+        load1(L.ff.b1); load1(L.ff.b2);
+        load1(L.ln1.gamma); load1(L.ln1.beta);
+        load1(L.ln2.gamma); load1(L.ln2.beta);
+    }
+    load(m.head.weights);
+    load1(m.head.biases);
+    return m;
+}
+
+// ============================================================================
+//  RecurrentModel — 可端到端训练的 RNN / LSTM / GRU 序列分类器
+// ============================================================================
+RecurrentModel::RecurrentModel(const std::string& type, int in_sz, int hid_sz,
+                               int n_layers, int num_classes_,
+                               double lr_, const std::string& opt)
+    : rnn_type(type), input_size(in_sz), hidden_size(hid_sz),
+      num_layers(n_layers), num_classes(num_classes_), lr(lr_), opt_name(opt),
+      head(hid_sz, num_classes_, Layer::Activation::LINEAR, true)
+{
+    if (type == "rnn") rnn = std::make_unique<RNN>(in_sz, hid_sz, n_layers);
+    else if (type == "lstm") lstm = std::make_unique<LSTM>(in_sz, hid_sz, n_layers);
+    else if (type == "gru") gru = std::make_unique<GRU>(in_sz, hid_sz, n_layers);
+    else throw std::runtime_error("RecurrentModel: unknown type '" + type + "'");
+    head_gw.assign(num_classes_, Vec(hid_sz, 0.0));
+    head_gb.assign(num_classes_, 0.0);
+}
+
+Vec RecurrentModel::forward_logits(const std::vector<Vec>& seq) {
+    if (seq.empty())
+        throw std::runtime_error("RecurrentModel: empty sequence");
+    Vec h;
+    if (rnn_type == "rnn") {
+        auto [outs, hiddens] = rnn->forward(seq);
+        h = hiddens.back();
+    } else if (rnn_type == "lstm") {
+        auto [outs, states] = lstm->forward(seq);
+        h = states.first.back();
+    } else {
+        auto [outs, hiddens] = gru->forward(seq);
+        h = hiddens.back();
+    }
+    return head.forward(h);
+}
+
+Vec RecurrentModel::predict(const std::vector<Vec>& seq) {
+    return softmax(forward_logits(seq));
+}
+
+int RecurrentModel::predict_class(const std::vector<Vec>& seq) {
+    Vec probs = predict(seq);
+    return (int)(std::max_element(probs.begin(), probs.end()) - probs.begin());
+}
+
+void RecurrentModel::backward_sample(const std::vector<Vec>& seq,
+                                     const Vec& grad) {
+    int T = (int)seq.size();
+    auto [hw, hb, d_h] = head.backward(grad);
+    for (int j = 0; j < num_classes; ++j) {
+        head_gb[j] += hb[j];
+        for (int i = 0; i < hidden_size; ++i)
+            head_gw[j][i] += hw[j][i];
+    }
+    // 只在最后一个时间步有梯度
+    std::vector<Vec> dh_seq(T, Vec(hidden_size, 0.0));
+    dh_seq[T - 1] = d_h;
+    if (rnn_type == "rnn") rnn->backward(dh_seq);
+    else if (rnn_type == "lstm") lstm->backward(dh_seq);
+    else gru->backward(dh_seq);
+}
+
+void RecurrentModel::collect_params(ParamOptimizer& po) {
+    auto collect_cell = [&](auto& cells) {
+        for (auto& c : cells) {
+            for (size_t j = 0; j < c.W_ih.size(); ++j) {
+                for (size_t k = 0; k < c.W_ih[j].size(); ++k)
+                    po.add(&c.W_ih[j][k], &c.grad_W_ih[j][k]);
+                for (size_t k = 0; k < c.W_hh[j].size(); ++k)
+                    po.add(&c.W_hh[j][k], &c.grad_W_hh[j][k]);
+            }
+            for (size_t j = 0; j < c.b_ih.size(); ++j) {
+                po.add(&c.b_ih[j], &c.grad_b_ih[j]);
+                po.add(&c.b_hh[j], &c.grad_b_hh[j]);
+            }
+        }
+    };
+    if (rnn_type == "rnn") collect_cell(rnn->cells);
+    else if (rnn_type == "lstm") collect_cell(lstm->cells);
+    else collect_cell(gru->cells);
+
+    for (int j = 0; j < num_classes; ++j) {
+        for (int i = 0; i < hidden_size; ++i)
+            po.add(&head.weights[j][i], &head_gw[j][i]);
+        po.add(&head.biases[j], &head_gb[j]);
+    }
+}
+
+void RecurrentModel::fit(const std::vector<std::vector<Vec>>& x,
+                         const std::vector<int>& y,
+                         int epochs, int batch_size,
+                         double val_split, int patience, bool verbose) {
+    int n = (int)x.size();
+    if (n == 0 || x.size() != y.size()) {
+        if (verbose) std::cout << "RecurrentModel::fit: empty/mismatched data\n";
+        return;
+    }
+    if (batch_size <= 0) batch_size = n;
+
+    std::vector<int> idx(n);
+    std::iota(idx.begin(), idx.end(), 0);
+    std::mt19937 local_rng(42);
+    std::shuffle(idx.begin(), idx.end(), local_rng);
+    int n_val = (int)(n * val_split);
+    if (n_val > 0 && n - n_val < 1) n_val = 0;
+    std::vector<int> train_idx(idx.begin() + n_val, idx.end());
+    std::vector<int> val_idx(idx.begin(), idx.begin() + n_val);
+    if (train_idx.empty()) train_idx = idx;
+
+    ParamOptimizer po(opt_name == "sgd" ? ParamOptimizer::SGD
+                    : opt_name == "rmsprop" ? ParamOptimizer::RMSPROP
+                                            : ParamOptimizer::ADAM,
+                      lr);
+    collect_params(po);
+
+    train_history.clear();
+    val_history.clear();
+    double best_val_acc = -1.0;
+    int no_improve = 0;
+
+    for (int epoch = 1; epoch <= epochs; ++epoch) {
+        if (stop_flag && stop_flag->load()) {
+            if (verbose) std::cout << "Training stopped by user at epoch " << epoch << "\n";
+            break;
+        }
+        std::shuffle(train_idx.begin(), train_idx.end(), rng());
+        double total_loss = 0.0;
+
+        for (int b = 0; b < (int)train_idx.size(); b += batch_size) {
+            int end = std::min(b + batch_size, (int)train_idx.size());
+            int B = end - b;
+            po.zero_grad();
+            double batch_loss = 0.0;
+            for (int k = b; k < end; ++k) {
+                int si = train_idx[k];
+                Vec logits = forward_logits(x[si]);
+                Vec probs = softmax(logits);
+                int label = y[si];
+                double loss = -std::log(std::max(probs[label], 1e-15));
+                batch_loss += loss;
+                Vec grad = probs;
+                grad[label] -= 1.0;
+                backward_sample(x[si], grad);
+            }
+            po.step(1.0 / B);
+            total_loss += batch_loss;
+        }
+
+        double avg_loss = total_loss / train_idx.size();
+        train_history.push_back({epoch, avg_loss});
+
+        double val_acc = -1.0;
+        if (!val_idx.empty()) {
+            int ok = 0;
+            for (int si : val_idx)
+                if (predict_class(x[si]) == y[si]) ++ok;
+            val_acc = (double)ok / val_idx.size();
+            val_history.push_back({epoch, 1.0 - val_acc});
+            if (patience > 0) {
+                if (val_acc > best_val_acc + 1e-12) {
+                    best_val_acc = val_acc;
+                    no_improve = 0;
+                } else if (++no_improve >= patience) {
+                    if (verbose) std::cout << "Early stopping at epoch " << epoch << "\n";
+                    break;
+                }
+            }
+        }
+
+        int report_every = std::max(1, std::min(epochs / 10, 50));
+        if (verbose && (epoch == 1 || epoch % report_every == 0 || epoch == epochs)) {
+            std::cout << "Epoch " << epoch << "/" << epochs
+                      << " | loss=" << std::fixed << std::setprecision(6) << avg_loss;
+            if (val_acc >= 0) std::cout << " | val_acc=" << val_acc;
+            std::cout << "\n";
+        }
+    }
+}
+
+double RecurrentModel::score(const std::vector<std::vector<Vec>>& x,
+                             const std::vector<int>& y) {
+    if (x.empty() || x.size() != y.size()) return 0.0;
+    int ok = 0;
+    for (size_t i = 0; i < x.size(); ++i)
+        if (predict_class(x[i]) == y[i]) ++ok;
+    return (double)ok / x.size();
+}
+
+void RecurrentModel::save(const std::string& filepath) const {
+    std::ofstream f(filepath);
+    if (!f) throw std::runtime_error("Cannot open file for save: " + filepath);
+    f << std::setprecision(17);
+    f << "RMODEL1 " << rnn_type << "\n";
+    f << input_size << " " << hidden_size << " " << num_layers << " "
+      << num_classes << " " << lr << " " << opt_name << "\n";
+    auto dump = [&](const Vec2D& w) {
+        for (auto& r : w) {
+            for (size_t i = 0; i < r.size(); ++i) {
+                if (i) f << " ";
+                f << r[i];
+            }
+            f << "\n";
+        }
+    };
+    auto dump1 = [&](const Vec& v) {
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (i) f << " ";
+            f << v[i];
+        }
+        f << "\n";
+    };
+    auto dump_cell = [&](const auto& c) {
+        dump(c.W_ih); dump(c.W_hh);
+        dump1(c.b_ih); dump1(c.b_hh);
+    };
+    if (rnn_type == "rnn") for (auto& c : rnn->cells) dump_cell(c);
+    else if (rnn_type == "lstm") for (auto& c : lstm->cells) dump_cell(c);
+    else for (auto& c : gru->cells) dump_cell(c);
+    dump(head.weights);
+    dump1(head.biases);
+    f.close();
+    std::cout << "RecurrentModel saved to " << filepath << "\n";
+}
+
+RecurrentModel RecurrentModel::load(const std::string& filepath) {
+    std::ifstream f(filepath);
+    if (!f) throw std::runtime_error("Cannot open file: " + filepath);
+    std::string magic, type;
+    f >> magic >> type;
+    if (magic != "RMODEL1")
+        throw std::runtime_error("Not a RecurrentModel file: " + filepath);
+    int in_sz, hid_sz, nl, nc;
+    double lr_;
+    std::string opt;
+    f >> in_sz >> hid_sz >> nl >> nc >> lr_ >> opt;
+    RecurrentModel m(type, in_sz, hid_sz, nl, nc, lr_, opt);
+    auto load = [&](Vec2D& w) {
+        for (auto& r : w) for (auto& v : r) f >> v;
+    };
+    auto load1 = [&](Vec& v) {
+        for (auto& x : v) f >> x;
+    };
+    auto load_cell = [&](auto& c) {
+        load(c.W_ih); load(c.W_hh);
+        load1(c.b_ih); load1(c.b_hh);
+    };
+    if (type == "rnn") for (auto& c : m.rnn->cells) load_cell(c);
+    else if (type == "lstm") for (auto& c : m.lstm->cells) load_cell(c);
+    else for (auto& c : m.gru->cells) load_cell(c);
+    load(m.head.weights);
+    load1(m.head.biases);
+    return m;
+}
+
+void RecurrentModel::summary() const {
+    std::cout << "==================================================\n"
+              << "  RecurrentModel (" << rnn_type << ", " << num_layers << " layers)\n"
+              << "  input=" << input_size << " hidden=" << hidden_size
+              << " classes=" << num_classes << "\n"
+              << "  Optimizer: " << opt_name << " (lr=" << lr << ")\n"
+              << "==================================================\n";
 }
 
 // ============================================================================
