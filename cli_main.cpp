@@ -26,6 +26,9 @@
 
 #include <chrono>
 #ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX   /* 必须放在 windows.h 之前：否则 min/max 宏会破坏 std::min/std::max
+                    * （MSVC 报 C2589: '(' illegal token on right side of '::'） */
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #endif

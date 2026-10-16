@@ -28,7 +28,14 @@ jobs:
       - name: Compile with MinGW
         shell: msys2 {0}
         run: |
-          g++ -std=c++17 -O2 -Wall -mwindows -static -o ai.exe main.cpp AI.cpp -lcomctl32 -lcomdlg32
+          gcc -std=c17 -O2 -Wall -c -I. -Ic \
+              c/ai.c c/tensor.c c/layers_conv.c c/layers_norm.c c/rnn.c \
+              c/attention.c c/containers.c c/json.c c/model_io.c c/model_high.c \
+              c/text.c c/sched.c
+            g++ -std=c++17 -O2 -Wall -mwindows -static -o ai.exe -I. -Ic \
+              main.cpp c_model.cpp *.o -lcomctl32 -lcomdlg32
+            g++ -std=c++17 -O2 -Wall -static -o ai_cli.exe -I. -Ic \
+              cli_main.cpp c_model.cpp *.o -lws2_32
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
