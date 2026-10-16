@@ -132,9 +132,19 @@ jobs:
 
             自动构建版本，由 GitHub Actions 编译并发布。
 
-            ### 构建版本
-            - **ai-mingw64.zip / ai.exe** — MinGW-w64 静态编译（无运行时依赖）
-            - **ai-msvc.zip / ai-msvc.exe** — MSVC 编译（需要 VC++ 运行库）
+            ### 两个版本 / Two editions
+            本仓库同时提供**图形界面版**与**命令行版**，二者共用同一个纯 C 引擎
+            （`c/` 目录，与 Python 版数值逐位一致），模型存档格式互通。
+
+            | 版本 | MinGW-w64（静态，无运行时依赖） | MSVC（需要 VC++ 运行库） |
+            |------|--------------------------------|--------------------------|
+            | **GUI 图形界面版** | `ai-mingw64-gui.zip` / `ai.exe` | `ai-msvc-gui.zip` / `ai-msvc-gui.exe` |
+            | **CLI 命令行版** | `ai-mingw64-cli.zip` / `ai_cli.exe` | `ai-msvc-cli.zip` / `ai-msvc-cli.exe` |
+
+            命令行版含 21 条子命令：`train`（含 K 折 / 网格搜索 / 蒸馏 / 早停判据）、
+            `predict`、`serve`（HTTP 推理服务）、`cross-validate`、`prune`、`quantize`、
+            `compare`、`export-svg`、`export-weights`（与 Python 版 JSON 互通）、
+            `bench`、`plot` 等，`ai_cli help` 可看全部。
 
             ### 校验和
             见下方 `checksums.txt`。
