@@ -2376,7 +2376,11 @@ double Model::score(const std::vector<Vec>& x, const std::vector<int>& y) {
 void Model::fit(const Dataset& data, int epochs, int batch_size,
                 double val_split, const Dataset* val_data,
                 int patience, bool verbose, bool shuffle,
-                LRScheduler* lr_scheduler, double grad_clip) {
+                LRScheduler* lr_scheduler, double grad_clip,
+    const std::string& early_stop_metric) {
+            // early_stop_metric="train" 用的独立状态（盯训练损失，不依赖验证集）
+            double best_train_es = 1e300;
+            int no_improve_train = 0;
     Dataset train_set = data;
     Dataset val_set;
     Dataset test_set;
@@ -2505,6 +2509,16 @@ void Model::fit(const Dataset& data, int epochs, int batch_size,
         {
             std::lock_guard<std::mutex> lock(history_mutex);
             train_history.push_back({epoch, train_loss});
+            // 早停判据可选：early_stop_metric="train" 时盯训练损失（上面存的就是损失）
+            if (patience > 0 && early_stop_metric == "train") {
+                if (train_loss < best_train_es - 1e-12) {
+                    best_train_es = train_loss;
+                    no_improve_train = 0;
+                } else if (++no_improve_train >= patience) {
+                    if (verbose) std::cout << "Early stopping at epoch " << epoch << "\n";
+                    break;
+                }
+            }
         }
 
         double val_l = -1;
@@ -2570,24 +2584,26 @@ void Model::fit(const Dataset& data, int epochs, int batch_size,
 void Model::fit(const std::vector<Vec>& x, const std::vector<Vec>& y,
                 int epochs, int batch_size, double val_split,
                 const Dataset* val_data, int patience, bool verbose, bool shuffle,
-                LRScheduler* lr_scheduler, double grad_clip) {
+                LRScheduler* lr_scheduler, double grad_clip,
+    const std::string& early_stop_metric) {
     Dataset data;
     for (size_t i = 0; i < x.size(); ++i)
         data.push_back({x[i], y[i]});
     fit(data, epochs, batch_size, val_split, val_data,
-        patience, verbose, shuffle, lr_scheduler, grad_clip);
+        patience, verbose, shuffle, lr_scheduler, grad_clip, early_stop_metric);
 }
 
 // === fit (vector<Vec>, vector<int>) for classification ===
 void Model::fit(const std::vector<Vec>& x, const std::vector<int>& y,
                 int epochs, int batch_size, double val_split,
                 int patience, bool verbose,
-                LRScheduler* lr_scheduler, double grad_clip) {
+                LRScheduler* lr_scheduler, double grad_clip,
+    const std::string& early_stop_metric) {
     Dataset data;
     for (size_t i = 0; i < x.size(); ++i)
         data.push_back({x[i], Vec(1, (double)y[i])});
     fit(data, epochs, batch_size, val_split, nullptr,
-        patience, verbose, true, lr_scheduler, grad_clip);
+        patience, verbose, true, lr_scheduler, grad_clip, early_stop_metric);
 }
 
 // === Save / Load ===

@@ -184,6 +184,35 @@ static void test_early_stop()
     check("patience 触发提前停止", ran < 500, "实际训练 " + std::to_string(ran) + " 轮");
 }
 
+static void test_early_stop_metric()
+{
+    std::printf("\n== 早停判据 early_stop_metric ==\n");
+    std::vector<Vec> x; std::vector<Vec> y;
+    for (int i = 0; i < 30; ++i) {
+        double a = -1.0 + 2.0 * i / 29.0;
+        x.push_back({ a });
+        y.push_back({ 2.0 * a + 1.0 });
+    }
+
+    // 默认判据 + 没有验证集：不应早停（保持原行为，跑满）
+    Model m1 = make_regressor(1, 1, { 8 }, "leaky_relu", 0.05);
+    m1.fit(x, y, 80, 8, 0.0, nullptr, 5, false, true, nullptr, 0.0);
+    check("默认判据 + 无验证集 -> 不早停", (int)m1.train_history.size() == 80,
+          "实际 " + std::to_string(m1.train_history.size()) + " 轮");
+
+    // train 判据 + 没有验证集：应能提前停止
+    Model m2 = make_regressor(1, 1, { 8 }, "leaky_relu", 0.05);
+    m2.fit(x, y, 500, 8, 0.0, nullptr, 20, false, true, nullptr, 0.0, "train");
+    int ran = (int)m2.train_history.size();
+    check("train 判据 + 无验证集 -> 提前停止", ran < 500, "实际 " + std::to_string(ran) + " 轮");
+
+    // train 判据不能影响默认（val）路径
+    Model m3 = make_regressor(1, 1, { 8 }, "leaky_relu", 0.05);
+    m3.fit(x, y, 300, 8, 0.1, nullptr, 20, false, true, nullptr, 0.0);
+    check("默认 val 判据仍正常早停", (int)m3.train_history.size() < 300,
+          "实际 " + std::to_string(m3.train_history.size()) + " 轮");
+}
+
 int main()
 {
     std::printf("===== C++ 引擎（AI.hpp / AI.cpp）回归测试 =====\n");
@@ -191,6 +220,7 @@ int main()
     test_save_load();
     test_slimming();
     test_early_stop();
+    test_early_stop_metric();
     std::printf("\n汇总: 通过 %d，失败 %d  ->  %s\n",
                 g_pass, g_fail, g_fail == 0 ? "PASS" : "FAIL");
     return g_fail == 0 ? 0 : 1;

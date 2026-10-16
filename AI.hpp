@@ -716,18 +716,21 @@ public:
     void fit(const Dataset& data, int epochs = 100, int batch_size = 32,
              double val_split = 0.1, const Dataset* val_data = nullptr,
              int patience = 50, bool verbose = true, bool shuffle = true,
-             LRScheduler* lr_scheduler = nullptr, double grad_clip = 0.0);
+             LRScheduler* lr_scheduler = nullptr, double grad_clip = 0.0,
+             const std::string& early_stop_metric = "val");
 
     void fit(const std::vector<Vec>& x, const std::vector<Vec>& y, int epochs = 100,
              int batch_size = 32, double val_split = 0.1,
              const Dataset* val_data = nullptr,
              int patience = 50, bool verbose = true, bool shuffle = true,
-             LRScheduler* lr_scheduler = nullptr, double grad_clip = 0.0);
+             LRScheduler* lr_scheduler = nullptr, double grad_clip = 0.0,
+             const std::string& early_stop_metric = "val");
 
     void fit(const std::vector<Vec>& x, const std::vector<int>& y,
              int epochs = 100, int batch_size = 32, double val_split = 0.1,
              int patience = 50, bool verbose = true,
-             LRScheduler* lr_scheduler = nullptr, double grad_clip = 0.0);
+             LRScheduler* lr_scheduler = nullptr, double grad_clip = 0.0,
+             const std::string& early_stop_metric = "val");
 
     void save(const std::string& filepath, int epochs = -1, int batch = -1);
     static Model load(const std::string& filepath,
