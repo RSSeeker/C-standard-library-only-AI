@@ -52,15 +52,30 @@ jobs:
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-make
 
-      - name: Compile with MinGW
+      - name: Compile with MinGW (GUI)
         shell: msys2 {0}
         run: |
-          g++ -std=c++17 -O2 -Wall -mwindows -static -o ai.exe -I. -Ic main.cpp AI.cpp -lcomctl32 -lcomdlg32
+          # 引擎是 c/ 下的纯 C 实现（C17），界面与兼容层是 C++。
+          # C 源用 gcc 单独编译，再用 g++ 链接，避免把 C 代码当 C++ 编。
+          gcc -std=c17 -O2 -Wall -c -I. -Ic \
+            c/ai.c c/tensor.c c/layers_conv.c c/layers_norm.c c/rnn.c \
+            c/attention.c c/containers.c c/json.c c/model_io.c c/model_high.c \
+            c/text.c c/sched.c
+          g++ -std=c++17 -O2 -Wall -mwindows -static -o ai.exe -I. -Ic \
+            main.cpp c_model.cpp *.o -lcomctl32 -lcomdlg32
+
+      - name: Compile with MinGW (CLI)
+        shell: msys2 {0}
+        run: |
+          # 命令行版：不含 Win32 界面代码，只需要 ws2_32（serve 子命令用 WinSock）
+          g++ -std=c++17 -O2 -Wall -static -o ai_cli.exe -I. -Ic \
+            cli_main.cpp c_model.cpp *.o -lws2_32
 
       - name: Package artifact
         shell: pwsh
         run: |
-          Compress-Archive -Path ai.exe -DestinationPath ai-mingw64.zip
+          Compress-Archive -Path ai.exe -DestinationPath ai-mingw64-gui.zip
+          Compress-Archive -Path ai_cli.exe -DestinationPath ai-mingw64-cli.zip
 
       - name: Upload MinGW artifact
         uses: actions/upload-artifact@v4
@@ -68,7 +83,9 @@ jobs:
           name: ai-mingw64
           path: |
             ai.exe
-            ai-mingw64.zip
+            ai_cli.exe
+            ai-mingw64-gui.zip
+            ai-mingw64-cli.zip
 
   build-msvc:
     runs-on: windows-latest
@@ -88,8 +105,10 @@ jobs:
       - name: Package artifact
         shell: pwsh
         run: |
-          Copy-Item build/Release/ai.exe ai-msvc.exe
-          Compress-Archive -Path ai-msvc.exe -DestinationPath ai-msvc.zip
+          Copy-Item build/Release/ai.exe ai-msvc-gui.exe
+          Copy-Item build/Release/ai_cli.exe ai-msvc-cli.exe
+          Compress-Archive -Path ai-msvc-gui.exe -DestinationPath ai-msvc-gui.zip
+          Compress-Archive -Path ai-msvc-cli.exe -DestinationPath ai-msvc-cli.zip
 
       - name: Upload MSVC artifact
         uses: actions/upload-artifact@v4
@@ -133,20 +152,19 @@ jobs:
             ## ${{ needs.build-mingw.outputs.version }}
 
             自动构建版本，由 GitHub Actions 编译并发布。
+            引擎为 `c/` 目录下的纯 C 实现（C17），与 Python 版数值逐位一致，模型存档格式互通。
 
             ### 两个版本 / Two editions
-            本仓库同时提供**图形界面版**与**命令行版**，二者共用同一个纯 C 引擎
-            （`c/` 目录，与 Python 版数值逐位一致），模型存档格式互通。
 
             | 版本 | MinGW-w64（静态，无运行时依赖） | MSVC（需要 VC++ 运行库） |
             |------|--------------------------------|--------------------------|
             | **GUI 图形界面版** | `ai-mingw64-gui.zip` / `ai.exe` | `ai-msvc-gui.zip` / `ai-msvc-gui.exe` |
             | **CLI 命令行版** | `ai-mingw64-cli.zip` / `ai_cli.exe` | `ai-msvc-cli.zip` / `ai-msvc-cli.exe` |
 
-            命令行版含 21 条子命令：`train`（含 K 折 / 网格搜索 / 蒸馏 / 早停判据）、
+            命令行版含 21 条子命令：`train`（K 折 / 网格搜索 / 蒸馏 / 早停判据）、
             `predict`、`serve`（HTTP 推理服务）、`cross-validate`、`prune`、`quantize`、
-            `compare`、`export-svg`、`export-weights`（与 Python 版 JSON 互通）、
-            `bench`、`plot` 等，`ai_cli help` 可看全部。
+            `compare`、`describe`、`export-svg`、`export-weights`（与 Python 版 JSON 互通）、
+            `import-weights`、`bench`、`plot`、`data`、`split` 等，运行 `ai_cli help` 查看全部。
 
             ### 校验和
             见下方 `checksums.txt`。
