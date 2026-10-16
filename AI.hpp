@@ -865,4 +865,15 @@ Model quick_train(const std::vector<Vec>& x, const std::vector<int>& y,
                   const std::string& optimizer_name = "adam",
                   bool verbose = true);
 
+// ============================================================================
+//  蒸馏：用 teacher 的输出当软目标训练 student
+// ============================================================================
+/* x 只需要输入（标签由教师提供：分类用教师预测的类别，回归用教师的软输出）。
+ * epochs / batch_size / val_split / patience 交给 student.fit。
+ * 返回与教师的一致率：分类按类别相同比例，回归按逐样本最大偏差 <= 1e-2 判定。
+ * 与 Python 的 distill()、C 引擎 ai_cli 的 distill 子命令同一套做法。 */
+double distill(Model& teacher, Model& student, const std::vector<Vec>& x,
+               int epochs = 400, int batch_size = 16,
+               double val_split = 0.1, int patience = 50, bool verbose = true);
+
 } // namespace ai

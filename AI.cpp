@@ -3387,3 +3387,43 @@ Model quick_train(const std::vector<Vec>& x, const std::vector<int>& y,
 }
 
 } // namespace ai
+
+
+namespace ai {
+
+// ============================================================================
+//  蒸馏实现（追加在文件末尾，需重新打开 namespace ai）
+// ============================================================================
+double distill(Model& teacher, Model& student, const std::vector<Vec>& x,
+               int epochs, int batch_size, double val_split, int patience, bool verbose)
+{
+    if (x.empty()) return 0.0;
+    const bool cls = (teacher.task == "classification");
+    int agree = 0;
+
+    if (cls) {
+        std::vector<int> soft = teacher.predict_classes(x);     // 教师给出的类别
+        student.fit(x, soft, epochs, batch_size, val_split, patience, false);
+        for (size_t i = 0; i < x.size(); ++i)
+            if (student.predict_class(x[i]) == soft[i]) agree++;
+    } else {
+        std::vector<Vec> soft = teacher.predict(x);             // 教师的软输出
+        student.fit(x, soft, epochs, batch_size, val_split, nullptr, patience, false);
+        for (size_t i = 0; i < x.size(); ++i) {
+            Vec p = student.predict_one(x[i]);
+            double md = 0.0;
+            for (size_t j = 0; j < p.size() && j < soft[i].size(); ++j)
+                md = std::max(md, std::fabs(p[j] - soft[i][j]));
+            if (md <= 1e-2) agree++;
+        }
+    }
+
+    double rate = (double)agree / (double)x.size();
+    if (verbose)
+        std::cout << "distill: 教师 " << teacher.network.param_count()
+                  << " 参数 -> 学生 " << student.network.param_count()
+                  << " 参数，与教师一致率 " << (rate * 100.0) << "%\n";
+    return rate;
+}
+
+} // namespace ai

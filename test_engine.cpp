@@ -213,6 +213,31 @@ static void test_early_stop_metric()
           "实际 " + std::to_string(m3.train_history.size()) + " 轮");
 }
 
+static void test_distill()
+{
+    std::printf("\n== 蒸馏 ==\n");
+    std::vector<Vec> x;
+    std::vector<Vec> y;
+    for (int i = 0; i < 30; ++i) {
+        double a = -1.0 + 2.0 * i / 29.0;
+        x.push_back({ a, 0.5 * a });
+        y.push_back({ a * a + 0.5 * a });
+    }
+    Model teacher = make_regressor(2, 1, { 16, 16 }, "leaky_relu", 0.03);
+    teacher.fit(x, y, 600, 8, 0.1, nullptr, 50, false, true, nullptr, 0.0);
+
+    Model student = make_regressor(2, 1, { 4 }, "leaky_relu", 0.03);
+    double rate = distill(teacher, student, x, 400, 8, 0.1, 50, false);
+
+    check("蒸馏：学生比教师小",
+          student.network.param_count() < teacher.network.param_count(),
+          std::to_string(teacher.network.param_count()) + " -> " +
+          std::to_string(student.network.param_count()) + " 参数");
+    check("蒸馏：与教师一致率在 (0,1]", rate > 0.0 && rate <= 1.0, "rate = " + f2s(rate, 4));
+    check("蒸馏：学生自己也能拟合 (R² > 0.9)", student.score(x, y) > 0.9,
+          "R² = " + f2s(student.score(x, y)));
+}
+
 int main()
 {
     std::printf("===== C++ 引擎（AI.hpp / AI.cpp）回归测试 =====\n");
@@ -221,6 +246,7 @@ int main()
     test_slimming();
     test_early_stop();
     test_early_stop_metric();
+    test_distill();
     std::printf("\n汇总: 通过 %d，失败 %d  ->  %s\n",
                 g_pass, g_fail, g_fail == 0 ? "PASS" : "FAIL");
     return g_fail == 0 ? 0 : 1;
