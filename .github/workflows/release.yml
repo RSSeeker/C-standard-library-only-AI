@@ -96,8 +96,10 @@ jobs:
         with:
           name: ai-msvc
           path: |
-            ai-msvc.exe
-            ai-msvc.zip
+            ai-msvc-gui.exe
+            ai-msvc-cli.exe
+            ai-msvc-gui.zip
+            ai-msvc-cli.zip
 
   release:
     needs: [build-mingw, build-msvc]
