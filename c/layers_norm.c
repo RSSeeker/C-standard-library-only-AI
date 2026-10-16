@@ -78,7 +78,7 @@ static void dropout_check_p(double p, const char *who)
     /* Python 在 forward 里算 1/(1-p)：p=1.0 抛 ZeroDivisionError，负数无意义。
      * 这里提前在构造/设置时校验，报错退出而不是产出 inf/nan。 */
     if (!(p >= 0.0 && p < 1.0)) {
-        fprintf(stderr, "%s: p 必须在 [0, 1) 内，实得 %g\n", who, p);
+        fprintf(stderr, "%s: p 必须在 [0, 1) 内, 实得 %g\n", who, p);
         exit(1);
     }
 }
@@ -188,7 +188,7 @@ void dropout_backward(Dropout *self, const Tensor *dout, Tensor *dx)
 {
     tensor_check_shape(dx, dout->ndim, dout->shape, "dropout_backward(dx)");
     if (self->mask_len <= 0) {
-        fprintf(stderr, "dropout_backward: 请先调用 dropout_forward（反向依赖它缓存的 mask）\n");
+        fprintf(stderr, "dropout_backward: 请先调用 dropout_forward (反向依赖它缓存的 mask)\n");
         exit(1);
     }
     if (dout->size != self->mask_len) {
@@ -258,7 +258,7 @@ Module *dropout_as_module(Dropout *self)
 BatchNorm1d *bn1d_create(int num_features, double eps, double momentum)
 {
     if (num_features <= 0) {
-        fprintf(stderr, "bn1d_create: num_features 必须为正，实得 %d\n", num_features);
+        fprintf(stderr, "bn1d_create: num_features 必须为正, 实得 %d\n", num_features);
         exit(1);
     }
     BatchNorm1d *self = xcalloc(1, sizeof(BatchNorm1d));
@@ -449,7 +449,7 @@ void bn1d_backward(BatchNorm1d *self, const Tensor *dout, Tensor *dx)
     const int d = self->d;
     const int n = self->n;
     if (!self->batch_ready || n <= 0) {
-        fprintf(stderr, "bn1d_backward: 请先调用 bn1d_forward_batch（反向依赖其缓存的 x_hat/inv_std）\n");
+        fprintf(stderr, "bn1d_backward: 请先调用 bn1d_forward_batch (反向依赖其缓存的 x_hat/inv_std)\n");
         exit(1);
     }
     int want[2] = { n, d };
@@ -558,7 +558,7 @@ Module *bn1d_as_module(BatchNorm1d *self)
 LayerNorm *layernorm_create(int num_features, double eps)
 {
     if (num_features <= 0) {
-        fprintf(stderr, "layernorm_create: num_features 必须为正，实得 %d\n", num_features);
+        fprintf(stderr, "layernorm_create: num_features 必须为正, 实得 %d\n", num_features);
         exit(1);
     }
     LayerNorm *self = xcalloc(1, sizeof(LayerNorm));
@@ -639,7 +639,7 @@ void layernorm_backward(LayerNorm *self, const Tensor *dout, Tensor *dx)
 {
     const int d = self->d;
     if (!self->ready) {
-        fprintf(stderr, "layernorm_backward: 请先调用 layernorm_forward（反向依赖其缓存的 x_hat/inv_std）\n");
+        fprintf(stderr, "layernorm_backward: 请先调用 layernorm_forward (反向依赖其缓存的 x_hat/inv_std)\n");
         exit(1);
     }
     int want[1] = { d };

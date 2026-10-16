@@ -190,7 +190,7 @@ static void seq_backward(Module *m, const Tensor *dout, Tensor *dx)
         return;
     }
     if (s->stage_ndim[0] < 0) {
-        fprintf(stderr, "sequential_backward: 还没调用过 forward（无反传所需的形状信息）\n");
+        fprintf(stderr, "sequential_backward: 还没调用过 forward (无反传所需的形状信息)\n");
         exit(1);
     }
     /* 形状校验：dout 必须是最后一层的输出形状，dx 必须是整条链的输入形状 */

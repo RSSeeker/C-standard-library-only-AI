@@ -38,7 +38,7 @@ static void *xmalloc(size_t n)
 static int expect_tag(FILE *f, const char *tag)
 {
     char buf[64];
-    if (fscanf(f, "%63s", buf) != 1) { fprintf(stderr, "读取 %s 失败(EOF)\n", tag); exit(2); }
+    if (fscanf(f, "%63s", buf) != 1) { fprintf(stderr, "读取 %s failed(EOF)\n", tag); exit(2); }
     if (strcmp(buf, tag) != 0) { fprintf(stderr, "标签不匹配: 期望 %s 实得 %s\n", tag, buf); exit(2); }
     return 0;
 }
@@ -52,7 +52,7 @@ static int expect_tag(FILE *f, const char *tag)
 static double read_one_double(FILE *f)
 {
     char buf[64];
-    if (fscanf(f, "%63s", buf) != 1) { fprintf(stderr, "读 double 失败\n"); exit(2); }
+    if (fscanf(f, "%63s", buf) != 1) { fprintf(stderr, "读 double failed\n"); exit(2); }
     return strtod(buf, NULL);
 }
 
@@ -64,7 +64,7 @@ static void read_doubles(FILE *f, double *dst, int n)
 static void read_ints(FILE *f, int *dst, int n)
 {
     for (int i = 0; i < n; i++)
-        if (fscanf(f, "%d", &dst[i]) != 1) { fprintf(stderr, "读 int 失败\n"); exit(2); }
+        if (fscanf(f, "%d", &dst[i]) != 1) { fprintf(stderr, "读 int failed\n"); exit(2); }
 }
 
 static void load_ref(const char *path, Ref *r)
@@ -125,7 +125,7 @@ static void report(const char *what, const double *got, const double *want, int 
     }
     int ok = worst <= tol;
     if (!ok) failures++;
-    printf("  %-28s 最大差异 %.3e  %s", what, worst,
+    printf("  %-28s max diff %.3e  %s", what, worst,
            ok ? "[OK]" : "[超出容差]");
     if (!ok) printf("  (index %d: C=%.17g py=%.17g)", at, got[at], want[at]);
     printf("\n");
@@ -139,8 +139,8 @@ int main(int argc, char **argv)
     Ref r;
     memset(&r, 0, sizeof(r));
     load_ref(path, &r);
-    printf("参考数据: %s\n", path);
-    printf("模型 %d 层, 尺寸", r.n_layers);
+    printf("参考data: %s\n", path);
+    printf("model %d layers, sizes", r.n_layers);
     for (int i = 0; i <= r.n_layers; i++) printf(" %d", r.sizes[i]);
     printf(" ; %d 样本; %d 步 Adam(lr=%.3g)\n\n", r.n_samples, r.steps, r.lr);
 
@@ -162,13 +162,13 @@ int main(int argc, char **argv)
         off += l->fan_out;
     }
 
-    printf("1) 前向传播（%d 个样本）\n", r.n_samples);
+    printf("1) 前向传播 (%d samples)\n", r.n_samples);
     double *out = xmalloc((size_t)r.n_samples * r.out_dim * sizeof(double));
     for (int i = 0; i < r.n_samples; i++)
         mlp_forward(m, r.X + (size_t)i * r.in_dim, out + (size_t)i * r.out_dim);
     report("forward output", out, r.out_ref, r.n_samples * r.out_dim);
 
-    printf("\n2) 梯度累加（%d 个样本，未除以 N）\n", r.n_samples);
+    printf("\n2) 梯度累加 (%d samples, 未除以 N)\n", r.n_samples);
     mlp_zero_grad(m);
     for (int i = 0; i < r.n_samples; i++) {
         double *pred = xmalloc((size_t)r.out_dim * sizeof(double));
@@ -195,7 +195,7 @@ int main(int argc, char **argv)
     report("accumulated grad W", gw, r.gradW_ref, r.nW);
     report("accumulated grad b", gb, r.gradb_ref, r.nb);
 
-    printf("\n3) 训练 %d 步全批量 Adam(lr=%.3g)\n", r.steps, r.lr);
+    printf("\n3) 训练 %d 步全batch Adam(lr=%.3g)\n", r.steps, r.lr);
     Optimizer opt;
     optimizer_init(&opt, OPT_ADAM, r.lr);
     for (int step = 0; step < r.steps; step++) {
@@ -234,7 +234,7 @@ int main(int argc, char **argv)
     report("weights after training", W_after, r.W_after_ref, r.nW);
     report("biases  after training", b_after, r.b_after_ref, r.nb);
 
-    printf("\n结论: %s（容差 %.1e）\n", failures ? "存在超差项" : "C 与 Python 数值一致", tol);
+    printf("\n结论: %s (容差 %.1e)\n", failures ? "存在超差项" : "C 与 Python 数值一致", tol);
 
     mlp_free(m);
     free(acts); free(out); free(gw); free(gb); free(W_after); free(b_after);

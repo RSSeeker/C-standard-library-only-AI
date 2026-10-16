@@ -753,7 +753,7 @@ void flatten_zero_grad(Flatten *self)
 void flatten_to_string(const Flatten *self, char *buf, size_t n)
 {
     if (self->bound) snprintf(buf, n, "Flatten(%d,%d,%d)", self->in_c, self->in_h, self->in_w);
-    else             snprintf(buf, n, "Flatten(未绑定)");
+    else             snprintf(buf, n, "Flatten(unbound)");
 }
 
 Module *flatten_as_module(Flatten *self)

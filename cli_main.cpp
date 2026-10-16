@@ -108,7 +108,7 @@ bool loadCSV(const std::string& path, bool hasHeader, int nTarget,
 {
     std::ifstream f(path);
     if (!f.is_open()) {
-        std::cout << "打不开数据文件: " << path << "\n";
+        std::cout << "cannot open data file: " << path << "\n";
         return false;
     }
     std::string line;
@@ -142,7 +142,7 @@ std::string fmt(double v, int prec = 6)
 
 int demoRegression()
 {
-    std::cout << "\n===== 回归示例：y = x0^2 + x1 =====\n";
+    std::cout << "\n===== regression example: y = x0^2 + x1 =====\n";
     std::vector<Vec> X, Y;
     for (int i = 0; i < 40; ++i) {
         double a = -1.0 + 2.0 * i / 39.0;
@@ -152,17 +152,17 @@ int demoRegression()
     }
     Model m = quick_train(X, Y, "regression", { 16, 16 }, 600, 8);
     double r2 = m.score(X, Y);
-    std::cout << "  R² = " << fmt(r2, 6) << (r2 > 0.95 ? "   [OK]" : "   [偏低]") << "\n";
+    std::cout << "  R2 = " << fmt(r2, 6) << (r2 > 0.95 ? "   [OK]" : "   [low]") << "\n";
     Vec probe{ 0.6, 0.3 };
     Vec pred = m.predict_one(probe);
-    std::cout << "  predict(0.6, 0.3) = " << fmt(pred[0]) << "   期望 "
+    std::cout << "  predict(0.6, 0.3) = " << fmt(pred[0]) << "   expected "
               << fmt(0.36 + 0.3) << "\n";
     return r2 > 0.95 ? 0 : 1;
 }
 
 int demoClassification()
 {
-    std::cout << "\n===== 分类示例：a > 0 ? =====\n";
+    std::cout << "\n===== classification example: a > 0 ? =====\n";
     std::vector<Vec> X;
     std::vector<int> Y;
     for (int i = 0; i < 60; ++i) {
@@ -172,13 +172,13 @@ int demoClassification()
     }
     Model m = quick_train(X, Y, { 16, 16 }, 400, 10);
     double acc = m.score(X, Y);
-    std::cout << "  准确率 = " << fmt(acc * 100, 2) << "%" << (acc > 0.95 ? "   [OK]" : "   [偏低]") << "\n";
+    std::cout << "  accuracy = " << fmt(acc * 100, 2) << "%" << (acc > 0.95 ? "   [OK]" : "   [low]") << "\n";
     return acc > 0.95 ? 0 : 1;
 }
 
 int demoGradientClip()
 {
-    std::cout << "\n===== 梯度裁剪 + StepLR =====\n";
+    std::cout << "\n===== gradient clipping + StepLR =====\n";
     std::vector<Vec> X, Y;
     for (int i = 0; i < 20; ++i) {
         double a = 0.2 + 1.1 * i / 19.0;
@@ -189,14 +189,14 @@ int demoGradientClip()
     StepLR sch(m.optimizer.get(), 100, 0.5);
     m.fit(X, Y, 300, 2, 0.0, nullptr, 0, true, true, &sch, 1.0);
     double r2 = m.score(X, Y);
-    std::cout << "  300 轮后 LR = " << fmt(m.optimizer->lr, 6)
+    std::cout << "  LR after 300 epochs = " << fmt(m.optimizer->lr, 6)
               << "   R² = " << fmt(r2, 6) << "\n";
     return r2 > 0.9 ? 0 : 1;
 }
 
 int demoCNN()
 {
-    std::cout << "\n===== CNN 前向：Conv2d -> MaxPool2d -> Flatten -> MLP =====\n";
+    std::cout << "\n===== CNN forward: Conv2d -> MaxPool2d -> Flatten -> MLP =====\n";
     Conv2d conv(1, 2, 2, 1);
     MaxPool2d pool(2);
     Flatten flat;
@@ -215,7 +215,7 @@ int demoCNN()
     std::cout << "  (1,4,4) -> Conv " << c.size() << "x" << c[0].size() << "x" << c[0][0].size()
               << " -> Pool " << p.size() << "x" << p[0].size() << "x" << p[0][0].size()
               << " -> Flatten " << f.size() << " -> MLP " << out.size() << "\n";
-    std::cout << "  MLP 输出 = (" << fmt(out[0]) << ", " << fmt(out[1]) << ")\n";
+    std::cout << "  MLP output = (" << fmt(out[0]) << ", " << fmt(out[1]) << ")\n";
     return 0;
 }
 
@@ -223,7 +223,7 @@ int demoCNN()
 
 int selftest()
 {
-    std::cout << "===== AI_C 命令行版自检 =====\n";
+    std::cout << "===== AI_C command line self-test =====\n";
     int fail = 0;
 
     // 1) 回归：拟合已知函数，检查 R²
@@ -237,12 +237,12 @@ int selftest()
         Model m = quick_train(X, Y, "regression", { 24, 24 }, 500, 8);
         double r2 = m.score(X, Y);
         bool ok = r2 > 0.95;
-        std::cout << "  [1] 回归 y=x0^2+0.5*x1  R² = " << fmt(r2, 6)
+        std::cout << "  [1] regression y=x0^2+0.5*x1  R2 = " << fmt(r2, 6)
                   << (ok ? "  [OK]" : "  [FAIL]") << "\n";
         if (!ok) fail++;
     }
 
-    // 2) 分类：线性可分数据，检查准确率
+    // 2) 分类：线性可分数据，检查accuracy
     {
         std::vector<Vec> X; std::vector<int> Y;
         for (int i = 0; i < 40; ++i) {
@@ -253,7 +253,7 @@ int selftest()
         Model m = quick_train(X, Y, { 16 }, 300, 8);
         double acc = m.score(X, Y);
         bool ok = acc > 0.9;
-        std::cout << "  [2] 分类 a>0        准确率 = " << fmt(acc * 100, 2) << "%"
+        std::cout << "  [2] classification a>0   accuracy = " << fmt(acc * 100, 2) << "%"
                   << (ok ? "  [OK]" : "  [FAIL]") << "\n";
         if (!ok) fail++;
     }
@@ -272,14 +272,14 @@ int selftest()
         Model m2 = Model::load("cli_selftest_model.txt", "mse", "adam", 0.01);
         Vec after = m2.predict_one(Vec{ 0.25 });
         bool ok = !before.empty() && !after.empty() && std::fabs(before[0] - after[0]) < 1e-9;
-        std::cout << "  [3] 存档往返        " << fmt(before.empty() ? 0 : before[0], 10)
+        std::cout << "  [3] save/load round trip  " << fmt(before.empty() ? 0 : before[0], 10)
                   << " vs " << fmt(after.empty() ? 0 : after[0], 10)
                   << (ok ? "  [OK]" : "  [FAIL]") << "\n";
         if (!ok) fail++;
         std::remove("cli_selftest_model.txt");
     }
 
-    std::cout << (fail == 0 ? "全部通过\n" : "存在失败项\n");
+    std::cout << (fail == 0 ? "all passed\n" : "存在failed项\n");
     return fail;
 }
 
@@ -288,8 +288,8 @@ int selftest()
 int bench(int samples, int epochs)
 {
     const int in_dim = 64, out_dim = 8;
-    std::cout << "===== 性能基准 =====\n";
-    std::cout << "  MLP[64,256,128,8]，" << samples << " 样本 × " << epochs
+    std::cout << "===== performance benchmark =====\n";
+    std::cout << "  MLP[64,256,128,8], " << samples << " samples x " << epochs
               << " 轮，batch=32，Adam(0.001)\n";
 
     std::vector<Vec> X(samples, Vec(in_dim)), Y(samples, Vec(out_dim));
@@ -313,11 +313,11 @@ int bench(int samples, int epochs)
     double sec = std::chrono::duration<double>(t1 - t0).count();
 
     double r2 = m.score(X, Y);
-    std::cout << "  参数 " << params << "\n";
-    std::cout << "  耗时 " << fmt(sec, 3) << " s（" << fmt(sec * 1000.0 / epochs, 1)
+    std::cout << "  params " << params << "\n";
+    std::cout << "  elapsed " << fmt(sec, 3) << " s (" << fmt(sec * 1000.0 / epochs, 1)
               << " ms/轮，" << fmt(sec * 1e6 / ((double)epochs * samples), 1) << " us/样本轮）\n";
-    std::cout << "  训练集 R² = " << fmt(r2, 6) << "\n";
-    std::cout << "  对照：同样负载 Python 版约 77 s（约 58–68 倍）\n";
+    std::cout << "  train R2 = " << fmt(r2, 6) << "\n";
+    std::cout << "  reference: the same workload takes about 77 s in the Python build (58-68x)\n";
     return 0;
 }
 
@@ -329,18 +329,18 @@ int batchPredict(const std::string& modelPath, const std::string& csvPath,
     Model m = Model::load(modelPath, "", "", 0.0);
     std::vector<Vec> X, Y;
     if (!loadCSV(csvPath, header, 1, X, Y)) {
-        std::cout << "数据为空或格式不对: " << csvPath << "\n";
+        std::cout << "empty or malformed data: " << csvPath << "\n";
         return 2;
     }
     bool cls = (m.task == "classification");
-    std::cout << "模型任务: " << m.task << "，样本 " << X.size()
+    std::cout << "model task: " << m.task << ", samples " << X.size()
               << "，输入维度 " << X[0].size() << "\n";
 
     std::ofstream out;
     bool writeOut = !outPath.empty();
     if (writeOut) {
         out.open(outPath);
-        if (!out.is_open()) { std::cout << "写不出文件: " << outPath << "\n"; return 2; }
+        if (!out.is_open()) { std::cout << "cannot write file: " << outPath << "\n"; return 2; }
         out << "pred";
         for (int j = 1; j < (int)m.network.layers.back().fan_out; ++j) out << ",pred" << j;
         if (cls) out << ",pred_class";
@@ -360,16 +360,16 @@ int batchPredict(const std::string& modelPath, const std::string& csvPath,
         if (cls) yi.push_back((int)std::lround(Y[i].empty() ? 0.0 : Y[i][0]));
         if (i == 0 && !p.empty() && !Y[i].empty()) firstErr = std::fabs(p[0] - Y[i][0]);
     }
-    if (writeOut) { out.close(); std::cout << "已写出: " << outPath << "\n"; }
+    if (writeOut) { out.close(); std::cout << "written: " << outPath << "\n"; }
 
     if (cls) {
         double acc = m.score(X, yi);
-        std::cout << "准确率 = " << fmt(acc * 100, 2) << "%\n";
+        std::cout << "accuracy = " << fmt(acc * 100, 2) << "%\n";
     } else {
         double r2 = m.score(X, Y);
-        std::cout << "R² = " << fmt(r2, 6) << "（多输出按各维平均）\n";
+        std::cout << "R2 = " << fmt(r2, 6) << " (多输出按各维平均)\n";
     }
-    if (firstErr >= 0) std::cout << "首个样本 |pred-target| = " << fmt(firstErr, 6) << "\n";
+    if (firstErr >= 0) std::cout << "first sample |pred-target| = " << fmt(firstErr, 6) << "\n";
     return 0;
 }
 
@@ -381,13 +381,13 @@ int crossValidate(const std::string& csv, int k, std::vector<int> hidden,
     std::vector<Vec> X, Y;
     int nTarget = 1;
     if (!loadCSV(csv, header, nTarget, X, Y)) {
-        std::cout << "数据为空或格式不对: " << csv << "\n";
+        std::cout << "empty or malformed data: " << csv << "\n";
         return 2;
     }
     const int n = (int)X.size();
     if (k < 2) k = 2;
     if (k > n) k = n;
-    std::cout << "===== " << k << " 折交叉验证（" << n << " 样本，hidden ";
+    std::cout << "===== " << k << "-fold cross validation (" << n << " samples, hidden ";
     for (size_t i = 0; i < hidden.size(); ++i) std::cout << (i ? "-" : "") << hidden[i];
     std::cout << "，epochs " << epochs << "）=====\n";
 
@@ -408,7 +408,7 @@ int crossValidate(const std::string& csv, int k, std::vector<int> hidden,
             Model m = make_classifier((int)X[0].size(), classes, hidden, "leaky_relu", lr);
             m.fit(TX, tyi, epochs, batch, 0.0, 0, false, nullptr, 0.0);
             sc = m.score(VX, vyi);
-            std::cout << "  fold " << fold + 1 << ": 准确率 = " << fmt(sc * 100, 2) << "%"
+            std::cout << "  fold " << fold + 1 << ": accuracy = " << fmt(sc * 100, 2) << "%"
                       << "（验证 " << VX.size() << "）\n";
         } else {
             Model m = make_regressor((int)X[0].size(), (int)Y[0].size(), hidden, "leaky_relu", lr);
@@ -425,7 +425,7 @@ int crossValidate(const std::string& csv, int k, std::vector<int> hidden,
     double var = 0.0;
     for (double v : scores) var += (v - mean) * (v - mean);
     var = scores.size() > 1 ? var / (scores.size() - 1) : 0.0;
-    std::cout << "  平均 = " << fmt(cls ? mean * 100 : mean, 6)
+    std::cout << "  mean = " << fmt(cls ? mean * 100 : mean, 6)
               << (cls ? "%" : "") << "   标准差 = " << fmt(std::sqrt(var), 6) << "\n";
     return 0;
 }
@@ -438,10 +438,10 @@ int gridSearch(const std::string& csv, const std::vector<std::vector<int>>& hidd
 {
     std::vector<Vec> X, Y;
     if (!loadCSV(csv, header, 1, X, Y)) {
-        std::cout << "数据为空或格式不对: " << csv << "\n";
+        std::cout << "empty or malformed data: " << csv << "\n";
         return 2;
     }
-    std::cout << "===== 网格搜索：hidden " << hiddenSets.size() << " 种 × lr "
+    std::cout << "===== grid search: hidden " << hiddenSets.size() << " sets x lr "
               << lrs.size() << " 种 = " << hiddenSets.size() * lrs.size() << " 组 =====\n";
 
     double best = -1e18;
@@ -464,12 +464,12 @@ int gridSearch(const std::string& csv, const std::vector<std::vector<int>>& hidd
             std::string desc = "hidden=";
             for (size_t i = 0; i < h.size(); ++i) desc += (i ? "-" : "") + std::to_string(h[i]);
             desc += "  lr=" + fmt(lr, 4);
-            std::cout << "  " << desc << "  ->  " << (cls ? "准确率 " : "R² ")
+            std::cout << "  " << desc << "  ->  " << (cls ? "accuracy " : "R2 ")
                       << fmt(cls ? sc * 100 : sc, 4) << (cls ? "%" : "") << "\n";
             if (sc > best) { best = sc; bestDesc = desc; }
         }
     }
-    std::cout << "  最佳: " << bestDesc << "  ->  " << (cls ? "准确率 " : "R² ")
+    std::cout << "  best: " << bestDesc << "  ->  " << (cls ? "accuracy " : "R2 ")
               << fmt(cls ? best * 100 : best, 4) << (cls ? "%" : "") << "\n";
     return 0;
 }
@@ -479,7 +479,7 @@ int gridSearch(const std::string& csv, const std::vector<std::vector<int>>& hidd
 int dataInfo(const std::string& csv, bool header)
 {
     std::ifstream f(csv);
-    if (!f.is_open()) { std::cout << "打不开数据文件: " << csv << "\n"; return 2; }
+    if (!f.is_open()) { std::cout << "cannot open data file: " << csv << "\n"; return 2; }
     std::vector<std::vector<double>> rows;
     std::string line;
     bool first = true;
@@ -493,15 +493,15 @@ int dataInfo(const std::string& csv, bool header)
         while (ss >> v) row.push_back(v);
         if (!row.empty()) rows.push_back(row);
     }
-    if (rows.empty()) { std::cout << "没有解析到数据\n"; return 2; }
+    if (rows.empty()) { std::cout << "no data parsed\n"; return 2; }
 
     const int n = (int)rows.size();
     int cols = 0;
     for (auto& r : rows) cols = std::max(cols, (int)r.size());
-    std::cout << "===== 数据体检 =====\n";
-    std::cout << "  文件: " << csv << "\n";
-    std::cout << "  样本 " << n << " 行，列数 " << cols << "\n\n";
-    std::cout << "  列      最小        最大        均值        标准差\n";
+    std::cout << "===== data inspection =====\n";
+    std::cout << "  file: " << csv << "\n";
+    std::cout << "  samples " << n << " rows, " << cols << "\n\n";
+    std::cout << "  col     min         max         mean        std\n";
     for (int c = 0; c < cols; ++c) {
         double mn = 1e300, mx = -1e300, sum = 0.0;
         int cnt = 0;
@@ -527,11 +527,11 @@ int dataInfo(const std::string& csv, bool header)
         for (double u : uniq) if (std::fabs(u - v) < 1e-9) { seen = true; break; }
         if (!seen) uniq.push_back(v);
     }
-    std::cout << "\n  末列去重值个数 = " << uniq.size();
+    std::cout << "\n  distinct values in last column = " << uniq.size();
     if (allInt && allNonNeg && uniq.size() <= 20 && uniq.size() >= 2)
-        std::cout << "  ->  看起来是分类标签（建议 --task classification）\n";
+        std::cout << "  ->  looks like class labels (try --task classification)\n";
     else
-        std::cout << "  ->  看起来是回归目标（建议 --task regression）\n";
+        std::cout << "  ->  looks like a regression target (try --task regression)\n";
     return 0;
 }
 
@@ -541,7 +541,7 @@ int splitData(const std::string& csv, const std::string& trainOut, const std::st
               double testRatio, int seedVal, bool header)
 {
     std::ifstream f(csv);
-    if (!f.is_open()) { std::cout << "打不开数据文件: " << csv << "\n"; return 2; }
+    if (!f.is_open()) { std::cout << "cannot open data file: " << csv << "\n"; return 2; }
     std::vector<std::string> lines;
     std::string line, head;
     bool first = true;
@@ -551,7 +551,7 @@ int splitData(const std::string& csv, const std::string& trainOut, const std::st
         first = false;
         lines.push_back(line);
     }
-    if (lines.empty()) { std::cout << "没有数据\n"; return 2; }
+    if (lines.empty()) { std::cout << "no data\n"; return 2; }
 
     std::vector<int> idx(lines.size());
     for (size_t i = 0; i < idx.size(); ++i) idx[i] = (int)i;
@@ -570,7 +570,7 @@ int splitData(const std::string& csv, const std::string& trainOut, const std::st
         else           ft << lines[idx[k]] << "\n";
     }
     ft.close(); fv.close();
-    std::cout << "已切分: 训练 " << lines.size() - nTest << " -> " << trainOut
+    std::cout << "split done: train " << lines.size() - nTest << " -> " << trainOut
               << "，测试 " << nTest << " -> " << testOut
               << "（种子 " << (seedVal != 0 ? seedVal : 42) << "）\n";
     return 0;
@@ -581,13 +581,13 @@ int splitData(const std::string& csv, const std::string& trainOut, const std::st
 int describeModel(const std::string& modelPath)
 {
     Model m = Model::load(modelPath, "", "", 0.0);
-    if (m.network.layers.empty()) { std::cout << "加载失败: " << modelPath << "\n"; return 1; }
+    if (m.network.layers.empty()) { std::cout << "failed to load: " << modelPath << "\n"; return 1; }
     int total = 0;
-    std::cout << "===== 模型信息 =====\n";
-    std::cout << "  文件: " << modelPath << "\n";
-    std::cout << "  任务: " << m.task << "   损失: " << m.loss_name
+    std::cout << "===== model info =====\n";
+    std::cout << "  file: " << modelPath << "\n";
+    std::cout << "  task: " << m.task << "   loss: " << m.loss_name
               << "   优化器: " << m.opt_name << "   lr: " << fmt(m.lr, 6) << "\n";
-    std::cout << "  结构:\n";
+    std::cout << "  structure:\n";
     for (size_t i = 0; i < m.network.layers.size(); ++i) {
         auto& L = m.network.layers[i];
         int p = L.fan_in * L.fan_out + L.fan_out;
@@ -595,7 +595,7 @@ int describeModel(const std::string& modelPath)
         std::cout << "    [" << i << "] Linear(" << L.fan_in << " -> " << L.fan_out
                   << ") + " << L.act_name << "   [" << p << " 参数]\n";
     }
-    std::cout << "  参数总量: " << total << "\n";
+    std::cout << "  total params: " << total << "\n";
     return 0;
 }
 
@@ -605,7 +605,7 @@ int plotCurve(const std::string& curvePath, const std::string& svgOut, const std
 {
     std::ifstream f(curvePath);
     if (!f.is_open()) {
-        std::cout << "打不开曲线文件: " << curvePath << "（用 train --curve 生成）\n";
+        std::cout << "cannot open curve file: " << curvePath << " (generate it with: train --curve)\n";
         return 2;
     }
     std::vector<std::pair<int, double>> tr, va;
@@ -619,7 +619,7 @@ int plotCurve(const std::string& curvePath, const std::string& svgOut, const std
         tr.push_back({ ep, a });
         if (ss >> b) va.push_back({ ep, b });
     }
-    if (tr.empty()) { std::cout << "曲线为空\n"; return 2; }
+    if (tr.empty()) { std::cout << "the curve is empty\n"; return 2; }
 
     if (!csvOut.empty() && csvOut != curvePath) {
         std::ofstream o(csvOut);
@@ -629,7 +629,7 @@ int plotCurve(const std::string& curvePath, const std::string& svgOut, const std
             if (i < va.size()) o << "," << va[i].second;
             o << "\n";
         }
-        std::cout << "曲线 CSV 已写出: " << csvOut << "\n";
+        std::cout << "curve CSV written: " << csvOut << "\n";
     }
     if (svgOut.empty()) return 0;
 
@@ -646,7 +646,7 @@ int plotCurve(const std::string& curvePath, const std::string& svgOut, const std
     auto Y = [&](double v) { return MT + (mx - v) / (mx - mn) * (H - MT - MB); };
 
     std::ofstream o(svgOut);
-    if (!o.is_open()) { std::cout << "写不出: " << svgOut << "\n"; return 2; }
+    if (!o.is_open()) { std::cout << "cannot write: " << svgOut << "\n"; return 2; }
     o << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << W << "\" height=\"" << H
       << "\" viewBox=\"0 0 " << W << " " << H << "\">\n";
     o << "  <rect width=\"" << W << "\" height=\"" << H << "\" fill=\"#0d1117\"/>\n";
@@ -678,7 +678,7 @@ int plotCurve(const std::string& curvePath, const std::string& svgOut, const std
           << "  <text x=\"" << (W - MR - 60) << "\" y=\"18\" fill=\"#f0883e\" font-size=\"12\">val</text>\n";
     o << "</svg>\n";
     o.close();
-    std::cout << "曲线 SVG 已写出: " << svgOut << "（" << tr.size() << " 个点，"
+    std::cout << "curve SVG written: " << svgOut << " (" << tr.size() << " points, "
               << (va.empty() ? "仅 train" : "train + val") << "）\n";
     return 0;
 }
@@ -704,13 +704,13 @@ int trainKfold(const std::string& csv, int k, std::vector<int> hidden, int epoch
 {
     std::vector<Vec> X, Y;
     if (!loadCSV(csv, header, 1, X, Y)) {
-        std::cout << "数据为空或格式不对: " << csv << "\n";
+        std::cout << "empty or malformed data: " << csv << "\n";
         return 2;
     }
     const int n = (int)X.size();
     if (k < 2) k = 2;
     if (k > n) k = n;
-    std::cout << "===== K 折训练（k=" << k << "，" << n << " 样本）=====\n";
+    std::cout << "===== K-fold training (k=" << k << ", " << n << " samples)=====\n";
 
     std::vector<double> scores;
     std::vector<Model> foldModels;
@@ -736,7 +736,7 @@ int trainKfold(const std::string& csv, int k, std::vector<int> hidden, int epoch
         scores.push_back(sc);
 
         std::cout << "  fold " << fold + 1 << "/" << k << ": "
-                  << (cls ? "准确率 " : "R² ") << fmt(cls ? sc * 100 : sc, 5) << (cls ? "%" : "")
+                  << (cls ? "accuracy " : "R² ") << fmt(cls ? sc * 100 : sc, 5) << (cls ? "%" : "")
                   << "   （训练 " << TX.size() << " / 验证 " << VX.size() << "）";
         if (!savePrefix.empty()) {
             std::string path = savePrefix + "_fold" + std::to_string(fold + 1) + ".txt";
@@ -752,7 +752,7 @@ int trainKfold(const std::string& csv, int k, std::vector<int> hidden, int epoch
     double var = 0.0;
     for (double v : scores) var += (v - mean) * (v - mean);
     var = scores.size() > 1 ? var / (scores.size() - 1) : 0.0;
-    std::cout << "  交叉验证平均 = " << fmt(cls ? mean * 100 : mean, 5) << (cls ? "%" : "")
+    std::cout << "  CV mean = " << fmt(cls ? mean * 100 : mean, 5) << (cls ? "%" : "")
               << "   标准差 = " << fmt(std::sqrt(var), 5) << "\n";
 
     // K 折权重平均：把各折权重线性平均成一个模型（单模型部署，无需推理时集成）
@@ -769,9 +769,9 @@ int trainKfold(const std::string& csv, int k, std::vector<int> hidden, int epoch
             (void)unit;
             avg.merge_weights(avg, 1.0 / okCnt, 0.0);   // 自乘缩放：avg *= 1/okCnt
         }
-        std::cout << "  ---- 权重平均（" << okCnt << " 份，各折同初值）----\n";
+        std::cout << "  ---- weight averaging (" << okCnt << " parts, same init) ----\n";
         double scAvg = evalOn(avg, X, Y, cls);
-        std::cout << "  单折平均 = " << fmt(cls ? mean * 100 : mean, 5) << (cls ? "%" : "")
+        std::cout << "  per-fold mean = " << fmt(cls ? mean * 100 : mean, 5) << (cls ? "%" : "")
                   << "   权重平均模型 = " << fmt(cls ? scAvg * 100 : scAvg, 5) << (cls ? "%" : "")
                   << "   提升 " << fmt((scAvg - mean) * (cls ? 100 : 1), 5) << "\n";
         std::string outAvg = (savePrefix.empty() ? std::string("kfold_avg") : savePrefix + "_avg") + ".txt";
@@ -781,7 +781,7 @@ int trainKfold(const std::string& csv, int k, std::vector<int> hidden, int epoch
     // K 折集成：把各折模型在同一批数据上的预测平均起来
     if (aggregate) {
         if (savePrefix.empty()) {
-            std::cout << "  集成需要 --save <前缀> 才能找到各折模型\n";
+            std::cout << "  ensemble needs --save <prefix> to locate the fold models\n";
         } else {
             std::vector<Model> folds;
             for (int i = 1; i <= k; ++i) {
@@ -790,7 +790,7 @@ int trainKfold(const std::string& csv, int k, std::vector<int> hidden, int epoch
                 if (!fm.network.layers.empty()) folds.push_back(std::move(fm));
             }
             if (folds.size() >= 2) {
-                std::cout << "  ---- K 折集成（" << folds.size() << " 个模型）----\n";
+                std::cout << "  ---- K-fold ensemble (" << folds.size() << " models) ----\n";
                 std::vector<double> ens;
                 for (int i = 0; i < n; ++i) {
                     Vec acc;
@@ -826,7 +826,7 @@ int trainKfold(const std::string& csv, int k, std::vector<int> hidden, int epoch
                     }
                     sc = 1.0 - res / std::max(tot, 1e-15);
                 }
-                std::cout << "  单折平均 = " << fmt(cls ? mean * 100 : mean, 5) << (cls ? "%" : "")
+                std::cout << "  per-fold mean = " << fmt(cls ? mean * 100 : mean, 5) << (cls ? "%" : "")
                           << "   集成(全量数据) = " << fmt(cls ? sc * 100 : sc, 5) << (cls ? "%" : "")
                           << "   提升 " << fmt((sc - mean) * (cls ? 100 : 1), 5) << "\n";
             }
@@ -843,10 +843,10 @@ int trainKfold(const std::string& csv, int k, std::vector<int> hidden, int epoch
             for (auto& r : Y) { int v = (int)std::lround(r.empty() ? 0.0 : r[0]); yi.push_back(v); if (v + 1 > classes) classes = v + 1; }
             fm = make_classifier((int)X[0].size(), classes, hidden, "leaky_relu", lr);
             fm.fit(X, yi, epochs, batch, val, 50, true, nullptr, 0.0);
-            std::cout << "  全量重训: 训练准确率 = " << fmt(fm.score(X, yi) * 100, 2) << "%\n";
+            std::cout << "  full retrain: train accuracy = " << fmt(fm.score(X, yi) * 100, 2) << "%\n";
         } else {
             fm.fit(X, Y, epochs, batch, val, nullptr, 50, true, true, nullptr, 0.0);
-            std::cout << "  全量重训: 训练集 R² = " << fmt(fm.score(X, Y), 6) << "\n";
+            std::cout << "  full retrain: train R2 = " << fmt(fm.score(X, Y), 6) << "\n";
         }
         fm.save(finalSave, epochs, batch);
     }
@@ -859,7 +859,7 @@ int pruneModel(const std::string& modelPath, const std::string& outPath,
                double threshold, double ratio, const std::string& testPath, bool header)
 {
     Model m = Model::load(modelPath, "", "", 0.0);
-    if (m.network.layers.empty()) { std::cout << "加载失败\n"; return 1; }
+    if (m.network.layers.empty()) { std::cout << "failed to load\n"; return 1; }
     bool cls = (m.task == "classification");
     int total = m.weight_count();
 
@@ -874,21 +874,21 @@ int pruneModel(const std::string& modelPath, const std::string& outPath,
         for (auto& L : m.network.layers)
             for (auto& row : L.weights)
                 for (double w : row) absW.push_back(std::fabs(w));
-        if (absW.empty()) { std::cout << "没有权重\n"; return 1; }
+        if (absW.empty()) { std::cout << "no weights\n"; return 1; }
         std::sort(absW.begin(), absW.end());
         size_t k = (size_t)(absW.size() * std::min(1.0, std::max(0.0, ratio)));
         if (k >= absW.size()) k = absW.size() - 1;
         threshold = absW[k];
-        std::cout << "按比例 " << fmt(ratio * 100, 1) << "% 剪枝 -> 阈值 " << fmt(threshold, 6) << "\n";
+        std::cout << "ratio " << fmt(ratio * 100, 1) << "% prune -> threshold " << fmt(threshold, 6) << "\n";
     }
 
     int pruned = m.prune_magnitude(threshold);
-    std::cout << "===== 幅度剪枝 =====\n";
-    std::cout << "  参数总量 " << total << "，剪掉 " << pruned
+    std::cout << "===== magnitude pruning =====\n";
+    std::cout << "  total params " << total << ", pruned " << pruned
               << "，稀疏度 " << fmt(100.0 * pruned / std::max(1, total), 2) << "%\n";
     if (hasTest) {
         double after = evalOn(m, TX, TY, cls);
-        std::cout << "  " << (cls ? "准确率" : "R²") << "（测试集）: 剪枝前 "
+        std::cout << "  " << (cls ? "accuracy" : "R²") << " (test set): before "
                   << fmt(cls ? before * 100 : before, 5) << "  ->  剪枝后 "
                   << fmt(cls ? after * 100 : after, 5) << (cls ? "%" : "") << "\n";
     }
@@ -902,7 +902,7 @@ int quantizeModel(const std::string& modelPath, const std::string& outPath, int 
                   const std::string& testPath, bool header)
 {
     Model m = Model::load(modelPath, "", "", 0.0);
-    if (m.network.layers.empty()) { std::cout << "加载失败\n"; return 1; }
+    if (m.network.layers.empty()) { std::cout << "failed to load\n"; return 1; }
     bool cls = (m.task == "classification");
 
     std::vector<Vec> TX, TY;
@@ -910,17 +910,17 @@ int quantizeModel(const std::string& modelPath, const std::string& outPath, int 
     double before = hasTest ? evalOn(m, TX, TY, cls) : 0.0;
 
     double step = m.quantize_weights(bits);
-    std::cout << "===== 权重量化 =====\n";
-    if (step <= 0) { std::cout << "  量化失败（bits 需在 2..24）\n"; return 1; }
+    std::cout << "===== weight quantization =====\n";
+    if (step <= 0) { std::cout << "  quantization failed (bits must be 2..24)\n"; return 1; }
     int levels = (1 << bits) - 1;
-    std::cout << "  " << bits << " 位定点：档位 " << levels << "，步长 " << fmt(step, 8) << "\n";
-    std::cout << "  理论存储：float64 -> " << bits << " bit，压缩到 "
+    std::cout << "  " << bits << "-bit fixed point: levels " << levels << ", step " << fmt(step, 8) << "\n";
+    std::cout << "  theoretical storage: float64 -> " << bits << " bit, compressed to "
               << fmt(100.0 * bits / 64.0, 1) << "%（"
               << fmt((double)m.weight_count() * 64 / 8 / 1024, 1) << " KB -> "
               << fmt((double)m.weight_count() * bits / 8 / 1024, 2) << " KB）\n";
     if (hasTest) {
         double after = evalOn(m, TX, TY, cls);
-        std::cout << "  " << (cls ? "准确率" : "R²") << "（测试集）: 量化前 "
+        std::cout << "  " << (cls ? "accuracy" : "R²") << " (test set): before "
                   << fmt(cls ? before * 100 : before, 5) << "  ->  量化后 "
                   << fmt(cls ? after * 100 : after, 5) << (cls ? "%" : "")
                   << "   变化 " << fmt((after - before) * (cls ? 100 : 1), 5) << "\n";
@@ -936,22 +936,22 @@ int compareModels(const std::string& pathA, const std::string& pathB,
 {
     Model a = Model::load(pathA, "", "", 0.0);
     Model b = Model::load(pathB, "", "", 0.0);
-    if (a.network.layers.empty() || b.network.layers.empty()) { std::cout << "模型加载失败\n"; return 1; }
+    if (a.network.layers.empty() || b.network.layers.empty()) { std::cout << "failed to load the model\n"; return 1; }
     std::vector<Vec> X, Y;
-    if (!loadCSV(testPath, header, 1, X, Y)) { std::cout << "测试集读取失败\n"; return 2; }
+    if (!loadCSV(testPath, header, 1, X, Y)) { std::cout << "failed to read the test set\n"; return 2; }
 
     bool cls = (a.task == "classification");
     double sa = evalOn(a, X, Y, cls), sb = evalOn(b, X, Y, cls);
-    std::cout << "===== 模型对账（" << X.size() << " 个测试样本）=====\n";
-    std::cout << "  A: " << pathA << "\n      参数 " << a.weight_count()
+    std::cout << "===== model comparison (" << X.size() << " test samples) =====\n";
+    std::cout << "  A: " << pathA << "\n      params " << a.weight_count()
               << "   稀疏度 " << fmt(100.0 * a.zero_count() / std::max(1, a.weight_count()), 2) << "%"
-              << "   " << (cls ? "准确率 " : "R² ") << fmt(cls ? sa * 100 : sa, 5) << (cls ? "%" : "") << "\n";
-    std::cout << "  B: " << pathB << "\n      参数 " << b.weight_count()
+              << "   " << (cls ? "accuracy " : "R² ") << fmt(cls ? sa * 100 : sa, 5) << (cls ? "%" : "") << "\n";
+    std::cout << "  B: " << pathB << "\n      params " << b.weight_count()
               << "   稀疏度 " << fmt(100.0 * b.zero_count() / std::max(1, b.weight_count()), 2) << "%"
-              << "   " << (cls ? "准确率 " : "R² ") << fmt(cls ? sb * 100 : sb, 5) << (cls ? "%" : "") << "\n";
+              << "   " << (cls ? "accuracy " : "R² ") << fmt(cls ? sb * 100 : sb, 5) << (cls ? "%" : "") << "\n";
 
     double diff = sb - sa;
-    std::cout << "  差异 (B-A) = " << fmt(cls ? diff * 100 : diff, 5) << (cls ? "%" : "")
+    std::cout << "  difference (B-A) = " << fmt(cls ? diff * 100 : diff, 5) << (cls ? "%" : "")
               << "   ->  " << (std::fabs(diff) < 1e-9 ? "持平" : (diff > 0 ? "B 更好" : "A 更好")) << "\n";
 
     // 逐样本一致性
@@ -966,9 +966,9 @@ int compareModels(const std::string& pathA, const std::string& pathB,
         bool same = cls ? (a.predict_class(X[i]) == b.predict_class(X[i])) : (md <= tol);
         if (same) agree++; else disagree++;
     }
-    std::cout << "  预测一致: " << agree << " / " << X.size() << "（不一致 " << disagree << "，"
+    std::cout << "  predictions agreeing: " << agree << " / " << X.size() << " (disagreeing " << disagree << ", "
               << "判定容差 " << (cls ? std::string("按类别") : fmt(tol, 6)) << "）\n";
-    std::cout << "  逐样本最大输出差 = " << fmt(maxAbs, 8) << "\n";
+    std::cout << "  max per-sample output diff = " << fmt(maxAbs, 8) << "\n";
     return 0;
 }
 
@@ -978,13 +978,13 @@ int compareModels(const std::string& pathA, const std::string& pathB,
 int serveModel(const std::string& modelPath, int port, const std::string& token = "")
 {
     Model m = Model::load(modelPath, "", "", 0.0);
-    if (m.network.layers.empty()) { std::cout << "加载失败: " << modelPath << "\n"; return 1; }
+    if (m.network.layers.empty()) { std::cout << "failed to load: " << modelPath << "\n"; return 1; }
     bool cls = (m.task == "classification");
 
     WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { std::cout << "WSAStartup 失败\n"; return 1; }
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) { std::cout << "WSAStartup failed\n"; return 1; }
     SOCKET srv = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (srv == INVALID_SOCKET) { std::cout << "socket 失败\n"; WSACleanup(); return 1; }
+    if (srv == INVALID_SOCKET) { std::cout << "socket() failed\n"; WSACleanup(); return 1; }
     BOOL yes = TRUE;
     setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));
 
@@ -993,18 +993,18 @@ int serveModel(const std::string& modelPath, int port, const std::string& token 
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);   // 只监听本机，避免无意暴露
     addr.sin_port = htons((u_short)port);
     if (bind(srv, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
-        std::cout << "bind 失败（端口被占用？）\n"; closesocket(srv); WSACleanup(); return 1;
+        std::cout << "bind() failed (port already in use?)\n"; closesocket(srv); WSACleanup(); return 1;
     }
     if (listen(srv, 8) == SOCKET_ERROR) {
-        std::cout << "listen 失败\n"; closesocket(srv); WSACleanup(); return 1;
+        std::cout << "listen() failed\n"; closesocket(srv); WSACleanup(); return 1;
     }
-    std::cout << "===== HTTP 推理服务 =====\n";
-    std::cout << "  模型: " << modelPath << "（task=" << m.task << "）\n";
-    std::cout << "  监听: http://127.0.0.1:" << port << "/\n";
-    std::cout << "  用法: 浏览器打开上面的地址，或\n";
+    std::cout << "===== HTTP inference server =====\n";
+    std::cout << "  model: " << modelPath << " (task=" << m.task << ")\n";
+    std::cout << "  listening on: http://127.0.0.1:" << port << "/\n";
+    std::cout << "  usage: open the address above in a browser, or\n";
     std::cout << "        curl \"http://127.0.0.1:" << port << "/predict?x=0.5,0.3\"\n";
     std::cout << "        curl -d \"0.5,0.3\" http://127.0.0.1:" << port << "/predict\n";
-    std::cout << "  Ctrl+C 结束\n";
+    std::cout << "  press Ctrl+C to stop\n";
 
     for (;;) {
         SOCKET cli = accept(srv, nullptr, nullptr);
@@ -1109,7 +1109,7 @@ int serveModel(const std::string& modelPath, int port, const std::string& token 
 int exportSvg(const std::string& modelPath, const std::string& svgOut)
 {
     Model m = Model::load(modelPath, "", "", 0.0);
-    if (m.network.layers.empty()) { std::cout << "加载失败\n"; return 1; }
+    if (m.network.layers.empty()) { std::cout << "failed to load\n"; return 1; }
 
     const int BW = 150, BH = 54, GAP = 46, MT = 60;
     int n = (int)m.network.layers.size();
@@ -1118,7 +1118,7 @@ int exportSvg(const std::string& modelPath, const std::string& svgOut)
     int total = m.weight_count();
 
     std::ofstream o(svgOut);
-    if (!o.is_open()) { std::cout << "写不出: " << svgOut << "\n"; return 2; }
+    if (!o.is_open()) { std::cout << "cannot write: " << svgOut << "\n"; return 2; }
     o << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" << W << "\" height=\"" << H
       << "\" viewBox=\"0 0 " << W << " " << H << "\">\n";
     o << "  <rect width=\"" << W << "\" height=\"" << H << "\" fill=\"#0d1117\"/>\n";
@@ -1149,7 +1149,7 @@ int exportSvg(const std::string& modelPath, const std::string& svgOut)
       << "<path d=\"M0,0 L7,3 L0,6 z\" fill=\"#8b949e\"/></marker></defs>\n";
     o << "</svg>\n";
     o.close();
-    std::cout << "结构图已写出: " << svgOut << "（" << n << " 层，" << total << " 参数）\n";
+    std::cout << "structure diagram written: " << svgOut << " (" << n << " layers, " << total << " params)\n";
     return 0;
 }
 
@@ -1160,13 +1160,13 @@ int distill(const std::string& teacherPath, const std::string& csv, std::vector<
             const std::string& outPath, const std::string& testPath)
 {
     Model teacher = Model::load(teacherPath, "", "", 0.0);
-    if (teacher.network.layers.empty()) { std::cout << "教师模型加载失败\n"; return 1; }
+    if (teacher.network.layers.empty()) { std::cout << "failed to load the teacher model\n"; return 1; }
     std::vector<Vec> X, Y;
-    if (!loadCSV(csv, header, 1, X, Y)) { std::cout << "数据读取失败\n"; return 2; }
+    if (!loadCSV(csv, header, 1, X, Y)) { std::cout << "failed to read data\n"; return 2; }
     bool cls = (teacher.task == "classification");
 
-    std::cout << "===== 蒸馏 =====\n";
-    std::cout << "  教师: " << teacherPath << "（" << teacher.weight_count() << " 参数）\n";
+    std::cout << "===== distillation =====\n";
+    std::cout << "  teacher: " << teacherPath << " (" << teacher.weight_count() << " params)\n";
 
     // 用教师的输出当软目标
     std::vector<Vec> soft(X.size());
@@ -1178,9 +1178,9 @@ int distill(const std::string& teacherPath, const std::string& csv, std::vector<
 
     Model stu = cls ? make_classifier((int)X[0].size(), (int)soft[0].size(), hidden, "leaky_relu", lr)
                     : make_regressor((int)X[0].size(), (int)soft[0].size(), hidden, "leaky_relu", lr);
-    std::cout << "  学生: hidden ";
+    std::cout << "  student: hidden ";
     for (size_t i = 0; i < hidden.size(); ++i) std::cout << (i ? "-" : "") << hidden[i];
-    std::cout << "（" << stu.weight_count() << " 参数，压缩到 "
+    std::cout << " (" << stu.weight_count() << " params, compressed to "
               << fmt(100.0 * stu.weight_count() / std::max(1, teacher.weight_count()), 1) << "%）\n";
 
     if (cls) stu.fit(X, softCls, epochs, batch, val, 50, true, nullptr, 0.0);
@@ -1200,15 +1200,15 @@ int distill(const std::string& teacherPath, const std::string& csv, std::vector<
             if (md <= 1e-2) agree++;
         }
     }
-    std::cout << "  与教师一致率 = " << fmt(100.0 * agree / X.size(), 2) << "%"
-              << (cls ? "" : "（回归按误差 ≤1e-2 判定，最大偏差 " + fmt(maxDiff, 6) + "）") << "\n";
+    std::cout << "  agreement with teacher = " << fmt(100.0 * agree / X.size(), 2) << "%"
+              << (cls ? "" : "（回归按error ≤1e-2 判定，最大deviation " + fmt(maxDiff, 6) + "）") << "\n";
 
     if (!testPath.empty()) {
         std::vector<Vec> TX, TY;
         if (loadCSV(testPath, header, 1, TX, TY)) {
-            std::cout << "  学生（测试集）: " << (cls ? "准确率 " : "R² ")
+            std::cout << "  student (test set): " << (cls ? "accuracy " : "R2 ")
                       << fmt(evalOn(stu, TX, TY, cls) * (cls ? 100 : 1), 5) << (cls ? "%" : "")
-                      << "    教师（测试集）: " << (cls ? "准确率 " : "R² ")
+                      << "    教师（测试集）: " << (cls ? "accuracy " : "R² ")
                       << fmt(evalOn(teacher, TX, TY, cls) * (cls ? 100 : 1), 5) << (cls ? "%" : "") << "\n";
         }
     }
@@ -1231,7 +1231,7 @@ int main(int argc, char** argv)
         fail += demoClassification();
         fail += demoGradientClip();
         fail += demoCNN();
-        std::cout << "\n" << (fail == 0 ? "全部示例通过" : "有示例未达标") << "\n";
+        std::cout << "\n" << (fail == 0 ? "all examples passed" : "some examples did not reach the target") << "\n";
         return fail == 0 ? 0 : 1;
     }
 
@@ -1270,21 +1270,21 @@ int main(int argc, char** argv)
             else if (a == "--seed") seedVal = std::stoi(next("0"));
             else if (a == "--header") header = true;
         }
-        if (csv.empty()) { std::cout << "缺少 --csv\n\n"; usage(); return 2; }
+        if (csv.empty()) { std::cout << "missing --csv\n\n"; usage(); return 2; }
         if (hidden.empty()) hidden = { 16 };
 
-        if (seedVal != 0) { seed(seedVal); std::cout << "随机种子 = " << seedVal << "\n"; }
+        if (seedVal != 0) { seed(seedVal); std::cout << "random seed = " << seedVal << "\n"; }
         bool cls = (task == "classification");
         std::vector<Vec> X, Y;
         if (!loadCSV(csv, header, 1, X, Y)) {
-            std::cout << "数据为空或格式不对: " << csv << "\n";
+            std::cout << "empty or malformed data: " << csv << "\n";
             return 2;
         }
-        std::cout << "数据: " << X.size() << " 个样本，输入维度 " << X[0].size()
+        std::cout << "data: " << X.size() << " samples, input dim " << X[0].size()
                   << "，任务 " << task << "\n";
 
         if (kfold >= 2) {
-            std::cout << "随机种子 = " << (seedVal != 0 ? seedVal : 42) << "\n";
+            std::cout << "random seed = " << (seedVal != 0 ? seedVal : 42) << "\n";
             return trainKfold(csv, kfold, hidden, epochs, lr, batch, val, header, cls,
                               savePath, finalSave, aggregate, aggregateWeights);
         }
@@ -1295,10 +1295,10 @@ int main(int argc, char** argv)
             for (auto& r : Y) { int v = (int)std::lround(r[0]); yi.push_back(v); if (v + 1 > classes) classes = v + 1; }
             Model m = make_classifier((int)X[0].size(), classes, hidden, "leaky_relu", lr);
             m.early_stop_on_train = (esMetric == "train");
-            if (m.early_stop_on_train) std::cout << "早停判据 = 训练损失\n";
+            if (m.early_stop_on_train) std::cout << "early stop metric = train loss\n";
             m.fit(X, yi, epochs, batch, val, patience, true, nullptr, 0.0);
             double acc = m.score(X, yi);
-            std::cout << "训练准确率 = " << fmt(acc * 100, 2) << "%\n";
+            std::cout << "train accuracy = " << fmt(acc * 100, 2) << "%\n";
             if (!curvePath.empty()) {
                 std::ofstream cf(curvePath);
                 cf << "epoch,train,val\n";
@@ -1308,17 +1308,17 @@ int main(int argc, char** argv)
                     cf << "\n";
                 }
                 cf.close();
-                std::cout << "训练曲线已写出: " << curvePath << "（" << m.train_history.size() << " 个点）\n";
+                std::cout << "training curve written: " << curvePath << " (" << m.train_history.size() << " points)\n";
             }
             if (!testPath.empty()) {
                 std::vector<Vec> TX, TY;
                 std::vector<int> tyi;
                 if (loadCSV(testPath, header, 1, TX, TY)) {
                     for (auto& r : TY) tyi.push_back((int)std::lround(r.empty() ? 0.0 : r[0]));
-                    std::cout << "测试集准确率 = " << fmt(m.score(TX, tyi) * 100, 2)
+                    std::cout << "test accuracy = " << fmt(m.score(TX, tyi) * 100, 2)
                               << "%（" << TX.size() << " 个样本）\n";
                 } else {
-                    std::cout << "测试集读取失败: " << testPath << "\n";
+                    std::cout << "failed to read the test set: " << testPath << "\n";
                 }
             }
             if (!savePath.empty()) m.save(savePath, epochs, batch);
@@ -1326,10 +1326,10 @@ int main(int argc, char** argv)
             int nOut = (int)Y[0].size();
             Model m = make_regressor((int)X[0].size(), nOut, hidden, "leaky_relu", lr);
             m.early_stop_on_train = (esMetric == "train");
-            if (m.early_stop_on_train) std::cout << "早停判据 = 训练损失\n";
+            if (m.early_stop_on_train) std::cout << "early stop metric = train loss\n";
             m.fit(X, Y, epochs, batch, val, nullptr, patience, true, true, nullptr, 0.0);
             double r2 = m.score(X, Y);
-            std::cout << "训练集 R² = " << fmt(r2, 6) << "\n";
+            std::cout << "train R2 = " << fmt(r2, 6) << "\n";
             if (!curvePath.empty()) {
                 std::ofstream cf(curvePath);
                 cf << "epoch,train,val\n";
@@ -1339,15 +1339,15 @@ int main(int argc, char** argv)
                     cf << "\n";
                 }
                 cf.close();
-                std::cout << "训练曲线已写出: " << curvePath << "（" << m.train_history.size() << " 个点）\n";
+                std::cout << "training curve written: " << curvePath << " (" << m.train_history.size() << " points)\n";
             }
             if (!testPath.empty()) {
                 std::vector<Vec> TX, TY;
                 if (loadCSV(testPath, header, 1, TX, TY))
-                    std::cout << "测试集 R² = " << fmt(m.score(TX, TY), 6)
+                    std::cout << "test R2 = " << fmt(m.score(TX, TY), 6)
                               << "（" << TX.size() << " 个样本）\n";
                 else
-                    std::cout << "测试集读取失败: " << testPath << "\n";
+                    std::cout << "failed to read the test set: " << testPath << "\n";
             }
             if (!savePath.empty()) m.save(savePath, epochs, batch);
         }
@@ -1365,15 +1365,15 @@ int main(int argc, char** argv)
         if (cmd == "export-weights") {
             if (modelPath.empty() || outPath.empty()) { usage(); return 2; }
             Model m = Model::load(modelPath, "", "", 0.0);
-            if (!m.save_python_json(outPath)) { std::cout << "导出失败\n"; return 1; }
-            std::cout << "已导出 Python 版 JSON: " << outPath << "\n"
+            if (!m.save_python_json(outPath)) { std::cout << "export failed\n"; return 1; }
+            std::cout << "exported Python-compatible JSON: " << outPath << "\n"
                       << "  可在 Python 版里用 load_model(\"" << outPath << "\") 直接加载\n";
         } else {
             if (jsonPath.empty() || outPath.empty()) { usage(); return 2; }
             Model m = Model::load_python_json(jsonPath);
-            if (m.network.layers.empty()) { std::cout << "导入失败\n"; return 1; }
+            if (m.network.layers.empty()) { std::cout << "import failed\n"; return 1; }
             m.save(outPath, -1, -1);
-            std::cout << "已导入并转成本地格式: " << outPath
+            std::cout << "imported and converted to the local format: " << outPath
                       << "（task=" << m.task << "，层数 " << m.network.layers.size() << "）\n";
         }
         return 0;
@@ -1466,7 +1466,7 @@ int main(int argc, char** argv)
 #ifdef _WIN32
         return serveModel(modelPath, port, token);
 #else
-        std::cout << "serve 目前只在 Windows（WinSock）下实现\n";
+        std::cout << "serve is currently implemented on Windows (WinSock) only\n";
         return 2;
 #endif
     }
@@ -1587,12 +1587,12 @@ int main(int argc, char** argv)
         if (input.empty()) { usage(); return 2; }
         Model m = Model::load(modelPath, "", "", 0.0);
         Vec x = parseList(input);
-        if (x.empty()) { std::cout << "输入解析失败\n"; return 2; }
+        if (x.empty()) { std::cout << "failed to parse the input\n"; return 2; }
         Vec p = m.predict_one(x);
-        std::cout << "输出: [";
+        std::cout << "output: [";
         for (size_t i = 0; i < p.size(); ++i) std::cout << (i ? ", " : "") << fmt(p[i]);
         std::cout << "]\n";
-        if (m.task == "classification") std::cout << "类别索引: " << m.predict_class(x) << "\n";
+        if (m.task == "classification") std::cout << "class index: " << m.predict_class(x) << "\n";
         return 0;
     }
 

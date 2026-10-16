@@ -825,7 +825,7 @@ static void test_net_vs_manual(void)
         check_bits("RNN: out_seq（net vs 手工多层链）", out->data, man_out, T * HS);
         for (int l = 0; l < LAYERS; l++) {
             char tag[64];
-            snprintf(tag, sizeof(tag), "RNN: h_last layer %d（net vs 手工链）", l);
+            snprintf(tag, sizeof(tag), "RNN: h_last layer %d (net vs manual chain)", l);
             check_bits(tag, hl->data + (size_t)l * HS, man[l]->h, HS);
         }
 
@@ -877,9 +877,9 @@ static void test_net_vs_manual(void)
         check_bits("LSTM: out_seq（net vs 手工多层链）", out->data, man_out, T * HS);
         for (int l = 0; l < LAYERS; l++) {
             char tag[64];
-            snprintf(tag, sizeof(tag), "LSTM: h_last layer %d（net vs 手工链）", l);
+            snprintf(tag, sizeof(tag), "LSTM: h_last layer %d (net vs manual chain)", l);
             check_bits(tag, hl->data + (size_t)l * HS, man[l]->h, HS);
-            snprintf(tag, sizeof(tag), "LSTM: c_last layer %d（net vs 手工链）", l);
+            snprintf(tag, sizeof(tag), "LSTM: c_last layer %d (net vs manual chain)", l);
             check_bits(tag, cl->data + (size_t)l * HS, man[l]->c, HS);
         }
 
@@ -932,7 +932,7 @@ static void test_net_vs_manual(void)
         check_bits("GRU: out_seq（net vs 手工多层链）", out->data, man_out, T * HS);
         for (int l = 0; l < LAYERS; l++) {
             char tag[64];
-            snprintf(tag, sizeof(tag), "GRU: h_last layer %d（net vs 手工链）", l);
+            snprintf(tag, sizeof(tag), "GRU: h_last layer %d (net vs manual chain)", l);
             check_bits(tag, hl->data + (size_t)l * HS, man[l]->h, HS);
         }
 

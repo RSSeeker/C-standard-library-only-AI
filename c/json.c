@@ -44,7 +44,7 @@ static void fail(Parser *ps, const char *msg)
 {
     if (ps->failed) return;
     ps->failed = 1;
-    if (ps->err && ps->errlen) snprintf(ps->err, ps->errlen, "%s (偏移 %ld)", msg, (long)(ps->p - ps->p));
+    if (ps->err && ps->errlen) snprintf(ps->err, ps->errlen, "%s (offset %ld)", msg, (long)(ps->p - ps->p));
 }
 
 static void skip_ws(Parser *ps)
@@ -261,7 +261,7 @@ JsonValue *json_parse(const char *text, char *errbuf, size_t errlen)
     if (!v) return NULL;
     skip_ws(&ps);
     if (*ps.p != '\0') {
-        if (errbuf && errlen) snprintf(errbuf, errlen, "JSON 末尾有多余内容");
+        if (errbuf && errlen) snprintf(errbuf, errlen, "trailing content after the JSON value");
         json_free(v);
         return NULL;
     }
@@ -272,13 +272,13 @@ JsonValue *json_parse_file(const char *path, char *errbuf, size_t errlen)
 {
     FILE *f = fopen(path, "rb");
     if (!f) {
-        if (errbuf && errlen) snprintf(errbuf, errlen, "打不开文件 %s", path);
+        if (errbuf && errlen) snprintf(errbuf, errlen, "cannot open file %s", path);
         return NULL;
     }
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (n < 0) { fclose(f); if (errbuf && errlen) snprintf(errbuf, errlen, "文件长度读取失败"); return NULL; }
+    if (n < 0) { fclose(f); if (errbuf && errlen) snprintf(errbuf, errlen, "file length read failed"); return NULL; }
     char *buf = xmalloc((size_t)n + 1);
     size_t got = fread(buf, 1, (size_t)n, f);
     buf[got] = '\0';

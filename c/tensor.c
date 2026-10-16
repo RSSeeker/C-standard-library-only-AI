@@ -87,9 +87,9 @@ int tensor_check_shape(const Tensor *t, int ndim, const int *shape, const char *
         for (int i = 0; i < ndim; i++) if (t->shape[i] != shape[i]) { ok = 0; break; }
     }
     if (!ok) {
-        fprintf(stderr, "%s: 形状不匹配，期望 ndim=%d [", who, ndim);
+        fprintf(stderr, "%s: shape mismatch, expected ndim=%d [", who, ndim);
         for (int i = 0; i < ndim; i++) fprintf(stderr, "%s%d", i ? "," : "", shape[i]);
-        fprintf(stderr, "] 实得 ndim=%d [", t->ndim);
+        fprintf(stderr, "] got ndim=%d [", t->ndim);
         for (int i = 0; i < t->ndim; i++) fprintf(stderr, "%s%d", i ? "," : "", t->shape[i]);
         fprintf(stderr, "]\n");
         exit(1);

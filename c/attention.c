@@ -134,14 +134,14 @@ static void softmax_row_inplace(double *v, int n)
 static int seq_check(const Tensor *t, int d, int max_seq, const char *who)
 {
     if (t->ndim != 2 || t->shape[1] != d) {
-        fprintf(stderr, "%s: 期望 (seq_len, %d) 的二维张量，实得 ndim=%d shape=[", who, d, t->ndim);
+        fprintf(stderr, "%s: expected a 2D tensor (seq_len, %d), got ndim=%d shape=[", who, d, t->ndim);
         for (int i = 0; i < t->ndim; i++) fprintf(stderr, "%s%d", i ? "," : "", t->shape[i]);
         fprintf(stderr, "]\n");
         exit(1);
     }
     int T = t->shape[0];
     if (T > max_seq) {
-        fprintf(stderr, "%s: seq_len=%d 超过 create 时的 max_seq_len=%d"
+        fprintf(stderr, "%s: seq_len=%d exceeds max_seq_len=%d set at create time"
                         "（预分配缓冲不够，禁止静默截断）\n", who, T, max_seq);
         exit(1);
     }
@@ -305,7 +305,7 @@ void tfd_backward_row(const TfDropout *dp, int row, const double *dout, double *
 MultiHeadAttention *mha_create(int d_model, int num_heads, int max_seq_len, double dropout_p)
 {
     if (d_model <= 0 || num_heads <= 0 || max_seq_len <= 0) {
-        fprintf(stderr, "mha_create: 参数非法 (d_model=%d, num_heads=%d, max_seq_len=%d)\n",
+        fprintf(stderr, "mha_create: params非法 (d_model=%d, num_heads=%d, max_seq_len=%d)\n",
                 d_model, num_heads, max_seq_len);
         exit(1);
     }
@@ -416,7 +416,7 @@ void mha_set_params(MultiHeadAttention *m,
     const double *src[8] = { W_q, b_q, W_k, b_k, W_v, b_v, W_o, b_o };
     for (int i = 0; i < 8; i++) {
         if (!src[i]) {
-            fprintf(stderr, "mha_set_params: 第 %d 个参数指针为 NULL（8 个都必须提供）\n", i);
+            fprintf(stderr, "mha_set_params: 第 %d 个参数指针为 NULL (8 个都必须提供)\n", i);
             exit(1);
         }
     }
@@ -509,7 +509,7 @@ void mha_backward(MultiHeadAttention *m, const Tensor *dout, Tensor *dx)
     const int d = m->d_model, h = m->num_heads, dk = m->d_k;
     const int T = m->seq_len;
     if (T <= 0) {
-        fprintf(stderr, "mha_backward: 尚未调用过 forward（seq_len=0）\n");
+        fprintf(stderr, "mha_backward: 尚未调用过 forward (seq_len=0)\n");
         exit(1);
     }
     int dims[2];
@@ -611,7 +611,7 @@ void mha_backward(MultiHeadAttention *m, const Tensor *dout, Tensor *dx)
 FeedForward *ff_create(int d_model, int d_ff, int max_seq_len)
 {
     if (d_model <= 0 || d_ff <= 0 || max_seq_len <= 0) {
-        fprintf(stderr, "ff_create: 参数非法 (d_model=%d, d_ff=%d, max_seq_len=%d)\n",
+        fprintf(stderr, "ff_create: params非法 (d_model=%d, d_ff=%d, max_seq_len=%d)\n",
                 d_model, d_ff, max_seq_len);
         exit(1);
     }
@@ -719,7 +719,7 @@ void ff_backward(FeedForward *f, const Tensor *dout, Tensor *dx)
     const int dm = f->d_model, dff = f->d_ff;
     const int T = f->seq_len;
     if (T <= 0) {
-        fprintf(stderr, "ff_backward: 尚未调用过 forward（seq_len=0）\n");
+        fprintf(stderr, "ff_backward: 尚未调用过 forward (seq_len=0)\n");
         exit(1);
     }
     int dims[2];
@@ -752,7 +752,7 @@ TransformerEncoderLayer *tel_create(int d_model, int num_heads, int d_ff,
                                     unsigned long long seed)
 {
     if (d_model <= 0 || num_heads <= 0 || d_ff <= 0 || max_seq_len <= 0) {
-        fprintf(stderr, "tel_create: 参数非法\n");
+        fprintf(stderr, "tel_create: params非法\n");
         exit(1);
     }
     if (dropout_p < 0.0 || dropout_p >= 1.0) {
@@ -844,7 +844,7 @@ void tel_backward(TransformerEncoderLayer *l, const Tensor *dout, Tensor *dx)
     const int d = l->d_model;
     const int T = l->seq_len;
     if (T <= 0) {
-        fprintf(stderr, "tel_backward: 尚未调用过 forward（seq_len=0）\n");
+        fprintf(stderr, "tel_backward: 尚未调用过 forward (seq_len=0)\n");
         exit(1);
     }
     int dims[2];
@@ -942,7 +942,7 @@ TransformerEncoder *te_create(int d_model, int num_heads, int d_ff, int num_laye
                               int max_seq_len, double dropout_p, unsigned long long seed)
 {
     if (num_layers <= 0) {
-        fprintf(stderr, "te_create: num_layers 必须 >= 1（空栈请直接用恒等模块）\n");
+        fprintf(stderr, "te_create: num_layers 必须 >= 1 (空栈请直接用恒等模块)\n");
         exit(1);
     }
     TransformerEncoder *e = xmalloc(sizeof(*e));
@@ -1020,7 +1020,7 @@ void te_backward(TransformerEncoder *e, const Tensor *dout, Tensor *dx)
     const int d = e->d_model;
     const int T = e->seq_len;
     if (T <= 0) {
-        fprintf(stderr, "te_backward: 尚未调用过 forward（seq_len=0）\n");
+        fprintf(stderr, "te_backward: 尚未调用过 forward (seq_len=0)\n");
         exit(1);
     }
     int dims[2];
@@ -1062,7 +1062,7 @@ int te_param_count(const TransformerEncoder *e)
 PositionalEncoding *pe_create(int d_model, int max_len)
 {
     if (d_model <= 0 || max_len <= 0) {
-        fprintf(stderr, "pe_create: 参数非法 (d_model=%d, max_len=%d)\n", d_model, max_len);
+        fprintf(stderr, "pe_create: params非法 (d_model=%d, max_len=%d)\n", d_model, max_len);
         exit(1);
     }
     PositionalEncoding *p = xmalloc(sizeof(*p));
@@ -1131,7 +1131,7 @@ int pe_param_count(const PositionalEncoding *p)
 Embedding *emb_create(int vocab_size, int embed_dim, int max_len)
 {
     if (vocab_size <= 0 || embed_dim <= 0 || max_len <= 0) {
-        fprintf(stderr, "emb_create: 参数非法 (vocab=%d, embed_dim=%d, max_len=%d)\n",
+        fprintf(stderr, "emb_create: params非法 (vocab=%d, embed_dim=%d, max_len=%d)\n",
                 vocab_size, embed_dim, max_len);
         exit(1);
     }
@@ -1193,7 +1193,7 @@ void emb_forward(Embedding *e, const int *indices, int n, Tensor *out)
         const int idx = indices[t];
         /* Python 允许负索引（会从尾部绕回）；C 侧按越界报错，不做这种隐式回绕 */
         if (idx < 0 || idx >= e->vocab_size) {
-            fprintf(stderr, "emb_forward: 索引 %d 越界 [0,%d)\n", idx, e->vocab_size);
+            fprintf(stderr, "emb_forward: 索引 %d out of range [0,%d)\n", idx, e->vocab_size);
             exit(1);
         }
         e->indices[t] = idx;       /* 缓存（indices 可能就指向 e->indices，逐元素写是安全的） */
@@ -1208,7 +1208,7 @@ void emb_backward(Embedding *e, const Tensor *dout, Tensor *dx)
     const int E = e->embed_dim;
     const int T = e->seq_len;
     if (T <= 0) {
-        fprintf(stderr, "emb_backward: 尚未调用过 forward（seq_len=0）\n");
+        fprintf(stderr, "emb_backward: 尚未调用过 forward (seq_len=0)\n");
         exit(1);
     }
     int dims[2];
@@ -1355,7 +1355,7 @@ static void emb_mod_forward(Module *m, const Tensor *x, Tensor *out)
 {
     Embedding *e = m->self;
     if (x->ndim != 1) {
-        fprintf(stderr, "emb_module.forward: 输入必须是 ndim=1 的索引张量，实得 ndim=%d\n", x->ndim);
+        fprintf(stderr, "emb_module.forward: 输入必须是 ndim=1 的索引张量, 实得 ndim=%d\n", x->ndim);
         exit(1);
     }
     const int n = x->size;

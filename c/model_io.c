@@ -88,7 +88,7 @@ int mlp_save_json(const MLP *m, const char *path)
     int rc = jw_write_file(&w, path);
     jw_free(&w);
     if (rc != 0) {
-        fprintf(stderr, "mlp_save_json: 写入 %s 失败\n", path);
+        fprintf(stderr, "mlp_save_json: 写入 %s failed\n", path);
         return -1;
     }
     return 0;
@@ -99,7 +99,7 @@ MLP *mlp_load_json(const char *path)
     char err[256];
     JsonValue *root = json_parse_file(path, err, sizeof(err));
     if (!root) {
-        fprintf(stderr, "mlp_load_json: %s 解析失败: %s\n", path, err);
+        fprintf(stderr, "mlp_load_json: %s parse failed: %s\n", path, err);
         return NULL;
     }
     if (root->kind != JSON_OBJECT) {
@@ -110,7 +110,7 @@ MLP *mlp_load_json(const char *path)
 
     const char *type = json_str(json_get(root, "type"), "");
     if (strcmp(type, "MLP") != 0) {
-        fprintf(stderr, "mlp_load_json: 不支持的类型 \"%s\"\n", type);
+        fprintf(stderr, "mlp_load_json: unsupported 类型 \"%s\"\n", type);
         json_free(root);
         return NULL;
     }

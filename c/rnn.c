@@ -58,7 +58,7 @@ static void require_ptr(const void *p, const char *who, const char *what)
 {
     if (!p) {
         char buf[160];
-        snprintf(buf, sizeof(buf), "%s 不能为 NULL", what);
+        snprintf(buf, sizeof(buf), "%s must not be NULL", what);
         rnn_fail(who, buf);
     }
 }
@@ -860,7 +860,7 @@ static void cache_check_T(const RNNStepCache *sc, int T, const char *who, const 
 {
     if (T < 0) rnn_fail(who, "序列长度 T 不能为负");
     if (T > sc->max_T) {
-        fprintf(stderr, "%s: 序列长度 T = %d 超过预分配容量 max_T = %d；"
+        fprintf(stderr, "%s: sequence length T = %d exceeds preallocated max_T = %d; "
                         "请在训练循环外调用 %s(net, T) 扩容\n",
                 who, T, sc->max_T, reserve_fn);
         exit(1);
