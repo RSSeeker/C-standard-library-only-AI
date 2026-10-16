@@ -1,4 +1,4 @@
-﻿#include "AI.hpp"
+#include "c_model.hpp"   // 兼容层：内部是 c/ 下的纯 C 引擎
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
@@ -15,7 +15,7 @@
 #undef min
 #undef max
 
-using namespace ai;
+using namespace ceng;
 
 #ifdef _MSC_VER
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
@@ -104,6 +104,7 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #define IDC_BTN_ADD_LAYER   3500
 #define IDC_BTN_DEL_LAYER   3501
 #define IDC_LIST_LAYERS     3510
+
 
 // 训练线程
 #define WM_USER_UPDATE_OUTPUT   (WM_USER + 100)
@@ -836,17 +837,54 @@ static void layoutRightPanel() {
     int outW = w - rightX - 16;
     if (outW < 200) outW = 200;
 
-    // 输出框占 35%，图表占剩余空间
     int availH = h - 36 - 24;  // 顶部 36，底部 24 留给 status
     if (availH < 120) availH = 120;
     int outH = std::max(80, availH * 33 / 100);
     int chartTop = 36 + outH + 8;
     int chartBottom = h - 24;
+    if (chartBottom < chartTop + 40) chartBottom = chartTop + 40;
+    if (chartBottom > h) chartBottom = h;   // 防止极矮窗口下越过客户区边界
     g_chartRect = {rightX, chartTop, rightX + outW, chartBottom};
 
     MoveWindow(g_hOutput, rightX, 36, outW, outH, TRUE);
     MoveWindow(g_hStatus, rightX, h - 19, outW, 17, TRUE);
+
 }
+// 把左侧面板的所有子控件整体垂直移动 dy 像素（dy > 0 向下）。
+// 滚动与"窗口尺寸变化后重新对齐"都走这一个函数，避免两处逻辑不一致。
+static void moveLeftChildren(HWND hwnd, int dy) {
+    if (!hwnd || dy == 0) return;
+    RECT rcClient;
+    GetClientRect(hwnd, &rcClient);
+    RECT rcLeft = {0, 0, g_leftPanelW + 18, rcClient.bottom};
+
+    // 批量移动：先禁用重绘，移动后统一刷新，避免快速滚动/缩放时错位
+    std::vector<HWND> leftChildren;
+    for (HWND child = GetWindow(hwnd, GW_CHILD); child;
+         child = GetWindow(child, GW_HWNDNEXT)) {
+        if (child == g_hOutput || child == g_hStatus) continue;
+        RECT rc;
+        GetWindowRect(child, &rc);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (POINT*)&rc, 2);
+        if (rc.left < g_leftPanelW + 20) {
+            leftChildren.push_back(child);
+            SendMessage(child, WM_SETREDRAW, FALSE, 0);
+        }
+    }
+    for (HWND child : leftChildren) {
+        RECT rc;
+        GetWindowRect(child, &rc);
+        MapWindowPoints(HWND_DESKTOP, hwnd, (POINT*)&rc, 2);
+        SetWindowPos(child, NULL, rc.left, rc.top + dy, 0, 0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
+    }
+    for (HWND child : leftChildren) {
+        SendMessage(child, WM_SETREDRAW, TRUE, 0);
+    }
+    RedrawWindow(hwnd, &rcLeft, NULL,
+        RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
 static void updateInputOutputLock() {
     if (!g_hEditInput || !g_hEditOutput) return;
     int rows = g_hDataList ? (int)ListView_GetItemCount(g_hDataList) : 0;
@@ -1548,6 +1586,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_hStatus = MakeStatic(hwnd, "Ready. Edit data in the table, configure layers, and click Train.",
             rightX, 520, 460, 17, SS_SUNKEN);
 
+
         // 应用字体
         SendMessage(g_hOutput, WM_SETFONT, (WPARAM)g_hFontMono, TRUE);
         for (HWND child = GetWindow(hwnd, GW_CHILD); child;
@@ -1807,6 +1846,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SendMessage(g_hProgress, PBM_SETPOS, 0, 0);
             SetStatus("Output cleared");
             break;
+
         case IDC_BTN_INFER: {
             if (!g_trained) {
                 AppendText(g_hOutput, "\r\n[!] Train a model first!\r\n");
@@ -2105,11 +2145,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_SIZE: {
-        int h = HIWORD(lp);
+        // 最小化时 HIWORD(lp) 为 0；若不拦住，下面会算出负的矩形与负尺寸，
+        // MoveWindow 到非法位置 → 还原后出现渲染错乱/残留。零尺寸同理。
+        if (wp == SIZE_MINIMIZED) break;
+        int w = LOWORD(lp), h = HIWORD(lp);
+        if (w <= 0 || h <= 0) break;
+
+        // 尺寸变化后左面板一律回到顶部：原来只把 g_scrollY 钳到上限，
+        // 子控件却仍停在旧的滚动偏移上，与滚动条位置不一致（缩放/最大化后错位）
+        if (g_scrollY != 0) {
+            moveLeftChildren(hwnd, g_scrollY);
+            g_scrollY = 0;
+        }
+
         // 设置垂直滚动条
         int maxPos = g_contentH - h + 20;
         if (maxPos < 0) maxPos = 0;
-        if (g_scrollY > maxPos) g_scrollY = maxPos;
         SCROLLINFO si = {sizeof(SCROLLINFO), SIF_RANGE | SIF_PAGE | SIF_POS};
         si.nMin = 0;
         si.nMax = g_contentH;
@@ -2138,39 +2189,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (newPos < 0) newPos = 0;
         if (newPos > maxPos) newPos = maxPos;
         if (newPos != (int)si.nPos) {
-            int delta = si.nPos - newPos;
-            // 批量移动左侧面板子控件：先禁用重绘，移动后统一刷新，避免快速滚动错位
-            RECT rcClient;
-            GetClientRect(hwnd, &rcClient);
-            RECT rcLeft = {0, 0, g_leftPanelW + 18, rcClient.bottom};
-
-            std::vector<HWND> leftChildren;
-            for (HWND child = GetWindow(hwnd, GW_CHILD); child;
-                 child = GetWindow(child, GW_HWNDNEXT)) {
-                if (child == g_hOutput || child == g_hStatus) continue;
-                RECT rc;
-                GetWindowRect(child, &rc);
-                MapWindowPoints(HWND_DESKTOP, hwnd, (POINT*)&rc, 2);
-                if (rc.left < g_leftPanelW + 20) {
-                    leftChildren.push_back(child);
-                    SendMessage(child, WM_SETREDRAW, FALSE, 0);
-                }
-            }
-
-            for (HWND child : leftChildren) {
-                RECT rc;
-                GetWindowRect(child, &rc);
-                MapWindowPoints(HWND_DESKTOP, hwnd, (POINT*)&rc, 2);
-                SetWindowPos(child, NULL, rc.left, rc.top + delta, 0, 0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
-            }
-
-            for (HWND child : leftChildren) {
-                SendMessage(child, WM_SETREDRAW, TRUE, 0);
-            }
-            RedrawWindow(hwnd, &rcLeft, NULL,
-                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-
+            moveLeftChildren(hwnd, (int)si.nPos - newPos);
             si.nPos = newPos;
             SetScrollInfo(hwnd, SB_VERT, &si, TRUE);
             g_scrollY = newPos;

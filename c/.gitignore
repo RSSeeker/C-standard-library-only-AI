@@ -1,0 +1,5 @@
+# C 移植的构建产物
+*.exe
+*.o
+*.obj
+reference.txt
