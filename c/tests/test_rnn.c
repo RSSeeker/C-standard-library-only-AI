@@ -1030,7 +1030,7 @@ static void opt_check(const char *tag, OptKind kind)
 
 static int mode_self(void)
 {
-    printf("test_rnn —— RNNCell/RNN、LSTMCell/LSTM、GRUCell/GRU 移植自测\n");
+    printf("test_rnn -- RNNCell/RNN、LSTMCell/LSTM、GRUCell/GRU 移植自测\n");
     printf("规模：T=%d, input_size=%d, hidden_size=%d, layers=%d\n", T, INS, HS, LAYERS);
 
     printf("\n[1] 步进一致性：一次 zero_grad + 逐步 backward == 各步隔离梯度之和\n");

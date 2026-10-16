@@ -241,8 +241,8 @@ static void test_bn1d_running_and_stats(void)
         if (fabs(m) > worst_m) worst_m = fabs(m);
         if (fabs(v - 1.0) > worst_v) worst_v = fabs(v - 1.0);
     }
-    check("输出列均值 ≈ 0", worst_m, 1e-9);
-    check("输出列方差 ≈ 1", worst_v, 1e-3);
+    check("输出列均值 ~ 0", worst_m, 1e-9);
+    check("输出列方差 ~ 1", worst_v, 1e-3);
 
     /* running 统计量：rm = 0.9*0 + 0.1*m；rv = 0.9*1 + 0.1*var*n/(n-1) */
     double worst_rm = 0.0, worst_rv = 0.0;
@@ -425,8 +425,8 @@ static void test_layernorm_stats(void)
 
     const double m = sum_neumaier(outv, D) / D;
     const double v = dot_neumaier(outv, outv, D) / D - m * m; /* 描述性统计，够用 */
-    check("输出均值 ≈ 0", fabs(m), 1e-9);
-    check("输出方差 ≈ 1", fabs(v - 1.0), 1e-3);
+    check("输出均值 ~ 0", fabs(m), 1e-9);
+    check("输出方差 ~ 1", fabs(v - 1.0), 1e-3);
     layernorm_free(ln);
 }
 

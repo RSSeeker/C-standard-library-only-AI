@@ -50,38 +50,41 @@ namespace {
 void usage()
 {
     std::cout <<
-        "AI_C 命令行版（与 GUI 版共用纯 C 引擎）\n\n"
-        "  ai_cli                     跑全部内置示例\n"
-        "  ai_cli selftest            训练收敛自检\n"
-        "  ai_cli train --csv <文件> [--task regression|classification]\n"
+        "AI_C command line (shares the pure C engine with the GUI build)\n\n"
+        "  ai_cli                     run all built-in examples\n"
+        "  ai_cli selftest            training convergence self-test\n"
+        "  ai_cli train --csv <file> [--task regression|classification]\n"
         "               [--hidden 16,8] [--epochs 500] [--lr 0.01] [--batch 16]\n"
-        "               [--val 0.1] [--patience 50] [--header] [--save <文件>]\n"
-        "  ai_cli predict --model <文件> --input \"0.5,0.3\"\n"
-        "  ai_cli predict --model <文件> --csv <文件> [--out <文件>] [--header]\n"
-        "  ai_cli bench [--samples 1000] [--epochs 5]\n"
-        "  ai_cli cross-validate --csv <文件> [--k 5] [--hidden 16,8] [--epochs 400]\n"
+        "               [--val 0.1] [--patience 50] [--header] [--save <file>]\n"
+        "               [--test <file>] [--curve <file>] [--seed N]\n"
+        "               [--early-stop-metric val|train]\n"
+        "               [--kfold 5 [--final <file>] [--aggregate] [--aggregate-weights]]\n"
+        "  ai_cli predict --model <file> --input \"0.5,0.3\"\n"
+        "  ai_cli predict --model <file> --csv <file> [--out <file>] [--header]\n"
+        "  ai_cli cross-validate --csv <file> [--k 5] [--hidden 16,8] [--epochs 400]\n"
         "                        [--lr 0.02] [--batch 16] [--task ...] [--header]\n"
-        "  ai_cli grid-search --csv <文件> [--hidden \"8,8;16,16\"] [--lr 0.01,0.03]\n"
+        "  ai_cli grid-search --csv <file> [--hidden \"8,8;16,16\"] [--lr 0.01,0.03]\n"
         "                     [--epochs 300] [--val 0.1] [--task ...] [--header]\n"
-        "  ai_cli data --csv <文件> [--header]                     数据体检（列统计+任务猜测）\n"
-        "  ai_cli split --csv <文件> [--ratio 0.2] [--seed N] [--header]\n"
-        "               [--out-train a.csv] [--out-test b.csv]  可复现地切分数据集\n"
-        "  ai_cli describe --model <文件>                          模型结构与参数量\n"
-        "  ai_cli plot --curve <文件> [--svg out.svg] [--csv out.csv]\n"
-        "  ai_cli train --csv <文件> --kfold 5 [--save <前缀>] [--final <文件>]\n"
-        "  ai_cli prune --model <文件> [--ratio 0.5|--threshold 0.01] [--out <文件>]\n"
-        "                [--test <文件>] [--header]                  幅度剪枝 + 精度对账\n"
-        "  ai_cli quantize --model <文件> [--bits 8] [--out <文件>] [--test <文件>]\n"
-        "  ai_cli compare --model a.txt --model-b b.txt --csv <测试集> [--tol 1e-6]\n"
-        "  ai_cli serve --model <文件> [--port 8080] [--token <串>]  HTTP 推理服务\n"
-        "  ai_cli distill --teacher <文件> --csv <文件> [--hidden 4] [--epochs 400]\n"
-        "                 [--lr 0.02] [--out student.txt] [--test t.csv]  小模型学大模型\n"
-        "  ai_cli export-svg --model <文件> [--out model.svg]     模型结构图\n"
-        "  ai_cli train ... [--early-stop-metric val|train] [--kfold 5 --aggregate]\n"
-        "  ai_cli export-weights --model <文件> --out <文件.json>   （与 Python 版互通）\n"
-        "  ai_cli import-weights --json <文件.json> --out <文件>    （转成本地文本格式）\n\n"
-        "  CSV：一行一个样本，逗号或空白分隔；分类任务最后一列是类别索引，\n"
-        "       回归任务最后一列（起）是目标。\n";
+        "  ai_cli distill --teacher <file> --csv <file> [--hidden 4] [--epochs 400]\n"
+        "                 [--lr 0.02] [--out student.txt] [--test t.csv]\n"
+        "  ai_cli bench [--samples 1000] [--epochs 5]\n"
+        "  ai_cli data --csv <file> [--header]            column stats + task guess\n"
+        "  ai_cli split --csv <file> [--ratio 0.2] [--seed N] [--header]\n"
+        "               [--out-train a.csv] [--out-test b.csv]\n"
+        "  ai_cli describe --model <file>                 structure and parameter count\n"
+        "  ai_cli plot --curve <file> [--svg out.svg] [--csv out.csv]\n"
+        "  ai_cli prune --model <file> [--ratio 0.5|--threshold 0.01] [--out <file>]\n"
+        "                [--test <file>] [--header]      magnitude pruning + accuracy check\n"
+        "  ai_cli quantize --model <file> [--bits 8] [--out <file>] [--test <file>]\n"
+        "  ai_cli compare --model a.txt --model-b b.txt --csv <test set> [--tol 1e-6]\n"
+        "  ai_cli serve --model <file> [--port 8080] [--token <str>]   HTTP inference server\n"
+        "  ai_cli export-svg --model <file> [--out model.svg]\n"
+        "  ai_cli export-weights --model <file> --out <file.json>   (Python-compatible)\n"
+        "  ai_cli import-weights --json <file.json> --out <file>    (to local format)\n"
+        "  ai_cli help\n\n"
+        "  CSV: one sample per line, comma or space separated.\n"
+        "       classification: the last column is the class index;\n"
+        "       regression: the last column(s) are the target(s).\n";
 }
 
 std::vector<double> parseList(const std::string& s)
@@ -190,7 +193,7 @@ int demoGradientClip()
     m.fit(X, Y, 300, 2, 0.0, nullptr, 0, true, true, &sch, 1.0);
     double r2 = m.score(X, Y);
     std::cout << "  LR after 300 epochs = " << fmt(m.optimizer->lr, 6)
-              << "   R² = " << fmt(r2, 6) << "\n";
+              << "   R2 = " << fmt(r2, 6) << "\n";
     return r2 > 0.9 ? 0 : 1;
 }
 
@@ -414,7 +417,7 @@ int crossValidate(const std::string& csv, int k, std::vector<int> hidden,
             Model m = make_regressor((int)X[0].size(), (int)Y[0].size(), hidden, "leaky_relu", lr);
             m.fit(TX, TY, epochs, batch, 0.0, nullptr, 0, false, true, nullptr, 0.0);
             sc = m.score(VX, VY);
-            std::cout << "  fold " << fold + 1 << ": R² = " << fmt(sc, 6)
+            std::cout << "  fold " << fold + 1 << ": R2 = " << fmt(sc, 6)
                       << "（验证 " << VX.size() << "）\n";
         }
         scores.push_back(sc);
@@ -736,7 +739,7 @@ int trainKfold(const std::string& csv, int k, std::vector<int> hidden, int epoch
         scores.push_back(sc);
 
         std::cout << "  fold " << fold + 1 << "/" << k << ": "
-                  << (cls ? "accuracy " : "R² ") << fmt(cls ? sc * 100 : sc, 5) << (cls ? "%" : "")
+                  << (cls ? "accuracy " : "R2 ") << fmt(cls ? sc * 100 : sc, 5) << (cls ? "%" : "")
                   << "   （训练 " << TX.size() << " / 验证 " << VX.size() << "）";
         if (!savePrefix.empty()) {
             std::string path = savePrefix + "_fold" + std::to_string(fold + 1) + ".txt";
@@ -888,7 +891,7 @@ int pruneModel(const std::string& modelPath, const std::string& outPath,
               << "，稀疏度 " << fmt(100.0 * pruned / std::max(1, total), 2) << "%\n";
     if (hasTest) {
         double after = evalOn(m, TX, TY, cls);
-        std::cout << "  " << (cls ? "accuracy" : "R²") << " (test set): before "
+        std::cout << "  " << (cls ? "accuracy" : "R2") << " (test set): before "
                   << fmt(cls ? before * 100 : before, 5) << "  ->  剪枝后 "
                   << fmt(cls ? after * 100 : after, 5) << (cls ? "%" : "") << "\n";
     }
@@ -920,7 +923,7 @@ int quantizeModel(const std::string& modelPath, const std::string& outPath, int 
               << fmt((double)m.weight_count() * bits / 8 / 1024, 2) << " KB）\n";
     if (hasTest) {
         double after = evalOn(m, TX, TY, cls);
-        std::cout << "  " << (cls ? "accuracy" : "R²") << " (test set): before "
+        std::cout << "  " << (cls ? "accuracy" : "R2") << " (test set): before "
                   << fmt(cls ? before * 100 : before, 5) << "  ->  量化后 "
                   << fmt(cls ? after * 100 : after, 5) << (cls ? "%" : "")
                   << "   变化 " << fmt((after - before) * (cls ? 100 : 1), 5) << "\n";
@@ -945,10 +948,10 @@ int compareModels(const std::string& pathA, const std::string& pathB,
     std::cout << "===== model comparison (" << X.size() << " test samples) =====\n";
     std::cout << "  A: " << pathA << "\n      params " << a.weight_count()
               << "   稀疏度 " << fmt(100.0 * a.zero_count() / std::max(1, a.weight_count()), 2) << "%"
-              << "   " << (cls ? "accuracy " : "R² ") << fmt(cls ? sa * 100 : sa, 5) << (cls ? "%" : "") << "\n";
+              << "   " << (cls ? "accuracy " : "R2 ") << fmt(cls ? sa * 100 : sa, 5) << (cls ? "%" : "") << "\n";
     std::cout << "  B: " << pathB << "\n      params " << b.weight_count()
               << "   稀疏度 " << fmt(100.0 * b.zero_count() / std::max(1, b.weight_count()), 2) << "%"
-              << "   " << (cls ? "accuracy " : "R² ") << fmt(cls ? sb * 100 : sb, 5) << (cls ? "%" : "") << "\n";
+              << "   " << (cls ? "accuracy " : "R2 ") << fmt(cls ? sb * 100 : sb, 5) << (cls ? "%" : "") << "\n";
 
     double diff = sb - sa;
     std::cout << "  difference (B-A) = " << fmt(cls ? diff * 100 : diff, 5) << (cls ? "%" : "")
@@ -1136,7 +1139,7 @@ int exportSvg(const std::string& modelPath, const std::string& svgOut)
           << "\" rx=\"8\" fill=\"#161b22\" stroke=\"#58a6ff\"/>\n";
         o << "  <text x=\"" << (x + BW / 2) << "\" y=\"" << (y + 22)
           << "\" fill=\"#c9d1d9\" font-size=\"13\" text-anchor=\"middle\">Linear "
-          << L.fan_in << " → " << L.fan_out << "</text>\n";
+          << L.fan_in << " -> " << L.fan_out << "</text>\n";
         o << "  <text x=\"" << (x + BW / 2) << "\" y=\"" << (y + 40)
           << "\" fill=\"#8b949e\" font-size=\"12\" text-anchor=\"middle\">" << L.act_name << "</text>\n";
         o << "  <text x=\"" << (x + BW / 2) << "\" y=\"" << (y + BH + 18)
@@ -1201,14 +1204,14 @@ int distill(const std::string& teacherPath, const std::string& csv, std::vector<
         }
     }
     std::cout << "  agreement with teacher = " << fmt(100.0 * agree / X.size(), 2) << "%"
-              << (cls ? "" : "（回归按error ≤1e-2 判定，最大deviation " + fmt(maxDiff, 6) + "）") << "\n";
+              << (cls ? "" : "（回归按error <=1e-2 判定，最大deviation " + fmt(maxDiff, 6) + "）") << "\n";
 
     if (!testPath.empty()) {
         std::vector<Vec> TX, TY;
         if (loadCSV(testPath, header, 1, TX, TY)) {
             std::cout << "  student (test set): " << (cls ? "accuracy " : "R2 ")
                       << fmt(evalOn(stu, TX, TY, cls) * (cls ? 100 : 1), 5) << (cls ? "%" : "")
-                      << "    教师（测试集）: " << (cls ? "accuracy " : "R² ")
+                      << "    教师（测试集）: " << (cls ? "accuracy " : "R2 ")
                       << fmt(evalOn(teacher, TX, TY, cls) * (cls ? 100 : 1), 5) << (cls ? "%" : "") << "\n";
         }
     }

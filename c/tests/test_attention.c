@@ -426,7 +426,7 @@ static void test_containers(void)
         for (int j = 0; j < E2; j++)
             sh = fmax(sh, fabs(o2->data[(size_t)t * E2 + j] -
                                1.5 * e3->weight[(size_t)(int)idx2[t] * E2 + j]));
-    check("Embedding→FakeScale 前向", sh, 1e-15);
+    check("Embedding->FakeScale 前向", sh, 1e-15);
 
     module_zero_grad(seq2);
     module_backward(seq2, c2, d2);
@@ -671,7 +671,7 @@ static void test_transformer(void)
     fd_check("3 层输入梯度 d_x", x->data, dx->data, x->size, 1, loss_eval, &ctx);
     module_free(e3mod);
 
-    printf("\n=== 9. Sequential(PositionalEncoding → TransformerEncoderLayer) 集成 ===\n");
+    printf("\n=== 9. Sequential(PositionalEncoding -> TransformerEncoderLayer) 集成 ===\n");
     PositionalEncoding *pe = pe_create(d_model, max_seq);
     TransformerEncoderLayer *l2 = tel_create(d_model, heads, d_ff, max_seq, 0.0, 4242);
     for (int j = 0; j < d_model; j++) {

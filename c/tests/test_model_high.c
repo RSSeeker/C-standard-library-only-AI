@@ -70,7 +70,7 @@ static int mode_self(void)
 
         int done = trainer_fit(t, &train, NULL, &cfg, NULL, NULL);
         double r2 = trainer_r2(t, &train);
-        printf("[self] make_regressor: %d 轮后 R² = %.4f（期望 > 0.99）\n", done, r2);
+        printf("[self] make_regressor: %d 轮后 R2 = %.4f（期望 > 0.99）\n", done, r2);
         if (r2 < 0.99) ok = 0;
         model_free(t);
     }
@@ -97,7 +97,7 @@ static int mode_self(void)
         Dataset dr = { &x[0][0], &yr[0][0], NULL, 4, 2, 1 };
         Trainer *tr = model_quick_train(&dr, 0, hidden, 1, &cfg, OPT_ADAM, 0.02);
         double r2 = trainer_r2(tr, &dr);
-        printf("[self] quick_train(回归): R² = %.4f\n", r2);
+        printf("[self] quick_train(回归): R2 = %.4f\n", r2);
         if (r2 < 0.9) ok = 0;
         model_free(tr);
     }
