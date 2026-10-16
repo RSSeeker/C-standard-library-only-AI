@@ -171,6 +171,57 @@ std::string MLP::to_string() const {
     return oss.str();
 }
 
+double MLP::sparsity() const {
+    int total = 0, zeros = 0;
+    for (auto& L : layers) {
+        total += L.fan_in * L.fan_out;
+        for (auto& row : L.weights)
+            for (double w : row) if (w == 0.0) zeros++;
+    }
+    return total ? (double)zeros / total : 0.0;
+}
+
+int MLP::prune_magnitude(double threshold) {
+    if (threshold <= 0.0) return 0;
+    int pruned = 0;
+    for (auto& L : layers)
+        for (auto& row : L.weights)
+            for (double& w : row)
+                if (std::fabs(w) < threshold) { w = 0.0; pruned++; }
+    return pruned;
+}
+
+double MLP::quantize_weights(int bits) {
+    if (bits < 2 || bits > 24) return -1.0;
+    double lo = 1e300, hi = -1e300;
+    for (auto& L : layers)
+        for (auto& row : L.weights)
+            for (double w : row) { if (w < lo) lo = w; if (w > hi) hi = w; }
+    if (hi <= lo) return -1.0;
+    double step = (hi - lo) / ((1 << bits) - 1);
+    for (auto& L : layers)
+        for (auto& row : L.weights)
+            for (double& w : row) w = lo + std::round((w - lo) / step) * step;
+    return step;
+}
+
+MLP& MLP::merge_weights(const MLP& other, double w_self, double w_other) {
+    if (layers.size() != other.layers.size())
+        throw std::invalid_argument("merge_weights: 层数不一致");
+    for (size_t li = 0; li < layers.size(); ++li) {
+        auto& A = layers[li];
+        const auto& B = other.layers[li];
+        if (A.fan_in != B.fan_in || A.fan_out != B.fan_out)
+            throw std::invalid_argument("merge_weights: 层结构不一致");
+        for (int j = 0; j < A.fan_out; ++j) {
+            for (int i = 0; i < A.fan_in; ++i)
+                A.weights[j][i] = w_self * A.weights[j][i] + w_other * B.weights[j][i];
+            A.biases[j] = w_self * A.biases[j] + w_other * B.biases[j];
+        }
+    }
+    return *this;
+}
+
 int MLP::param_count() const {
     int total = 0;
     for (auto& l : layers)
@@ -1913,6 +1964,11 @@ void ParamOptimizer::zero_grad() {
 //  Loss Functions
 // ============================================================================
 std::pair<double, Vec> mse_loss(const Vec& pred, const Vec& target) {
+    // 长度不一致不能靠 zip 静默截断：截断后会得到一个“看起来正常”的错值
+    // （对应 Python 版 mse_loss 抛的 ValueError）
+    if (pred.size() != target.size())
+        throw std::invalid_argument("mse_loss: pred 长度 " + std::to_string(pred.size()) +
+                                    " != target 长度 " + std::to_string(target.size()));
     double loss = 0.0;
     Vec grad(pred.size());
     double invN = 1.0 / pred.size();
@@ -2284,19 +2340,27 @@ double Model::evaluate(const std::vector<Vec>& x, const std::vector<Vec>& y) {
 
 double Model::score(const std::vector<Vec>& x, const std::vector<Vec>& y) {
     // R² for regression
+    // 多输出时对每个输出维度分别算 R² 再取平均（与 Python 版一致）；
+    // 原来只取第 0 维，其余维度被静默忽略。
     if (x.empty() || x.size() != y.size() || y[0].empty()) return 0.0;
     auto preds = predict(x);
-    double ss_res = 0.0, ss_tot = 0.0;
-    double y_mean = 0.0;
-    for (auto& yi : y) y_mean += yi[0];
-    y_mean /= y.size();
-    for (size_t i = 0; i < x.size(); ++i) {
-        double diff = preds[i][0] - y[i][0];
-        ss_res += diff * diff;
-        double diff_tot = y[i][0] - y_mean;
-        ss_tot += diff_tot * diff_tot;
+    const size_t out_dim = y[0].size();
+    double total = 0.0;
+    for (size_t j = 0; j < out_dim; ++j) {
+        double ss_res = 0.0, ss_tot = 0.0, y_mean = 0.0;
+        for (auto& yi : y) y_mean += (j < yi.size()) ? yi[j] : 0.0;
+        y_mean /= (double)y.size();
+        for (size_t i = 0; i < x.size(); ++i) {
+            double yv = (j < y[i].size()) ? y[i][j] : 0.0;
+            double pv = (j < preds[i].size()) ? preds[i][j] : 0.0;
+            double diff = pv - yv;
+            ss_res += diff * diff;
+            double diff_tot = yv - y_mean;
+            ss_tot += diff_tot * diff_tot;
+        }
+        total += 1.0 - ss_res / std::max(ss_tot, 1e-15);
     }
-    return 1.0 - ss_res / std::max(ss_tot, 1e-15);
+    return total / (double)out_dim;
 }
 
 double Model::score(const std::vector<Vec>& x, const std::vector<int>& y) {

@@ -112,6 +112,11 @@ public:
     Vec forward(Vec x);
     std::string to_string() const;
     int param_count() const;
+    // 模型瘦身与合并（与 Python / C 引擎同一套语义）
+    double sparsity() const;
+    int prune_magnitude(double threshold);
+    double quantize_weights(int bits);
+    MLP& merge_weights(const MLP& other, double w_self = 0.5, double w_other = 0.5);
 };
 
 // ============================================================================
