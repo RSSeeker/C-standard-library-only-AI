@@ -55,7 +55,7 @@ jobs:
       - name: Compile with MinGW
         shell: msys2 {0}
         run: |
-          g++ -std=c++17 -O2 -Wall -mwindows -static -o ai.exe main.cpp AI.cpp -lcomctl32 -lcomdlg32
+          g++ -std=c++17 -O2 -Wall -mwindows -static -o ai.exe -I. -Ic main.cpp AI.cpp -lcomctl32 -lcomdlg32
 
       - name: Package artifact
         shell: pwsh
