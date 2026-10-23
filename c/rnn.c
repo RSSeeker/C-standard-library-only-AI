@@ -79,10 +79,12 @@ static double sum_col_neumaier(const double *W, int stride, int col, const doubl
     return s + c;
 }
 
-/* sigmoid：Python 是 1.0 / (1.0 + math.exp(-x)) */
+/* sigmoid：与 Python 版保持一致的分支写法（xi<0 用 exp(x)/(1+exp(x))），
+   这样两边运算顺序相同、结果逐位一致，且大负数不会溢出 */
 static double sigmoid(double x)
 {
-    return 1.0 / (1.0 + exp(-x));
+    if (x >= 0.0) return 1.0 / (1.0 + exp(-x));
+    return exp(x) / (1.0 + exp(x));
 }
 
 /* 随机初始化（仅 C 侧独立使用；跨语言对齐请用 set_params 灌权重）。

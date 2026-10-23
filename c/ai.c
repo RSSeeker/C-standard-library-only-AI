@@ -17,6 +17,13 @@
 /* 严格 C17 下 math.h 不保证提供 M_PI（那是 POSIX 扩展），自己定义 */
 #define AI_PI 3.14159265358979323846
 
+/* Safety check failed: abort (C has no exceptions; OOB writes corrupt memory) */
+static void ai_die(const char *where, const char *msg)
+{
+    fprintf(stderr, "error [%s]: %s\n", where, msg);
+    exit(1);
+}
+
 /* ============================ 内存 ============================ */
 
 static void *xmalloc(size_t n)
@@ -309,6 +316,10 @@ void mse_grad(const double *pred, const double *target, int n, double *grad)
 
 double ce_loss_grad(const double *pred, int n, int target_idx, double *grad)
 {
+    /* target_idx 由调用方传入：负数会指向数组外，越界读写直接破坏内存，
+       必须在这里拦住（Python 版对应 cross_entropy_loss 的索引校验） */
+    if (target_idx < 0 || target_idx >= n)
+        ai_die("ce_loss_grad", "target_idx 越界：负索引/超界会破坏内存");
     const double eps = 1e-15;
     double p = pred[target_idx] > eps ? pred[target_idx] : eps;
     double loss = -log(p);
@@ -488,6 +499,9 @@ double trainer_accumulate(Trainer *t, const double *x, const double *y, int y_id
 /* 梯度裁剪（按全局范数），与 Python 的 clip_grad_by_norm 等价 */
 static void clip_by_norm(MLP *m, double max_norm)
 {
+    /* 负阈值会让 scale 为负，等于把所有梯度翻转符号 */
+    if (max_norm <= 0.0)
+        ai_die("clip_by_norm", "max_norm 必须 > 0");
     double total = 0.0;
     for (int i = 0; i < m->n_layers; i++) {
         Layer *l = &m->layers[i];
@@ -496,7 +510,7 @@ static void clip_by_norm(MLP *m, double max_norm)
     }
     total = sqrt(total);
     if (total > max_norm && total > 0.0) {
-        double scale = max_norm / (total + 1e-6);
+        double scale = max_norm / total;   /* 与 Python 的 clip_grad_by_norm 完全一致（原先分母多加了 1e-6，两边结果不同） */
         for (int i = 0; i < m->n_layers; i++) {
             Layer *l = &m->layers[i];
             for (int k = 0; k < l->fan_out * l->fan_in; k++) l->gW[k] *= scale;
@@ -532,6 +546,8 @@ int trainer_fit(Trainer *t, const Dataset *train, const Dataset *val,
     if (!val && cfg->val_split > 0.0) {
         n_val = (int)(n * cfg->val_split);
         if (n_val < 1) n_val = 1;
+        /* 至少留 1 个训练样本：否则 n_train=0 -> batch_size=0 -> grads_div 除零 */
+        if (n_val >= n) n_val = (n > 1) ? n - 1 : 0;
         for (int i = n - 1; i > 0; i--) {          /* Fisher-Yates */
             int j = (int)(rng_uniform(&rng) * (double)(i + 1));
             int tmp = idx[i]; idx[i] = idx[j]; idx[j] = tmp;
@@ -664,8 +680,12 @@ double trainer_r2(Trainer *t, const Dataset *d)
             double dm = d->y[(size_t)i * out_dim + dim] - mean;
             ss_tot += dm * dm;
         }
-        if (ss_tot < 1e-15) ss_tot = 1e-15;
-        total += 1.0 - ss_res / ss_tot;
+        /* 目标恒定（ss_tot==0）时 R² 无定义：完全预测对记 1，否则记 0。
+           原先钳到 1e-15 会得到约 -1e15 的荒谬值（与 Python 侧同一处修复） */
+        if (ss_tot == 0.0)
+            total += (ss_res == 0.0) ? 1.0 : 0.0;
+        else
+            total += 1.0 - ss_res / ss_tot;
     }
     free(pred);
     return total / (double)out_dim;

@@ -3,6 +3,8 @@
  */
 #include "sched.h"
 
+#include <string.h>
+
 #include <math.h>
 
 /* 严格 C17 下 math.h 不保证提供 M_PI（POSIX 扩展），自己定义 */
@@ -45,6 +47,7 @@ void clip_grad_value(MLP *m, double clip_val)
 
 void lrsched_init_step(LRScheduler *s, Optimizer *opt, int step_size, double gamma)
 {
+    memset(s, 0, sizeof(*s));   /* 必须清零：custom_step/custom_ctx 否则是栈上垃圾，lrsched_step 会调用它 */
     s->kind = SCHED_STEP;
     s->opt = opt;
     s->initial_lr = opt->lr;
@@ -56,6 +59,7 @@ void lrsched_init_step(LRScheduler *s, Optimizer *opt, int step_size, double gam
 
 void lrsched_init_exponential(LRScheduler *s, Optimizer *opt, double gamma)
 {
+    memset(s, 0, sizeof(*s));   /* 必须清零：custom_step/custom_ctx 否则是栈上垃圾，lrsched_step 会调用它 */
     s->kind = SCHED_EXPONENTIAL;
     s->opt = opt;
     s->initial_lr = opt->lr;
@@ -67,6 +71,7 @@ void lrsched_init_exponential(LRScheduler *s, Optimizer *opt, double gamma)
 
 void lrsched_init_cosine(LRScheduler *s, Optimizer *opt, int T_max, double eta_min)
 {
+    memset(s, 0, sizeof(*s));   /* 必须清零：custom_step/custom_ctx 否则是栈上垃圾，lrsched_step 会调用它 */
     s->kind = SCHED_COSINE;
     s->opt = opt;
     s->initial_lr = opt->lr;
@@ -93,7 +98,9 @@ void lrsched_step(LRScheduler *s, int epoch)
         break;
     case SCHED_COSINE: {
         if (s->T_max <= 0) break;
-        double progress = (double)((epoch - 1) % s->T_max) / (double)s->T_max;
+        /* 分母用 T_max-1：让每个周期最后一轮正好到 eta_min（Python 侧同样修复） */
+        int denom = (s->T_max > 1) ? s->T_max - 1 : 1;
+        double progress = (double)((epoch - 1) % s->T_max) / (double)denom;
         s->opt->lr = s->eta_min + 0.5 * (s->initial_lr - s->eta_min) *
                      (1 + cos(AI_PI * progress));
         break;
