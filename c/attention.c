@@ -256,9 +256,19 @@ static double rng_uniform(unsigned long long *s)
     return (double)(z >> 11) * (1.0 / 9007199254740992.0);   /* [0,1) */
 }
 
+/* 参数检查失败直接终止：C 里没有异常，越界/非法参数会破坏内存 */
+static void tfd_die(const char *where, const char *msg)
+{
+    fprintf(stderr, "error [%s]: %s\n", where, msg);
+    exit(1);
+}
+
 void tfd_init(TfDropout *dp, double p, int d, int max_seq, unsigned long long seed)
 {
     memset(dp, 0, sizeof(*dp));
+    /* p 越界会产生除零/全零/放大，与 Python 的 Dropout(p) 校验一致 */
+    if (!(p >= 0.0 && p < 1.0))
+        tfd_die("tfd_init", "dropout p 必须在 [0,1) 内");
     dp->p = p;
     dp->train = 1;
     dp->d = d;

@@ -175,6 +175,9 @@ typedef struct {
     /* 1 = 用训练损失做早停判据（默认 0：有验证集时用验证损失）。
      * 验证集太小或分布不同时，用户可能想直接盯训练损失。 */
     int early_stop_on_train;
+    /* 1 = 训练结束后回滚到「被监控指标最好」的那一轮权重（对应 Python 的
+     * fit(restore_best_weights=True)）。早停只在变差时停止，本身不回滚。 */
+    int restore_best;
 } FitConfig;
 
 int trainer_fit(Trainer *t, const Dataset *train,

@@ -529,9 +529,54 @@ static void grads_div(MLP *m, int batch_size)
     }
 }
 
+/* ---- 最优权重快照（restore_best）---- */
+typedef struct { int n; double **W; double **b; } WeightSnap;
+
+static WeightSnap snap_alloc(MLP *m)
+{
+    WeightSnap s;
+    s.n = m->n_layers;
+    s.W = xmalloc(sizeof(double *) * (size_t)s.n);
+    s.b = xmalloc(sizeof(double *) * (size_t)s.n);
+    for (int i = 0; i < s.n; i++) {
+        size_t nw = (size_t)m->layers[i].fan_out * (size_t)m->layers[i].fan_in;
+        s.W[i] = xmalloc(sizeof(double) * nw);
+        s.b[i] = xmalloc(sizeof(double) * (size_t)m->layers[i].fan_out);
+    }
+    return s;
+}
+
+static void snap_save(const MLP *m, WeightSnap *s)
+{
+    for (int i = 0; i < s->n; i++) {
+        size_t nw = (size_t)m->layers[i].fan_out * (size_t)m->layers[i].fan_in;
+        memcpy(s->W[i], m->layers[i].W, sizeof(double) * nw);
+        memcpy(s->b[i], m->layers[i].b, sizeof(double) * (size_t)m->layers[i].fan_out);
+    }
+}
+
+static void snap_load(MLP *m, const WeightSnap *s)
+{
+    for (int i = 0; i < s->n; i++) {
+        size_t nw = (size_t)m->layers[i].fan_out * (size_t)m->layers[i].fan_in;
+        memcpy(m->layers[i].W, s->W[i], sizeof(double) * nw);
+        memcpy(m->layers[i].b, s->b[i], sizeof(double) * (size_t)m->layers[i].fan_out);
+    }
+}
+
+static void snap_free(WeightSnap *s)
+{
+    for (int i = 0; i < s->n; i++) { free(s->W[i]); free(s->b[i]); }
+    free(s->W);
+    free(s->b);
+    s->n = 0;
+}
+
 int trainer_fit(Trainer *t, const Dataset *train, const Dataset *val,
                 const FitConfig *cfg, double *history_train, double *history_val)
 {
+    /* 空数据集直接返回 0 轮：否则 n_train=0 -> batch_size=0 -> grads_div 除零 */
+    if (!train || train->n <= 0) return 0;
     int n = train->n;
     int in_dim = train->in_dim, out_dim = train->out_dim;
     int *idx = trainer_idx_buf(t, n);            /* 复用 trainer 的缓冲，热路径零分配 */
@@ -564,6 +609,9 @@ int trainer_fit(Trainer *t, const Dataset *train, const Dataset *val,
     double best_train = 1e308;
     int no_improve_train = 0;
     int epoch = 0;
+    WeightSnap snap;
+    int snap_ready = 0;
+    snap.n = 0; snap.W = NULL; snap.b = NULL;
 
     for (epoch = 1; epoch <= cfg->epochs; epoch++) {
         if (cfg->shuffle) {
@@ -611,15 +659,30 @@ int trainer_fit(Trainer *t, const Dataset *train, const Dataset *val,
             }
             vloss /= (double)vn;
             if (history_val) history_val[epoch - 1] = vloss;
-            if (cfg->patience > 0) {
-                if (vloss < best_val - 1e-12) { best_val = vloss; no_improve = 0; }
-                else if (++no_improve >= cfg->patience) break;
+            /* 最优权重快照与「是否早停」解耦：patience=0 只关闭早停 */
+            if (vloss < best_val - 1e-12) {
+                best_val = vloss; no_improve = 0;
+                if (cfg->restore_best) {
+                    if (!snap_ready) { snap = snap_alloc(t->net); snap_ready = 1; }
+                    snap_save(t->net, &snap);
+                }
+            } else {
+                no_improve++;
             }
+            if (cfg->patience > 0 && no_improve >= cfg->patience) break;
         }
         /* 用训练损失做早停判据（early_stop_on_train=1） */
-        if (cfg->early_stop_on_train && cfg->patience > 0) {
-            if (total_loss < best_train - 1e-12) { best_train = total_loss; no_improve_train = 0; }
-            else if (++no_improve_train >= cfg->patience) break;
+        if (cfg->early_stop_on_train) {
+            if (total_loss < best_train - 1e-12) {
+                best_train = total_loss; no_improve_train = 0;
+                if (cfg->restore_best) {
+                    if (!snap_ready) { snap = snap_alloc(t->net); snap_ready = 1; }
+                    snap_save(t->net, &snap);
+                }
+            } else {
+                no_improve_train++;
+            }
+            if (cfg->patience > 0 && no_improve_train >= cfg->patience) break;
         }
 
         /* 学习率调度：位置与 Python Model.fit 一致（在验证/早停判断之后；
@@ -637,6 +700,7 @@ int trainer_fit(Trainer *t, const Dataset *train, const Dataset *val,
             printf("  epoch %d | loss %.6f\n", epoch, total_loss);
     }
 
+    if (snap_ready) { snap_load(t->net, &snap); snap_free(&snap); }
     free(val_idx);
     return epoch > cfg->epochs ? cfg->epochs : epoch;
 }
