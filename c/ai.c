@@ -231,6 +231,8 @@ static void layer_backward(Layer *l, const double *delta, double *next_delta)
 MLP *mlp_create(const int *sizes, const Activation *acts, int n_sizes)
 {
     if (n_sizes < 2) return NULL;
+    for (int i = 0; i < n_sizes; i++)
+        if (sizes[i] <= 0) ai_die("mlp_create", "layer 维度必须 >= 1");
     MLP *m = xmalloc(sizeof(MLP));
     m->n_layers = n_sizes - 1;
     m->layers = xcalloc((size_t)m->n_layers, sizeof(Layer));
@@ -577,6 +579,9 @@ int trainer_fit(Trainer *t, const Dataset *train, const Dataset *val,
 {
     /* 空数据集直接返回 0 轮：否则 n_train=0 -> batch_size=0 -> grads_div 除零 */
     if (!train || train->n <= 0) return 0;
+    /* val_split>=1 会把训练集切空（与 Python 的 fit 同一处校验） */
+    if (!(cfg->val_split >= 0.0 && cfg->val_split < 1.0))
+        ai_die("trainer_fit", "val_split 必须在 [0,1) 内");
     int n = train->n;
     int in_dim = train->in_dim, out_dim = train->out_dim;
     int *idx = trainer_idx_buf(t, n);            /* 复用 trainer 的缓冲，热路径零分配 */

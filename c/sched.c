@@ -98,9 +98,9 @@ void lrsched_step(LRScheduler *s, int epoch)
         break;
     case SCHED_COSINE: {
         if (s->T_max <= 0) break;
-        /* 分母用 T_max-1：让每个周期最后一轮正好到 eta_min（Python 侧同样修复） */
-        int denom = (s->T_max > 1) ? s->T_max - 1 : 1;
-        double progress = (double)((epoch - 1) % s->T_max) / (double)denom;
+        /* T_max=1 时每一轮都是一个完整周期的末尾：直接落在 eta_min（Python 侧同样处理） */
+        double progress = (s->T_max == 1) ? 1.0
+                        : (double)((epoch - 1) % s->T_max) / (double)(s->T_max - 1);
         s->opt->lr = s->eta_min + 0.5 * (s->initial_lr - s->eta_min) *
                      (1 + cos(AI_PI * progress));
         break;
