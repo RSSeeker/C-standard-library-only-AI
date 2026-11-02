@@ -417,6 +417,15 @@ void mha_zero_grad(MultiHeadAttention *m)
     memset(m->grad_b_o, 0, d1 * sizeof(double));
 }
 
+void mha_set_causal(MultiHeadAttention *m, int causal)
+{
+    if (!m) {
+        fprintf(stderr, "mha_set_causal: m 为 NULL\n");
+        exit(1);
+    }
+    m->causal = causal ? 1 : 0;
+}
+
 void mha_set_params(MultiHeadAttention *m,
                     const double *W_q, const double *b_q,
                     const double *W_k, const double *b_k,
@@ -497,6 +506,17 @@ void mha_forward(MultiHeadAttention *m, const Tensor *x, Tensor *out)
         /* scores = q_h @ k_h^T * scale，随后逐行 softmax（就地） */
         mm_nt(qh, dk, kh, dk, attn, T, T, dk, T);
         for (int i = 0; i < T * T; i++) attn[i] *= scale;
+
+        /* 因果掩码：位置 t 只能看到 0..t，其余置 -INFINITY。
+         * softmax 后这些位置恰为 0（exp(-inf - mx) == 0），因此反向完全不用改：
+         * d_scores = attn * (...) 在掩码处自然是 0。与 Python 的 causal 分支同序。 */
+        if (m->causal) {
+            for (int t = 0; t < T; t++) {
+                double *row = attn + (size_t)t * T;
+                for (int j = t + 1; j < T; j++) row[j] = -INFINITY;
+            }
+        }
+
         for (int t = 0; t < T; t++) softmax_row_inplace(attn + (size_t)t * T, T);
 
         /* out = attn @ v_h */
@@ -803,6 +823,15 @@ void tel_free(TransformerEncoderLayer *l)
     xfree(l);
 }
 
+void tel_set_causal(TransformerEncoderLayer *l, int causal)
+{
+    if (!l) {
+        fprintf(stderr, "tel_set_causal: l 为 NULL\n");
+        exit(1);
+    }
+    mha_set_causal(l->self_attn, causal);
+}
+
 void tel_zero_grad(TransformerEncoderLayer *l)
 {
     /* 对应 Python 的 zero_grad：清 LayerNorm 梯度 + 子模块梯度 */
@@ -989,6 +1018,15 @@ void te_zero_grad(TransformerEncoder *e)
 void te_set_train(TransformerEncoder *e, int train)
 {
     for (int i = 0; i < e->num_layers; i++) tel_set_train(e->layers[i], train);
+}
+
+void te_set_causal(TransformerEncoder *e, int causal)
+{
+    if (!e) {
+        fprintf(stderr, "te_set_causal: e 为 NULL\n");
+        exit(1);
+    }
+    for (int i = 0; i < e->num_layers; i++) tel_set_causal(e->layers[i], causal);
 }
 
 /* 把 (max_seq_len, d_model) 的乒乓缓冲按当前 T 取视图 */

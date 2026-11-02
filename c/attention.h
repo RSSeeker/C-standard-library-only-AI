@@ -96,7 +96,8 @@ typedef struct {
     int d_k;                /* d_model / num_heads */
     int max_seq_len;        /* 预分配的最大序列长度 */
     int seq_len;            /* 最近一次 forward 的序列长度 */
-    double dropout_p;       /* 与 Python 一致地保存，但 forward 里未使用（Python 同样未使用） */
+    double dropout_p;       /* 注意力权重 dropout 的 p；C 侧只保存、mask 逻辑尚未移植 */
+    int causal;             /* 1 = 因果掩码：位置 t 只能看到 0..t（自回归语言模型用） */
 
     /* 参数（行主序）：W_? 为 (d_model, d_model)，按 Python 的 self.W_?[j][i] 展平 */
     double *W_q, *W_k, *W_v, *W_o;
@@ -132,6 +133,8 @@ typedef struct {
 
 /* dropout_p 仅保存不使用，保持与 Python 构造签名一致；max_seq_len 为预分配上限 */
 MultiHeadAttention *mha_create(int d_model, int num_heads, int max_seq_len, double dropout_p);
+/* 打开/关闭因果掩码（默认关闭）。必须在 mha_forward 之前调用。 */
+void mha_set_causal(MultiHeadAttention *m, int causal);
 void mha_free(MultiHeadAttention *m);
 void mha_zero_grad(MultiHeadAttention *m);
 /* x: (seq_len, d_model) → out: (seq_len, d_model) */
@@ -211,6 +214,8 @@ TransformerEncoderLayer *tel_create(int d_model, int num_heads, int d_ff,
                                     int max_seq_len, double dropout_p,
                                     unsigned long long seed);
 void tel_free(TransformerEncoderLayer *l);
+/* 因果掩码开关（转发给 self_attn），默认关闭 */
+void tel_set_causal(TransformerEncoderLayer *l, int causal);
 void tel_zero_grad(TransformerEncoderLayer *l);
 void tel_forward(TransformerEncoderLayer *l, const Tensor *x, Tensor *out);
 void tel_backward(TransformerEncoderLayer *l, const Tensor *dout, Tensor *dx);
@@ -236,6 +241,8 @@ typedef struct {
 TransformerEncoder *te_create(int d_model, int num_heads, int d_ff, int num_layers,
                               int max_seq_len, double dropout_p, unsigned long long seed);
 void te_free(TransformerEncoder *e);
+/* 因果掩码开关（转发给每一层），默认关闭 */
+void te_set_causal(TransformerEncoder *e, int causal);
 void te_zero_grad(TransformerEncoder *e);
 void te_forward(TransformerEncoder *e, const Tensor *x, Tensor *out);
 void te_backward(TransformerEncoder *e, const Tensor *dout, Tensor *dx);

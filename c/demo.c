@@ -7,9 +7,11 @@
  * 用法: demo
  */
 #include "ai.h"
+#include "llm.h"
 
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 static double now_sec(void)
@@ -110,6 +112,42 @@ int main(void)
                pred[0], pred[1]);
         trainer_release(&t);
         mlp_free(net);
+    }
+
+    /* ================= 3) 因果语言模型（LLM） ================= */
+    printf("\n=== causal LM: char-level next-char prediction ===\n");
+    {
+        /* 语料只有 0/1/2 三个字符，故意让它学会「012012…」这个循环 */
+        const char *corpus = "012012012012012012";
+        const int vocab = 3;
+        const int n = (int)strlen(corpus);
+        int seq[32];
+        for (int i = 0; i < n; i++) seq[i] = corpus[i] - '0';
+
+        CausalLM *lm = llm_create(vocab, 16, 2, 32, 2, 24, 0.0, 12345ULL);
+        const int *seqs[1] = { seq };
+        const int lens[1] = { n };
+
+        llm_zero_grad(lm);
+        double loss0 = llm_loss_and_backward(lm, seq, n);
+
+        double history[80];
+        double t0 = now_sec();
+        double loss1 = llm_fit(lm, seqs, lens, 1, 80, 3e-3, 0, 1, history);
+        double dt = now_sec() - t0;
+
+        printf("  params = %d, loss %.4f -> %.4f in %.2f s\n",
+               llm_param_count(lm), loss0, loss1, dt);
+
+        /* 贪心续写：top_k=1 等价于取 argmax，结果与随机数无关 */
+        int prompt[1] = { 0 };
+        int out[13];
+        int total = llm_generate(lm, prompt, 1, 12, 1.0, 1, out, 2024ULL);
+        printf("  prompt '0' -> '");
+        for (int i = 0; i < total; i++) printf("%c", (char)('0' + out[i]));
+        printf("'\n");
+
+        llm_free(lm);
     }
     return 0;
 }

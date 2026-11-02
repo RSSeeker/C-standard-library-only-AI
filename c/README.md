@@ -16,6 +16,7 @@
 | 训练循环 | **零分配**（预热后 `malloc` 调用次数 = 0，用链接器 `--wrap` 统计，与机器负载无关） |
 | 性能 | MLP[64,256,128,8]、5 万参数、1000 样本 × 5 轮：C 约 1.3 s vs Python 约 77 s（**约 58–68 倍**） |
 | 存档互通 | 与 Python 的 `save_model` / `load_model` **双向互通**，两个方向都逐位一致 |
+| 因果语言模型 | `CausalLM`（因果掩码 + GPT 式并行训练）：前向 logits、loss、19 个梯度块、一步 Adam、贪心生成 **全部与 Python 逐位一致**；多步训练受 libm `exp/log` 的 1 ULP 影响（见"已知差异"） |
 | 编译 | `-std=c17 -O2 -Wall -Wextra` 下**零警告** |
 | 副产品 | 移植中在 **Python 版发现并修复了一个真实梯度 bug**（见文末） |
 
@@ -27,7 +28,8 @@
 | `Conv2d` / `MaxPool2d` / `Flatten` | `layers_conv.c` | 已完成，12 项逐位一致 |
 | `Dropout` / `BatchNorm1d` / `LayerNorm` | `layers_norm.c` | 已完成，21 项逐位一致 |
 | `RNNCell/RNN` / `LSTMCell/LSTM` / `GRUCell/GRU` + step cache | `rnn.c` | 已完成 |
-| `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成 |
+| `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成（含 `causal` 因果掩码开关） |
+| `MultiHeadAttention(causal=True)` / `CausalLM`（LLM） | `attention.c` + `llm.c` | 已完成：因果掩码、teacher forcing 训练、自回归生成 |
 | `Sequential` / `ResidualBlock` | `containers.c` | 已完成（Module vtable） |
 | `TextProcessor` / `generate_text` / `softmax_with_temp` | `text.c` | 已完成，逐位一致 |
 | `save_model` / `load_model`（JSON） | `json.c` + `model_io.c` | 已完成，双向互通 |
@@ -43,14 +45,16 @@ cd c
 
 # 没有 make 时（Windows/MinGW 与 Linux/macOS 通用）
 gcc -std=c17 -O2 -Wall -Wextra -o demo demo.c ai.c tensor.c layers_conv.c \
-    layers_norm.c rnn.c attention.c containers.c json.c model_io.c text.c sched.c -lm
+    layers_norm.c rnn.c attention.c llm.c containers.c json.c model_io.c text.c sched.c -lm
 ./demo
 
 # 有 make 时
 make            # 构建全部程序
-make test       # 运行全部 C 自测
+make test       # 运行全部 C 自测（含 tests/test_llm：因果性 / 数值梯度 / 训练 / 生成）
 make check      # 与 Python 版做数值等价比对
 ```
+
+`./demo` 输出三段：分类、回归、**因果语言模型**（字符级「012012…」，约 0.06 s 把 loss 从 2.2 降到 0.003，贪心续写 `0120120120120`）。
 
 `tools/` 下的 Python 脚本需要能找到本 Python 版仓库，查找顺序是
 **环境变量 `AI_PY_DIR`** → 默认的 `../../Python-standard-library-only-AI-main`（与 AI_C 同级）。
@@ -67,7 +71,8 @@ c/
 ├── layers_conv.h/.c       Conv2d / MaxPool2d / Flatten
 ├── layers_norm.h/.c       BatchNorm1d / LayerNorm / Dropout
 ├── rnn.h / rnn.c          RNNCell/RNN、LSTMCell/LSTM、GRUCell/GRU（含 step cache）
-├── attention.h / .c       MultiHeadAttention / FeedForward / TransformerEncoder / PositionalEncoding / Embedding
+├── attention.h / .c       MultiHeadAttention / FeedForward / TransformerEncoder / PositionalEncoding / Embedding（含 causal 掩码）
+├── llm.h / llm.c          CausalLM：因果语言模型（复用 attention.c 的编码器 + 词表头 + Adam）
 ├── containers.h / .c      Sequential / ResidualBlock（基于 Module vtable）
 ├── json.h / json.c        极简 JSON 读写（供存档互通）
 ├── model_io.h / .c        与 Python 的 save_model/load_model 格式互通
@@ -133,11 +138,17 @@ Python 写 -> C 读：  最大差异 0.000e+00  PASS   （含 softmax 输出层�
 ```
 python tools/norm_reference.py && ./tests/compare_norm     # 21 项，全部 0.000e+00
 python tools/conv_reference.py && ./tests/compare_conv     # 12 项，全部 0.000e+00
+python tools/llm_reference.py && ./tests/compare_llm      # 5 段，见下
 ```
 
 覆盖：BatchNorm1d（训练 forward/反向 dx/grad_gamma/grad_beta/running 统计量/mean/var/inv_std/x_hat、
 推理 forward）、LayerNorm（forward/反向/参数梯度/中间量）、Dropout（灌入 Python 的 mask 后逐位比对）、
 Conv2d（两种配置的 forward/grad_w/grad_b/dx）、MaxPool2d（两种配置）、Flatten。
+
+`compare_llm` 比对 CausalLM 的五段：前向 logits、loss + 19 个梯度块、一步 Adam 后的参数、
+训练 3 轮后的参数与 eval loss、贪心生成的 token。第 1/2/3/5 段**逐位相同**；第 4 段的前两轮也
+逐位相同，从第 3 轮起 3 个块出现 ≤3.7e-13 的差异（msvcrt 与 UCRT 的 `exp`/`log` 差 1 ULP，
+随步数累积），因此这一段单独用 `1e-12` 容差并在输出里注明。
 
 > 注意 `Conv2d.forward` 在 Python 里走的是 `_matmul`（内部 `sum(map(mul, ...))` = Neumaier 补偿求和），
 > 不是朴素三重循环累加——C 侧照此实现才能逐位一致。
@@ -178,6 +189,7 @@ Conv2d（两种配置的 forward/grad_w/grad_b/dx）、MaxPool2d（两种配置�
 | `pow` 相关的 1 ULP | MinGW 的 `pow` 非正确舍入（`pow(0.9,4)` = 0.65610000000000013），MSVC/glibc 返回正确舍入的 `0.6561` | 只影响 ExponentialLR 与 Adam 偏差修正；换 glibc 即消失 |
 | **libm 的超越函数**（`exp` / `tanh` / `pow`） | Windows 上 Python 用 UCRT，MinGW 自带一套实现：实测 `exp` 4010 个样本中 15 个差 1 ULP、`tanh` 2 个 | **Windows 上跨语言比对不可能天然逐位一致**，容易被误判成移植 bug。实测把 C 侧 libm 指到 `ucrtbase.dll`（`-Wl,--wrap=exp/tanh/pow`）后，RNN 的 56 项全部逐位相同。Linux/glibc 下两边同一套 libm，可直接逐位比对 |
 | `attention.c` 自带私有 `TfLayerNorm` / `TfDropout` | Attention 模块先于归一化模块完成，为避免跨文件依赖各自实现了一份 | **待统一**：应改为复用 `layers_norm.h` 的 `LayerNorm` / `Dropout` |
+| **多步训练后的参数轨迹**（`compare_llm` 第 4 段） | 每步 `exp`/`log` 的 1 ULP 差异随步数累积：实测 3 轮后 `L0.attn.b_k` 差 3.7e-13（该参数本身约 1e-11，抵消把相对误差放大）、`out.W` 差 5.6e-17 | 结构错误是 1e-2 级，1e-13 可安全区分；比对程序对该段用 1e-12 容差 |
 | RNN 的 step cache 存副本 | Python 的 `_StepCacheMixin` 存的是引用（`self.x = x`） | C 侧存副本，调用方原地改写输入缓冲时不会污染缓存（有意差异） |
 
 ## 所有权契约（容易踩，务必先读）
@@ -239,6 +251,7 @@ GCC 默认 `-ffp-contract=fast`，在支持 FMA 的机器上 `s += W*x` 可能�
 
 ## 未完成 / 待办
 
-- `containers.c`（Sequential / ResidualBlock）正在实现中
-- 部分模块的跨语言等价性比对仍在补充（卷积/归一化/RNN/注意力的参考数据导出）
+- 注意力**权重** dropout 尚未在 C 侧实现（`MultiHeadAttention.dropout_p` 只保存，Python 版已实现并在固定 mask 下做过梯度校验）
+- `attention.c` 自带的私有 `TfLayerNorm` / `TfDropout` 待与 `layers_norm.h` 统一（见"已知差异"）
+- 跨语言等价性比对已覆盖归一化 / 卷积 / LLM，RNN 与注意力还缺参考数据导出
 - 未做 SIMD / OpenMP（本机 gcc 支持 `-fopenmp`），大矩阵还有数倍空间
