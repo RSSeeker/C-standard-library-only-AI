@@ -314,6 +314,13 @@ void tfd_backward_row(const TfDropout *dp, int row, const double *dout, double *
 
 MultiHeadAttention *mha_create(int d_model, int num_heads, int max_seq_len, double dropout_p)
 {
+    /* 默认 KV 头数 == Q 头数：普通多头注意力，随机初始化序列与旧版逐位相同 */
+    return mha_create_gqa(d_model, num_heads, num_heads, max_seq_len, dropout_p);
+}
+
+MultiHeadAttention *mha_create_gqa(int d_model, int num_heads, int num_kv_heads,
+                                   int max_seq_len, double dropout_p)
+{
     if (d_model <= 0 || num_heads <= 0 || max_seq_len <= 0) {
         fprintf(stderr, "mha_create: params非法 (d_model=%d, num_heads=%d, max_seq_len=%d)\n",
                 d_model, num_heads, max_seq_len);
@@ -323,28 +330,43 @@ MultiHeadAttention *mha_create(int d_model, int num_heads, int max_seq_len, doub
         fprintf(stderr, "mha_create: d_model(%d) 必须能被 num_heads(%d) 整除\n", d_model, num_heads);
         exit(1);
     }
+    if (num_kv_heads <= 0 || num_kv_heads > num_heads) {
+        fprintf(stderr, "mha_create_gqa: num_kv_heads(%d) 必须在 1..num_heads(%d) 内\n",
+                num_kv_heads, num_heads);
+        exit(1);
+    }
+    if (num_heads % num_kv_heads != 0) {
+        fprintf(stderr, "mha_create_gqa: num_heads(%d) 必须能被 num_kv_heads(%d) 整除\n",
+                num_heads, num_kv_heads);
+        exit(1);
+    }
     MultiHeadAttention *m = xmalloc(sizeof(*m));
     memset(m, 0, sizeof(*m));
     m->d_model = d_model;
     m->num_heads = num_heads;
     m->d_k = d_model / num_heads;
+    m->num_kv_heads = num_kv_heads;
+    m->kv_dim = num_kv_heads * m->d_k;
+    m->kv_group = num_heads / num_kv_heads;
     m->max_seq_len = max_seq_len;
     m->dropout_p = dropout_p;
 
     const size_t dd = (size_t)d_model * d_model;
+    const size_t kvd = (size_t)m->kv_dim;
+    const size_t kvdd = kvd * (size_t)d_model;   /* W_k / W_v 的元素数 */
     const size_t d1 = (size_t)d_model;
     const size_t T = (size_t)max_seq_len;
     const size_t hT = (size_t)num_heads * T;
     const size_t hTT = (size_t)num_heads * T * T;
 
-    m->W_q = xmalloc(dd * sizeof(double)); m->W_k = xmalloc(dd * sizeof(double));
-    m->W_v = xmalloc(dd * sizeof(double)); m->W_o = xmalloc(dd * sizeof(double));
-    m->b_q = xmalloc(d1 * sizeof(double)); m->b_k = xmalloc(d1 * sizeof(double));
-    m->b_v = xmalloc(d1 * sizeof(double)); m->b_o = xmalloc(d1 * sizeof(double));
-    m->grad_W_q = xmalloc(dd * sizeof(double)); m->grad_W_k = xmalloc(dd * sizeof(double));
-    m->grad_W_v = xmalloc(dd * sizeof(double)); m->grad_W_o = xmalloc(dd * sizeof(double));
-    m->grad_b_q = xmalloc(d1 * sizeof(double)); m->grad_b_k = xmalloc(d1 * sizeof(double));
-    m->grad_b_v = xmalloc(d1 * sizeof(double)); m->grad_b_o = xmalloc(d1 * sizeof(double));
+    m->W_q = xmalloc(dd * sizeof(double)); m->W_k = xmalloc(kvdd * sizeof(double));
+    m->W_v = xmalloc(kvdd * sizeof(double)); m->W_o = xmalloc(dd * sizeof(double));
+    m->b_q = xmalloc(d1 * sizeof(double)); m->b_k = xmalloc(kvd * sizeof(double));
+    m->b_v = xmalloc(kvd * sizeof(double)); m->b_o = xmalloc(d1 * sizeof(double));
+    m->grad_W_q = xmalloc(dd * sizeof(double)); m->grad_W_k = xmalloc(kvdd * sizeof(double));
+    m->grad_W_v = xmalloc(kvdd * sizeof(double)); m->grad_W_o = xmalloc(dd * sizeof(double));
+    m->grad_b_q = xmalloc(d1 * sizeof(double)); m->grad_b_k = xmalloc(kvd * sizeof(double));
+    m->grad_b_v = xmalloc(kvd * sizeof(double)); m->grad_b_o = xmalloc(d1 * sizeof(double));
 
     m->rope_base = 10000.0;   /* 与 Python 的 rope_base 默认值一致；只有 set_rope 打开时才用 */
     m->rope_freq = xmalloc((size_t)(m->d_k / 2) * sizeof(double));
@@ -354,8 +376,8 @@ MultiHeadAttention *mha_create(int d_model, int num_heads, int max_seq_len, doub
 
     m->x = xmalloc(T * d1 * sizeof(double));
     m->q_full = xmalloc(T * d1 * sizeof(double));
-    m->k_full = xmalloc(T * d1 * sizeof(double));
-    m->v_full = xmalloc(T * d1 * sizeof(double));
+    m->k_full = xmalloc(T * kvd * sizeof(double));
+    m->v_full = xmalloc(T * kvd * sizeof(double));
     m->Q = xmalloc(hT * m->d_k * sizeof(double));
     m->K = xmalloc(hT * m->d_k * sizeof(double));
     m->V = xmalloc(hT * m->d_k * sizeof(double));
@@ -370,17 +392,20 @@ MultiHeadAttention *mha_create(int d_model, int num_heads, int max_seq_len, doub
     m->dK = xmalloc(hT * m->d_k * sizeof(double));
     m->dV = xmalloc(hT * m->d_k * sizeof(double));
     m->dQ_full = xmalloc(T * d1 * sizeof(double));
-    m->dK_full = xmalloc(T * d1 * sizeof(double));
-    m->dV_full = xmalloc(T * d1 * sizeof(double));
+    m->dK_full = xmalloc(T * kvd * sizeof(double));
+    m->dV_full = xmalloc(T * kvd * sizeof(double));
     m->tmp = xmalloc(T * d1 * sizeof(double));
 
     /* 权重初始化：与 Python 一样用 N(0, sqrt(2/d_model))，但 C 侧 rand 序列不同
-     * （跨语言对齐时用 mha_set_params 灌入 Python 的权重） */
+     * （跨语言对齐时用 mha_set_params 灌入 Python 的权重）。
+     * 顺序必须与 Python 一致：W_q → W_k → W_v → W_o，同一条 gauss 流；
+     * 默认构造（kv_dim == d_model）下每个矩阵都是 dd 个元素，与旧版逐位相同。 */
     unsigned long long rng = 0x243F6A8885A308D3ULL;
     double std = sqrt(2.0 / (double)d_model);
     double *allW[4] = { m->W_q, m->W_k, m->W_v, m->W_o };
+    const size_t allN[4] = { dd, kvdd, kvdd, dd };
     for (int k = 0; k < 4; k++) {
-        for (size_t i = 0; i < dd; i++) {
+        for (size_t i = 0; i < allN[k]; i++) {
             /* Box-Muller */
             double u1 = rng_uniform(&rng), u2 = rng_uniform(&rng);
             if (u1 < 1e-300) u1 = 1e-300;
@@ -388,7 +413,10 @@ MultiHeadAttention *mha_create(int d_model, int num_heads, int max_seq_len, doub
         }
     }
     for (int j = 0; j < d_model; j++) {
-        m->b_q[j] = m->b_k[j] = m->b_v[j] = m->b_o[j] = 0.0;
+        m->b_q[j] = m->b_o[j] = 0.0;
+    }
+    for (int j = 0; j < m->kv_dim; j++) {
+        m->b_k[j] = m->b_v[j] = 0.0;
     }
     mha_zero_grad(m);
     return m;
@@ -413,14 +441,16 @@ void mha_free(MultiHeadAttention *m)
 void mha_zero_grad(MultiHeadAttention *m)
 {
     const size_t dd = (size_t)m->d_model * m->d_model;
+    const size_t kvd = (size_t)m->kv_dim;
+    const size_t kvdd = kvd * (size_t)m->d_model;
     const size_t d1 = (size_t)m->d_model;
     memset(m->grad_W_q, 0, dd * sizeof(double));
-    memset(m->grad_W_k, 0, dd * sizeof(double));
-    memset(m->grad_W_v, 0, dd * sizeof(double));
+    memset(m->grad_W_k, 0, kvdd * sizeof(double));
+    memset(m->grad_W_v, 0, kvdd * sizeof(double));
     memset(m->grad_W_o, 0, dd * sizeof(double));
     memset(m->grad_b_q, 0, d1 * sizeof(double));
-    memset(m->grad_b_k, 0, d1 * sizeof(double));
-    memset(m->grad_b_v, 0, d1 * sizeof(double));
+    memset(m->grad_b_k, 0, kvd * sizeof(double));
+    memset(m->grad_b_v, 0, kvd * sizeof(double));
     memset(m->grad_b_o, 0, d1 * sizeof(double));
 }
 
@@ -475,20 +505,24 @@ void mha_set_params(MultiHeadAttention *m,
         }
     }
     const size_t dd = (size_t)m->d_model * m->d_model;
+    const size_t kvd = (size_t)m->kv_dim;
+    const size_t kvdd = kvd * (size_t)m->d_model;
     const size_t d1 = (size_t)m->d_model;
     memcpy(m->W_q, W_q, dd * sizeof(double));
-    memcpy(m->W_k, W_k, dd * sizeof(double));
-    memcpy(m->W_v, W_v, dd * sizeof(double));
+    memcpy(m->W_k, W_k, kvdd * sizeof(double));
+    memcpy(m->W_v, W_v, kvdd * sizeof(double));
     memcpy(m->W_o, W_o, dd * sizeof(double));
     memcpy(m->b_q, b_q, d1 * sizeof(double));
-    memcpy(m->b_k, b_k, d1 * sizeof(double));
-    memcpy(m->b_v, b_v, d1 * sizeof(double));
+    memcpy(m->b_k, b_k, kvd * sizeof(double));
+    memcpy(m->b_v, b_v, kvd * sizeof(double));
     memcpy(m->b_o, b_o, d1 * sizeof(double));
 }
 
 int mha_param_count(const MultiHeadAttention *m)
 {
-    return 4 * m->d_model * m->d_model + 4 * m->d_model;
+    /* W_q + W_o 各 d²，W_k + W_v 各 kv_dim*d；b_q + b_o 各 d，b_k + b_v 各 kv_dim */
+    return 2 * m->d_model * m->d_model + 2 * m->kv_dim * m->d_model
+           + 2 * m->d_model + 2 * m->kv_dim;
 }
 
 /* RoPE 旋转（GPT-NeoX 版式）：维度 i 与 i + d_k/2 配对。
@@ -524,27 +558,33 @@ void mha_forward(MultiHeadAttention *m, const Tensor *x, Tensor *out)
 
     /* q_full = x @ W_q^T —— 等价于 Python 的 _matmul(x_seq, _transpose(self.W_q)) */
     mm_nt(m->x, d, m->W_q, d, m->q_full, d, T, d, d);
-    mm_nt(m->x, d, m->W_k, d, m->k_full, d, T, d, d);
-    mm_nt(m->x, d, m->W_v, d, m->v_full, d, T, d, d);
+    /* k_full / v_full = x @ W_k^T / W_v^T，输出宽度是 kv_dim（GQA 时 < d_model） */
+    const int dv = m->kv_dim;
+    mm_nt(m->x, d, m->W_k, d, m->k_full, dv, T, d, dv);
+    mm_nt(m->x, d, m->W_v, d, m->v_full, dv, T, d, dv);
 
-    /* 加 bias（照抄 Python 的三行 +=） */
+    /* 加 bias（照抄 Python 的三行 +=；b_k / b_v 只有 kv_dim 长） */
     for (int t = 0; t < T; t++) {
         for (int j = 0; j < d; j++) {
             m->q_full[(size_t)t * d + j] += m->b_q[j];
-            m->k_full[(size_t)t * d + j] += m->b_k[j];
-            m->v_full[(size_t)t * d + j] += m->b_v[j];
+            m->v_full[(size_t)t * dv + j] += m->b_v[j];
+        }
+        for (int j = 0; j < dv; j++) {
+            m->k_full[(size_t)t * dv + j] += m->b_k[j];
         }
     }
 
-    /* 拆多头：(T, d_model) → h × (T, d_k)（对应 self.Q / self.K / self.V） */
+    /* 拆多头：(T, d_model) → h × (T, d_k)（对应 self.Q / self.K / self.V）。
+     * GQA 时第 head 个 Q 头用第 head / kv_group 个 KV 头，这里把共享的 KV 切片展开成
+     * 每头一份（与 Python 的 self.K[head] 一致，后面的打分/反向逻辑就不用改）。 */
     for (int head = 0; head < h; head++) {
         const int off = head * dk;
+        const int kv_off = (head / m->kv_group) * dk;
         for (int t = 0; t < T; t++) {
             const size_t dst = ((size_t)head * T + t) * dk;
-            const size_t src = (size_t)t * d + off;
-            memcpy(m->Q + dst, m->q_full + src, (size_t)dk * sizeof(double));
-            memcpy(m->K + dst, m->k_full + src, (size_t)dk * sizeof(double));
-            memcpy(m->V + dst, m->v_full + src, (size_t)dk * sizeof(double));
+            memcpy(m->Q + dst, m->q_full + (size_t)t * d + off, (size_t)dk * sizeof(double));
+            memcpy(m->K + dst, m->k_full + (size_t)t * dv + kv_off, (size_t)dk * sizeof(double));
+            memcpy(m->V + dst, m->v_full + (size_t)t * dv + kv_off, (size_t)dk * sizeof(double));
         }
     }
 
@@ -684,15 +724,34 @@ void mha_backward(MultiHeadAttention *m, const Tensor *dout, Tensor *dx)
         }
     }
 
-    /* 4. 拼接各头的 dQ/dK/dV → (T, d_model) */
+    /* 4. 拼接各头的 dQ/dK/dV → (T, d_model) / (T, kv_dim)
+     *    GQA/MQA 时多个 Q 头共享同一个 KV 头，dK/dV 必须「累加」而不是覆盖
+     *    （Python: share_kv = (num_kv_heads != h)，共享时 +=，独占时 =）。
+     *    默认构造 kv_group == 1，每头独占，仍走 memcpy（与旧版逐位相同）。 */
+    const int dv = m->kv_dim;
+    if (m->kv_group > 1) {
+        /* 共享 KV 头时 dK_full / dV_full 由多个 Q 头累加而来，必须先清零；
+         * 默认构造 kv_group == 1 走上面的 memcpy（每槽恰好写一次），不需要这一步。 */
+        memset(m->dK_full, 0, (size_t)T * dv * sizeof(double));
+        memset(m->dV_full, 0, (size_t)T * dv * sizeof(double));
+    }
     for (int head = 0; head < h; head++) {
         const int off = head * dk;
+        const int kv_off = (head / m->kv_group) * dk;
         for (int t = 0; t < T; t++) {
             const size_t src = ((size_t)head * T + t) * dk;
-            const size_t dst = (size_t)t * d + off;
-            memcpy(m->dQ_full + dst, m->dQ + src, (size_t)dk * sizeof(double));
-            memcpy(m->dK_full + dst, m->dK + src, (size_t)dk * sizeof(double));
-            memcpy(m->dV_full + dst, m->dV + src, (size_t)dk * sizeof(double));
+            const size_t dst_q = (size_t)t * d + off;
+            const size_t dst_kv = (size_t)t * dv + kv_off;
+            memcpy(m->dQ_full + dst_q, m->dQ + src, (size_t)dk * sizeof(double));
+            if (m->kv_group == 1) {
+                memcpy(m->dK_full + dst_kv, m->dK + src, (size_t)dk * sizeof(double));
+                memcpy(m->dV_full + dst_kv, m->dV + src, (size_t)dk * sizeof(double));
+            } else {
+                for (int j = 0; j < dk; j++) {
+                    m->dK_full[dst_kv + j] += m->dK[src + j];
+                    m->dV_full[dst_kv + j] += m->dV[src + j];
+                }
+            }
         }
     }
 
@@ -700,19 +759,21 @@ void mha_backward(MultiHeadAttention *m, const Tensor *dout, Tensor *dx)
      *    grad_W_q[b][a] = sum_t dQ_full[t][b] * x[t][a] 即 dQ_full^T @ x；
      *    写成 x^T @ dQ_full 是它的转置（方阵下不报错但会静默训歪）—— 这里保持正确形式 */
     mm_tn(m->dQ_full, d, m->x, d, m->grad_W_q, d, T, d, d, 1);
-    mm_tn(m->dK_full, d, m->x, d, m->grad_W_k, d, T, d, d, 1);
-    mm_tn(m->dV_full, d, m->x, d, m->grad_W_v, d, T, d, d, 1);
+    mm_tn(m->dK_full, dv, m->x, d, m->grad_W_k, d, T, dv, d, 1);
+    mm_tn(m->dV_full, dv, m->x, d, m->grad_W_v, d, T, dv, d, 1);
     for (int j = 0; j < d; j++) {
         m->grad_b_q[j] += sum_strided(m->dQ_full + j, d, T);
-        m->grad_b_k[j] += sum_strided(m->dK_full + j, d, T);
-        m->grad_b_v[j] += sum_strided(m->dV_full + j, d, T);
+    }
+    for (int j = 0; j < dv; j++) {
+        m->grad_b_k[j] += sum_strided(m->dK_full + j, dv, T);
+        m->grad_b_v[j] += sum_strided(m->dV_full + j, dv, T);
     }
 
     /* 6. d_x = (dx_q + dx_k) + dx_v —— 加法顺序与 Python 一致 */
     mm_nn(m->dQ_full, d, m->W_q, d, dx->data, d, T, d, d);
-    mm_nn(m->dK_full, d, m->W_k, d, m->tmp, d, T, d, d);
+    mm_nn(m->dK_full, dv, m->W_k, d, m->tmp, d, T, dv, d);
     for (int i = 0; i < T * d; i++) dx->data[i] += m->tmp[i];
-    mm_nn(m->dV_full, d, m->W_v, d, m->tmp, d, T, d, d);
+    mm_nn(m->dV_full, dv, m->W_v, d, m->tmp, d, T, dv, d);
     for (int i = 0; i < T * d; i++) dx->data[i] += m->tmp[i];
 }
 
@@ -1024,18 +1085,24 @@ void tel_sgd_step(TransformerEncoderLayer *l, double lr)
     FeedForward *f = l->ffn;
     const int d = l->d_model;
     const size_t dd = (size_t)d * d;
+    const int kv_dim = a->kv_dim;
+    const size_t kvdd = (size_t)kv_dim * d;   /* 默认构造下 kv_dim == d，kvdd == dd */
 
     for (size_t i = 0; i < dd; i++) {
         a->W_q[i] -= lr * a->grad_W_q[i];
+        a->W_o[i] -= lr * a->grad_W_o[i];
+    }
+    for (size_t i = 0; i < kvdd; i++) {
         a->W_k[i] -= lr * a->grad_W_k[i];
         a->W_v[i] -= lr * a->grad_W_v[i];
-        a->W_o[i] -= lr * a->grad_W_o[i];
     }
     for (int i = 0; i < d; i++) {
         a->b_q[i] -= lr * a->grad_b_q[i];
+        a->b_o[i] -= lr * a->grad_b_o[i];
+    }
+    for (int i = 0; i < kv_dim; i++) {
         a->b_k[i] -= lr * a->grad_b_k[i];
         a->b_v[i] -= lr * a->grad_b_v[i];
-        a->b_o[i] -= lr * a->grad_b_o[i];
     }
     for (size_t i = 0; i < (size_t)f->d_ff * f->d_model; i++) f->W1[i] -= lr * f->grad_W1[i];
     for (int i = 0; i < f->d_ff; i++) f->b1[i] -= lr * f->grad_b1[i];

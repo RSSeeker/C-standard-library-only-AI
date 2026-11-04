@@ -95,6 +95,41 @@ static void check_fd(CausalLM *m, const int *ids, int T, LLMParamBlock *blocks, 
     check(label, fabs(ana - num) / denom, g_tol);
 }
 
+/* --------------------- MHA 级数值梯度工具（GQA 小节用） ---------------------
+ * CausalLM 没有暴露 num_kv_heads，因此 GQA 的梯度校验直接在 MultiHeadAttention 上做：
+ * 取标量损失 L = 0.5 * sum(out^2)，则 dL/dout = out（无需额外目标张量）。
+ */
+static double mha_sq_loss(MultiHeadAttention *m, const Tensor *x, Tensor *out)
+{
+    mha_forward(m, x, out);
+    double s = 0.0;
+    for (int i = 0; i < out->size; i++) s += 0.5 * out->data[i] * out->data[i];
+    return s;
+}
+
+static void mha_fd(MultiHeadAttention *m, const Tensor *x, Tensor *out, Tensor *dout, Tensor *dx,
+                   double *param, const double *grad, int idx, const char *name)
+{
+    mha_zero_grad(m);
+    (void)mha_sq_loss(m, x, out);
+    memcpy(dout->data, out->data, (size_t)out->size * sizeof(double));
+    mha_backward(m, dout, dx);
+    const double ana = grad[idx];
+
+    const double v0 = param[idx];
+    param[idx] = v0 + g_eps;
+    const double lp = mha_sq_loss(m, x, out);
+    param[idx] = v0 - g_eps;
+    const double lm = mha_sq_loss(m, x, out);
+    param[idx] = v0;
+    const double num = (lp - lm) / (2.0 * g_eps);
+
+    const double denom = fabs(num) > 1.0 ? fabs(num) : 1.0;
+    char label[80];
+    snprintf(label, sizeof(label), "%s[%d]", name, idx);
+    check(label, fabs(ana - num) / denom, g_tol);
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
@@ -289,6 +324,108 @@ int main(int argc, char **argv)
         tensor_free(lb);
         llm_free(ref);
         llm_free(m);
+    }
+
+    /* ================== 4. GQA（4 头 / 2 KV 头） ================== */
+    printf("\n[4] GQA / MQA（4 头 / 2 KV 头，d_model=8）\n");
+    {
+        const int d = 8, heads = 4, kv_heads = 2, T = 6, dk = d / heads;
+        MultiHeadAttention *m = mha_create_gqa(d, heads, kv_heads, T, 0.0);
+        mha_set_causal(m, 1);
+
+        check_true("kv_dim == num_kv_heads * d_k", m->kv_dim == kv_heads * dk);
+        check_true("kv_group == num_heads / num_kv_heads", m->kv_group == heads / kv_heads);
+        /* 4 头全量是 4*d²+4*d；GQA 省掉 (heads-kv_heads) 组 KV 投影及其 bias：
+         *   2 * ((heads-kv_heads)*dk*d + (heads-kv_heads)*dk) = 2*(2*2*8 + 2*2) = 72 */
+        check_true("参数数正好省下 2 组 KV 投影与 bias",
+                   mha_param_count(m) == 4 * d * d + 4 * d - 72);
+
+        int dims[2] = { T, d };
+        Tensor *x = tensor_new(2, dims);
+        Tensor *out = tensor_new(2, dims);
+        Tensor *dout = tensor_new(2, dims);
+        Tensor *dx = tensor_new(2, dims);
+        fill_seq(x, T, d);
+
+        /* W_k / W_v 的梯度：共享 KV 头的累加是否正确 —— 数值梯度说了算 */
+        mha_fd(m, x, out, dout, dx, m->W_q, m->grad_W_q, 1 * d + 5, "W_q");
+        mha_fd(m, x, out, dout, dx, m->W_q, m->grad_W_q, 3 * d + 2, "W_q");
+        mha_fd(m, x, out, dout, dx, m->W_k, m->grad_W_k, 3 * d + 2, "W_k");
+        mha_fd(m, x, out, dout, dx, m->W_k, m->grad_W_k, 0 * d + 4, "W_k");
+        mha_fd(m, x, out, dout, dx, m->W_v, m->grad_W_v, 2 * d + 7, "W_v");
+        mha_fd(m, x, out, dout, dx, m->b_k, m->grad_b_k, 5, "b_k");
+        mha_fd(m, x, out, dout, dx, m->b_q, m->grad_b_q, 6, "b_q");
+        mha_fd(m, x, out, dout, dx, m->b_v, m->grad_b_v, 1, "b_v");
+
+        /* 头映射校验：把 2 组 KV 头「复制」成 4 组后，GQA 与普通多头应逐位一致
+         * （第 h 个 Q 头用第 h / kv_group 个 KV 头，复制后两者看到完全相同的 k/v）。 */
+        MultiHeadAttention *mfull = mha_create(d, heads, T, 0.0);
+        mha_set_causal(mfull, 1);
+        double *Wk_full = (double *)malloc((size_t)d * d * sizeof(double));
+        double *Wv_full = (double *)malloc((size_t)d * d * sizeof(double));
+        for (int g = 0; g < heads / kv_heads; g++) {   /* 每个 kv 头复制 kv_group 份 */
+            for (int hh = 0; hh < kv_heads; hh++) {
+                int dst_head = hh * (heads / kv_heads) + g;
+                memcpy(Wk_full + (size_t)dst_head * dk * d,
+                       m->W_k + (size_t)hh * dk * d, (size_t)dk * d * sizeof(double));
+                memcpy(Wv_full + (size_t)dst_head * dk * d,
+                       m->W_v + (size_t)hh * dk * d, (size_t)dk * d * sizeof(double));
+            }
+        }
+        double *bk_full = (double *)malloc((size_t)d * sizeof(double));
+        double *bv_full = (double *)malloc((size_t)d * sizeof(double));
+        for (int g = 0; g < heads / kv_heads; g++)
+            for (int hh = 0; hh < kv_heads; hh++) {
+                int dst_head = hh * (heads / kv_heads) + g;
+                memcpy(bk_full + (size_t)dst_head * dk, m->b_k + (size_t)hh * dk,
+                       (size_t)dk * sizeof(double));
+                memcpy(bv_full + (size_t)dst_head * dk, m->b_v + (size_t)hh * dk,
+                       (size_t)dk * sizeof(double));
+            }
+        mha_set_params(mfull, m->W_q, m->b_q, Wk_full, bk_full, Wv_full, bv_full, m->W_o, m->b_o);
+        Tensor *out_full = tensor_new(2, dims);
+        mha_forward(m, x, out);
+        mha_forward(mfull, x, out_full);
+        double worst_map = 0.0;
+        for (int i = 0; i < T * d; i++) {
+            double dd = fabs(out->data[i] - out_full->data[i]);
+            if (dd > worst_map) worst_map = dd;
+        }
+        check("KV 头复制后与普通多头逐位一致", worst_map, 0.0);
+        free(Wk_full); free(Wv_full); free(bk_full); free(bv_full);
+
+        /* 训练冒烟：用解析梯度对 GQA 模型做 20 步 SGD，loss 必须明显下降。
+         * 损失 0.5*||out||² 是二次型，步长过大（> 2/λ_max）会发散，这里取 0.002。 */
+        double l_first = 0.0, l_last = 0.0;
+        const double lr = 0.002;
+        for (int step = 0; step < 20; step++) {
+            mha_zero_grad(m);
+            double L = mha_sq_loss(m, x, out);
+            if (step == 0) l_first = L;
+            memcpy(dout->data, out->data, (size_t)out->size * sizeof(double));
+            mha_backward(m, dout, dx);
+            for (int i = 0; i < d * d; i++) {
+                m->W_q[i] -= lr * m->grad_W_q[i];
+                m->W_o[i] -= lr * m->grad_W_o[i];
+            }
+            for (int i = 0; i < m->kv_dim * d; i++) {
+                m->W_k[i] -= lr * m->grad_W_k[i];
+                m->W_v[i] -= lr * m->grad_W_v[i];
+            }
+            for (int i = 0; i < d; i++) { m->b_q[i] -= lr * m->grad_b_q[i]; m->b_o[i] -= lr * m->grad_b_o[i]; }
+            for (int i = 0; i < m->kv_dim; i++) { m->b_k[i] -= lr * m->grad_b_k[i]; m->b_v[i] -= lr * m->grad_b_v[i]; }
+        }
+        l_last = mha_sq_loss(m, x, out);
+        check_true("GQA 训练冒烟：loss 明显下降", l_last < 0.5 * l_first);
+        printf("    GQA loss: %.6f → %.6f\n", l_first, l_last);
+
+        tensor_free(x);
+        tensor_free(out);
+        tensor_free(dout);
+        tensor_free(dx);
+        tensor_free(out_full);
+        mha_free(m);
+        mha_free(mfull);
     }
 
     printf("\n%s\n", g_fail ? "存在失败项" : "全部通过");

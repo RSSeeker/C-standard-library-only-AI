@@ -94,6 +94,9 @@ typedef struct {
     int d_model;
     int num_heads;
     int d_k;                /* d_model / num_heads */
+    int num_kv_heads;       /* KV 头数（GQA/MQA）；== num_heads 即普通多头注意力 */
+    int kv_dim;             /* num_kv_heads * d_k；== d_model 时与旧行为逐位一致 */
+    int kv_group;           /* num_heads / num_kv_heads：每 kv_group 个 Q 头共享一个 KV 头 */
     int max_seq_len;        /* 预分配的最大序列长度 */
     int seq_len;            /* 最近一次 forward 的序列长度 */
     double dropout_p;       /* 注意力权重 dropout 的 p；C 侧只保存、mask 逻辑尚未移植 */
@@ -103,9 +106,10 @@ typedef struct {
     double rope_base;       /* RoPE 频率基数（默认 10000.0，与 Python 的 rope_base 一致） */
     double *rope_freq;      /* (d_k/2) 预计算频率 1/(base^(2i/d_k))；仅 rope 打开时使用 */
 
-    /* 参数（行主序）：W_? 为 (d_model, d_model)，按 Python 的 self.W_?[j][i] 展平 */
+    /* 参数（行主序）：W_q / W_o 为 (d_model, d_model)，按 Python 的 self.W_?[j][i] 展平；
+     * W_k / W_v 为 (kv_dim, d_model) —— 默认 kv_dim == d_model 时就是 (d_model, d_model) */
     double *W_q, *W_k, *W_v, *W_o;
-    double *b_q, *b_k, *b_v, *b_o;
+    double *b_q, *b_k, *b_v, *b_o;      /* b_k / b_v 长度为 kv_dim，其余为 d_model */
     /* 参数梯度（累积） */
     double *grad_W_q, *grad_W_k, *grad_W_v, *grad_W_o;
     double *grad_b_q, *grad_b_k, *grad_b_v, *grad_b_o;
@@ -113,9 +117,9 @@ typedef struct {
     /* ---------- 前向缓存 ---------- */
     double *x;          /* (T, d_model) 输入副本 */
     double *q_full;     /* (T, d_model) */
-    double *k_full;
-    double *v_full;
-    double *Q;          /* (h, T, d_k) —— 与 Python 的 self.Q[head] 一一对应 */
+    double *k_full;     /* (T, kv_dim) */
+    double *v_full;     /* (T, kv_dim) */
+    double *Q;          /* (h, T, d_k) —— 与 Python 的 self.Q[head] 一一对应（KV 已按头展开） */
     double *K;
     double *V;
     double *attn;       /* (h, T, T) —— 每头的注意力权重矩阵 */
@@ -130,13 +134,23 @@ typedef struct {
     double *dK;
     double *dV;
     double *dQ_full;    /* (T, d_model) */
-    double *dK_full;
-    double *dV_full;
+    double *dK_full;    /* (T, kv_dim) */
+    double *dV_full;    /* (T, kv_dim) */
     double *tmp;        /* (T, d_model) 通用临时 */
 } MultiHeadAttention;
 
 /* dropout_p 仅保存不使用，保持与 Python 构造签名一致；max_seq_len 为预分配上限 */
 MultiHeadAttention *mha_create(int d_model, int num_heads, int max_seq_len, double dropout_p);
+/* 带 KV 头数的构造（GQA / MQA），对应 Python 的 num_kv_heads 参数：
+ *   num_kv_heads == num_heads → 普通多头（与 mha_create 完全等价，随机初始化序列也相同）；
+ *   num_kv_heads <  num_heads → W_k / W_v 变成 (kv_dim, d_model)，kv_dim = num_kv_heads*d_k，
+ *                              第 h 个 Q 头用第 h / (num_heads/num_kv_heads) 个 KV 头；
+ *   num_kv_heads == 1         → MQA（所有 Q 头共享同一组 K/V）。
+ * 约束：1 <= num_kv_heads <= num_heads 且 num_heads % num_kv_heads == 0。
+ * 为什么不在 mha_create 之后用 setter 改：W_k/W_v 与 k_full/v_full 的尺寸在 create 时
+ * 就定了，事后改要么重新分配（丢掉已训练的权重），要么静默越界，所以做成独立构造函数。 */
+MultiHeadAttention *mha_create_gqa(int d_model, int num_heads, int num_kv_heads,
+                                   int max_seq_len, double dropout_p);
 /* 打开/关闭因果掩码（默认关闭）。必须在 mha_forward 之前调用。 */
 void mha_set_causal(MultiHeadAttention *m, int causal);
 /* 滑动窗口（Mistral 式局部因果），对应 Python 的 window 参数。
@@ -159,7 +173,9 @@ void mha_forward(MultiHeadAttention *m, const Tensor *x, Tensor *out);
 /* dout: (seq_len, d_model) → dx: (seq_len, d_model)，参数梯度累积到 grad_* */
 void mha_backward(MultiHeadAttention *m, const Tensor *dout, Tensor *dx);
 /* 灌入权重（跨语言验证用）：8 个指针都必须非 NULL，
- * W_* 为 (d_model, d_model) 行主序（按 Python 的 self.W_*[j][i] 展平），b_* 长度 d_model */
+ * W_q / W_o 为 (d_model, d_model) 行主序（按 Python 的 self.W_*[j][i] 展平），
+ * W_k / W_v 为 (kv_dim, d_model)，b_k / b_v 长度 kv_dim，b_q / b_o 长度 d_model。
+ * 默认构造（kv_dim == d_model）下形状与旧版一致。 */
 void mha_set_params(MultiHeadAttention *m,
                     const double *W_q, const double *b_q,
                     const double *W_k, const double *b_k,

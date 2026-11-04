@@ -135,13 +135,17 @@ static void build_blocks(CausalLM *m)
     for (int li = 0; li < m->enc->num_layers; li++) {
         TransformerEncoderLayer *l = m->enc->layers[li];
         MultiHeadAttention *a = l->self_attn;
+        /* W_k / W_v 是 (kv_dim, d_model)、b_k / b_v 是 (kv_dim)；普通多头时 kv_dim == d，
+         * 块尺寸与旧版完全相同（llm_create 走的就是这条默认路径）。 */
+        const int kvd = a->kv_dim;
+        const int kvdd = kvd * d;
         add_block(m, &cap, &n, "L%d.attn.W_q", li, a->W_q, a->grad_W_q, dd);
-        add_block(m, &cap, &n, "L%d.attn.W_k", li, a->W_k, a->grad_W_k, dd);
-        add_block(m, &cap, &n, "L%d.attn.W_v", li, a->W_v, a->grad_W_v, dd);
+        add_block(m, &cap, &n, "L%d.attn.W_k", li, a->W_k, a->grad_W_k, kvdd);
+        add_block(m, &cap, &n, "L%d.attn.W_v", li, a->W_v, a->grad_W_v, kvdd);
         add_block(m, &cap, &n, "L%d.attn.W_o", li, a->W_o, a->grad_W_o, dd);
         add_block(m, &cap, &n, "L%d.attn.b_q", li, a->b_q, a->grad_b_q, d);
-        add_block(m, &cap, &n, "L%d.attn.b_k", li, a->b_k, a->grad_b_k, d);
-        add_block(m, &cap, &n, "L%d.attn.b_v", li, a->b_v, a->grad_b_v, d);
+        add_block(m, &cap, &n, "L%d.attn.b_k", li, a->b_k, a->grad_b_k, kvd);
+        add_block(m, &cap, &n, "L%d.attn.b_v", li, a->b_v, a->grad_b_v, kvd);
         add_block(m, &cap, &n, "L%d.attn.b_o", li, a->b_o, a->grad_b_o, d);
 
         FeedForward *f = l->ffn;
