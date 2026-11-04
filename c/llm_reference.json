@@ -5878,12 +5878,22 @@
   }
  ],
  "eval_loss": 1.6576866095751273,
+ "perplexity": 5.24715806757666,
  "gen_prompt": [
   2,
   3
  ],
  "gen_new": 4,
  "gen_tokens": [
+  2,
+  3,
+  9,
+  9,
+  9,
+  9
+ ],
+ "gen_top_p": 1e-09,
+ "gen_tokens_top_p": [
   2,
   3,
   9,

@@ -291,6 +291,12 @@ int main(int argc, char **argv)
 
         double ev = llm_evaluate(m, seqs, lens, nseq);
         report_scalar("eval_loss", ev, json_num(need(root, "eval_loss", "root"), 0.0));
+
+        /* perplexity = exp(loss)：loss 逐位相同，但 exp 在 msvcrt/ucrtbase 上可能差
+         * 1 ULP，所以这一段单独放宽到 1e-12（与训练轨迹同一原因）。 */
+        g_tol = 1e-12;
+        double ppl = llm_perplexity(m, seqs, lens, nseq);
+        report_scalar("perplexity", ppl, json_num(need(root, "perplexity", "root"), 0.0));
         g_tol = saved_tol;
 
         free(history);
@@ -319,6 +325,54 @@ int main(int argc, char **argv)
 
         const JsonValue *want = need(root, "gen_tokens", "root");
         printf("\n[5] 生成（prompt %d 个 token，新增 %d）\n", pn, max_new);
+        int bad = 0;
+        if (json_array_len(want) != total) {
+            bad = 1;
+        } else {
+            for (int i = 0; i < total; i++) {
+                int wv = (int)json_num(json_at(want, i), 0.0);
+                if (wv != out[i]) {
+                    printf("  位置 %d: C=%d py=%d\n", i, out[i], wv);
+                    bad = 1;
+                }
+            }
+        }
+        if (bad) {
+            g_fail++;
+            printf("  %-34s [不一致]\n", "tokens");
+        } else {
+            printf("  %-34s [OK]  (逐位相同)\n", "tokens");
+        }
+
+        free(prompt);
+        free(out);
+        llm_free(m);
+    }
+
+    /* ------------------ 6. top_p 的确定性对拍 ------------------
+     * top_p 很小（1e-9）时 nucleus 只含 argmax（p_max >= 1/V >> 1e-9），
+     * 所以采样结果与 RNG 无关，必须与 top_k=1 的贪心序列完全相同。
+     * 任意 top_p 下的随机 token 不能跨语言逐位比较：C 用 splitmix64，
+     * Python 用 random.MT19937，消耗的随机数序列不同。 */
+    {
+        CausalLM *m = llm_create(vocab, d_model, heads, d_ff, layers, max_len,
+                                 dropout, 12345);
+        LLMParamBlock blocks[MAX_BLOCKS];
+        int nb = llm_param_blocks(m, blocks, MAX_BLOCKS);
+        inject(blocks, nb, init, "init");
+
+        const JsonValue *pv = need(root, "gen_prompt", "root");
+        int pn = json_array_len(pv);
+        int *prompt = malloc((size_t)pn * sizeof(int));
+        for (int i = 0; i < pn; i++) prompt[i] = (int)json_num(json_at(pv, i), 0.0);
+        int max_new = need_int(root, "gen_new", "root");
+        double top_p = json_num(need(root, "gen_top_p", "root"), 0.0);
+
+        int *out = malloc((size_t)(pn + max_new) * sizeof(int));
+        int total = llm_generate_p(m, prompt, pn, max_new, 1.0, 0, top_p, out, 999);
+        const JsonValue *want = need(root, "gen_tokens_top_p", "root");
+
+        printf("\n[6] top_p=%.1e 生成（nucleus 只含 argmax，与 RNG 无关）\n", top_p);
         int bad = 0;
         if (json_array_len(want) != total) {
             bad = 1;

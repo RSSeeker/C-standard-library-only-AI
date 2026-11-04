@@ -106,6 +106,7 @@ def main():
     out["after_fit"] = snapshot(model2)
     out["per_epoch_fit"] = per_epoch
     out["eval_loss"] = model2.evaluate(fit_seqs)
+    out["perplexity"] = model2.perplexity(fit_seqs)
 
     # 5) 贪心生成（top_k=1 时与随机数无关，两边必然一致）
     model3 = AI.CausalLM(**cfg)
@@ -115,6 +116,14 @@ def main():
     out["gen_new"] = gen_new
     out["gen_tokens"] = model3.generate(gen_prompt, max_new_tokens=gen_new,
                                         top_k=1)
+
+    # 6) top_p 的确定性对拍：p_max >= 1/V >> 1e-9，nucleus 只含 argmax，
+    #    因此采样结果与 RNG 无关，必须与 top_k=1 的贪心序列相同。
+    #    （任意 top_p 下的随机 token 无法跨语言逐位比较：C 用 splitmix64，
+    #      Python 用 random.MT19937，消耗的随机数不同。）
+    out["gen_top_p"] = 1e-9
+    out["gen_tokens_top_p"] = model3.generate(gen_prompt, max_new_tokens=gen_new,
+                                              top_k=0, top_p=1e-9)
 
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(out, fh, ensure_ascii=False, indent=1)

@@ -659,14 +659,17 @@ void mha_forward(MultiHeadAttention *m, const Tensor *x, Tensor *out)
     mm_nt(m->x, d, m->W_k, d, m->k_full, dv, T, d, dv);
     mm_nt(m->x, d, m->W_v, d, m->v_full, dv, T, d, dv);
 
-    /* 加 bias（照抄 Python 的三行 +=；b_k / b_v 只有 kv_dim 长） */
+    /* 加 bias（照抄 Python 的三行 +=；b_k / b_v 只有 kv_dim 长）。
+     * 注意 v 的循环上界必须是 dv 而不是 d_model：GQA/MQA 时 b_v 只有 kv_dim 个元素，
+     * 用 d_model 会越界读 b_v，并把值写到 v_full 下一行的开头（真实 bug，
+     * compare_attention 的 MQA 用例抓到）。默认 kv_dim == d_model 时逐位不变。 */
     for (int t = 0; t < T; t++) {
         for (int j = 0; j < d; j++) {
             m->q_full[(size_t)t * d + j] += m->b_q[j];
-            m->v_full[(size_t)t * dv + j] += m->b_v[j];
         }
         for (int j = 0; j < dv; j++) {
             m->k_full[(size_t)t * dv + j] += m->b_k[j];
+            m->v_full[(size_t)t * dv + j] += m->b_v[j];
         }
     }
 
