@@ -196,6 +196,7 @@ CausalLM *llm_create(int vocab_size, int d_model, int num_heads, int d_ff,
     m->num_layers = num_layers;
     m->max_len = max_len;
     m->dropout = dropout;
+    m->use_abs_pos = 1;   /* 默认走 PositionalEncoding；llm_set_rope(..., 1, ...) 会关掉它 */
 
     m->emb = emb_create(vocab_size, d_model, max_len);
     m->pe = pe_create(d_model, max_len);
@@ -269,6 +270,18 @@ void llm_set_train(CausalLM *m, int train)
     te_set_train(m->enc, train ? 1 : 0);
 }
 
+void llm_set_rope(CausalLM *m, int enable, double base)
+{
+    if (!m) {
+        fprintf(stderr, "llm_set_rope: m 为 NULL\n");
+        exit(1);
+    }
+    m->use_abs_pos = enable ? 0 : 1;
+    for (int i = 0; i < m->enc->num_layers; i++) {
+        mha_set_rope(m->enc->layers[i]->self_attn, enable, base);
+    }
+}
+
 void llm_zero_grad(CausalLM *m)
 {
     emb_zero_grad(m->emb);
@@ -316,7 +329,13 @@ void llm_forward(CausalLM *m, const int *ids, int T, Tensor *logits)
     emb_forward(m->emb, ids, T, m->emb_buf);
 
     set_shape2(m->x_buf, T, d);
-    pe_forward(m->pe, m->emb_buf, m->x_buf);
+    if (m->use_abs_pos) {
+        pe_forward(m->pe, m->emb_buf, m->x_buf);
+    } else {
+        /* RoPE 模式：位置信息由 q/k 的旋转携带，这里只做原样搬运
+         * （pe_forward 在 pe 全零时也是逐元素加 0.0，但 memcpy 更直白） */
+        memcpy(m->x_buf->data, m->emb_buf->data, (size_t)T * d * sizeof(double));
+    }
 
     set_shape2(m->h_buf, T, d);
     te_forward(m->enc, m->x_buf, m->h_buf);

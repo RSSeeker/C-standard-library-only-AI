@@ -346,6 +346,12 @@ MultiHeadAttention *mha_create(int d_model, int num_heads, int max_seq_len, doub
     m->grad_b_q = xmalloc(d1 * sizeof(double)); m->grad_b_k = xmalloc(d1 * sizeof(double));
     m->grad_b_v = xmalloc(d1 * sizeof(double)); m->grad_b_o = xmalloc(d1 * sizeof(double));
 
+    m->rope_base = 10000.0;   /* 与 Python 的 rope_base 默认值一致；只有 set_rope 打开时才用 */
+    m->rope_freq = xmalloc((size_t)(m->d_k / 2) * sizeof(double));
+    for (int i = 0; i < m->d_k / 2; i++) {
+        m->rope_freq[i] = 1.0 / pow(m->rope_base, 2.0 * (double)i / (double)m->d_k);
+    }
+
     m->x = xmalloc(T * d1 * sizeof(double));
     m->q_full = xmalloc(T * d1 * sizeof(double));
     m->k_full = xmalloc(T * d1 * sizeof(double));
@@ -400,6 +406,7 @@ void mha_free(MultiHeadAttention *m)
     xfree(m->d_concat); xfree(m->d_head); xfree(m->d_scores);
     xfree(m->dQ); xfree(m->dK); xfree(m->dV);
     xfree(m->dQ_full); xfree(m->dK_full); xfree(m->dV_full); xfree(m->tmp);
+    xfree(m->rope_freq);
     xfree(m);
 }
 
@@ -435,6 +442,25 @@ void mha_set_window(MultiHeadAttention *m, int window)
     m->window = window > 0 ? window : 0;
 }
 
+void mha_set_rope(MultiHeadAttention *m, int enable, double base)
+{
+    if (!m) {
+        fprintf(stderr, "mha_set_rope: m 为 NULL\n");
+        exit(1);
+    }
+    if (enable && !(base > 0.0)) {
+        fprintf(stderr, "mha_set_rope: base 必须 > 0（收到 %g）\n", base);
+        exit(1);
+    }
+    m->rope = enable ? 1 : 0;
+    if (enable) m->rope_base = base;
+    /* 频率只依赖 d_k 与 base：这里（而不是每次 forward）重算一次缓存 */
+    const int half = m->d_k / 2;
+    for (int i = 0; i < half; i++) {
+        m->rope_freq[i] = 1.0 / pow(m->rope_base, 2.0 * (double)i / (double)m->d_k);
+    }
+}
+
 void mha_set_params(MultiHeadAttention *m,
                     const double *W_q, const double *b_q,
                     const double *W_k, const double *b_k,
@@ -463,6 +489,25 @@ void mha_set_params(MultiHeadAttention *m,
 int mha_param_count(const MultiHeadAttention *m)
 {
     return 4 * m->d_model * m->d_model + 4 * m->d_model;
+}
+
+/* RoPE 旋转（GPT-NeoX 版式）：维度 i 与 i + d_k/2 配对。
+ *   out[i]        = x0*cos - x1*sin
+ *   out[i + d_k/2]= x0*sin + x1*cos
+ * sign = +1 是前向旋转，sign = -1 是它的转置（= 逆旋转，反向用）。
+ * vec 是长度 d_k 的一维片段（单个 head、单个位置）；freq[i] = 1/(base^(2i/d_k))。
+ * d_k 为奇数时中间那个维度不参与配对（与 Python 的 d_k//2 一致）。 */
+static void rope_rotate(double *vec, int dk, int pos, double sign, const double *freq)
+{
+    const int half = dk / 2;
+    for (int i = 0; i < half; i++) {
+        const double theta = (double)pos * freq[i];
+        const double c = cos(theta);
+        const double s = sign * sin(theta);
+        const double x0 = vec[i], x1 = vec[i + half];
+        vec[i] = x0 * c - x1 * s;
+        vec[i + half] = x0 * s + x1 * c;
+    }
 }
 
 void mha_forward(MultiHeadAttention *m, const Tensor *x, Tensor *out)
@@ -506,11 +551,21 @@ void mha_forward(MultiHeadAttention *m, const Tensor *x, Tensor *out)
     const double scale = 1.0 / sqrt((double)dk);
     for (int head = 0; head < h; head++) {
         const int off = head * dk;
-        const double *qh = m->Q + (size_t)head * T * dk;
-        const double *kh = m->K + (size_t)head * T * dk;
+        double *qh = m->Q + (size_t)head * T * dk;
+        double *kh = m->K + (size_t)head * T * dk;
         const double *vh = m->V + (size_t)head * T * dk;
         double *attn = m->attn + (size_t)head * T * T;
         double *ho = m->head_out + (size_t)head * T * dk;
+
+        /* RoPE：在算 scores 之前把位置信息转进 q/k（Python 同样在拆头之后、打分之前做）。
+         * 就地写回 m->Q/m->K，反向正是从这份旋转后的缓存算 dQ/dK —— 与 Python 存
+         * self.Q = 旋转后的结果一致，这样 dQ 才对应「旋转后的 q」的梯度。 */
+        if (m->rope) {
+            for (int t = 0; t < T; t++) {
+                rope_rotate(qh + (size_t)t * dk, dk, t, 1.0, m->rope_freq);
+                rope_rotate(kh + (size_t)t * dk, dk, t, 1.0, m->rope_freq);
+            }
+        }
 
         /* scores = q_h @ k_h^T * scale，随后逐行 softmax（就地） */
         mm_nt(qh, dk, kh, dk, attn, T, T, dk, T);
@@ -617,6 +672,16 @@ void mha_backward(MultiHeadAttention *m, const Tensor *dout, Tensor *dx)
         /* dQ = d_scores @ K_h ; dK = d_scores^T @ Q_h */
         mm_nn(ds, T, kh, dk, dQ, dk, T, T, dk);
         mm_tn(ds, T, qh, dk, dK, dk, T, T, dk, 0);
+
+        /* RoPE 反向：上面算出的 dQ/dK 是「旋转后」q/k 的梯度（Q/K 缓存里存的就是旋转后的
+         * 值），乘旋转矩阵的转置（sign = -1）才回到投影输出的梯度。
+         * 与 Python 一样放在拼回 dQ_full 之前、逐 head 施加。 */
+        if (m->rope) {
+            for (int t = 0; t < T; t++) {
+                rope_rotate(dQ + (size_t)t * dk, dk, t, -1.0, m->rope_freq);
+                rope_rotate(dK + (size_t)t * dk, dk, t, -1.0, m->rope_freq);
+            }
+        }
     }
 
     /* 4. 拼接各头的 dQ/dK/dV → (T, d_model) */

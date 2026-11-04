@@ -99,6 +99,9 @@ typedef struct {
     double dropout_p;       /* 注意力权重 dropout 的 p；C 侧只保存、mask 逻辑尚未移植 */
     int causal;             /* 1 = 因果掩码：位置 t 只能看到 0..t（自回归语言模型用） */
     int window;             /* 滑动窗口：>0 时位置 t 只看最近 window 个位置（隐含因果）；0 = 关闭 */
+    int rope;               /* 1 = 对 q/k 施加旋转位置编码（RoPE，GPT-NeoX 版式）；0 = 关闭 */
+    double rope_base;       /* RoPE 频率基数（默认 10000.0，与 Python 的 rope_base 一致） */
+    double *rope_freq;      /* (d_k/2) 预计算频率 1/(base^(2i/d_k))；仅 rope 打开时使用 */
 
     /* 参数（行主序）：W_? 为 (d_model, d_model)，按 Python 的 self.W_?[j][i] 展平 */
     double *W_q, *W_k, *W_v, *W_o;
@@ -142,6 +145,13 @@ void mha_set_causal(MultiHeadAttention *m, int causal);
  * 必须在 mha_forward 之前调用。C 侧没有 forward_step 增量路径（llm_generate 每次整段重算），
  * 因此这里只影响 mha_forward 与（通过 attn 缓存隐含的）mha_backward。 */
 void mha_set_window(MultiHeadAttention *m, int window);
+/* 旋转位置编码（RoPE），对应 Python 的 rope / rope_base 参数。
+ * enable != 0：拆完多头后对 q_h、k_h 逐位置施加旋转（sign=+1），反向对 dQ/dK 施加
+ * 逆旋转（sign=-1）。enable == 0：关闭（默认），代码路径与开启前完全一致。
+ * base 必须 > 0（默认 10000.0）。必须在 mha_create 之后、mha_forward 之前调用。
+ * 注意：RoPE 只是把绝对位置信息混进 q/k，因此打开时通常应关闭 PositionalEncoding
+ * （CausalLM 侧见 llm_set_rope）。 */
+void mha_set_rope(MultiHeadAttention *m, int enable, double base);
 void mha_free(MultiHeadAttention *m);
 void mha_zero_grad(MultiHeadAttention *m);
 /* x: (seq_len, d_model) → out: (seq_len, d_model) */

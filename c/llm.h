@@ -44,6 +44,7 @@ typedef struct {
     int num_layers;
     int max_len;
     double dropout;
+    int use_abs_pos;    /* 1 = embed 之后加绝对位置编码（默认）；0 = 跳过（RoPE 打开时） */
 
     Embedding *emb;
     PositionalEncoding *pe;
@@ -83,6 +84,14 @@ void llm_free(CausalLM *m);
 
 /* 训练/推理模式（只影响两层 Dropout） */
 void llm_set_train(CausalLM *m, int train);
+
+/* RoPE（旋转位置编码）总开关，对应 Python 的 CausalLM(rope=True, rope_base=...)：
+ *   enable != 0：每层的 MultiHeadAttention 打开 RoPE，同时把 use_abs_pos 置 0
+ *                 —— 前向跳过 PositionalEncoding（位置信息已由 q/k 的旋转携带）；
+ *   enable == 0：恢复默认路径（RoPE 关闭 + 绝对位置编码），与 llm_create 后一致。
+ * base 必须 > 0（常用 10000.0）。必须在 forward/训练之前调用。
+ * 默认路径不受影响：llm_create 之后 use_abs_pos == 1、各层 rope == 0，代码路径与旧版逐位相同。 */
+void llm_set_rope(CausalLM *m, int enable, double base);
 
 /* 清零全部梯度（词向量、各层、输出头） */
 void llm_zero_grad(CausalLM *m);
