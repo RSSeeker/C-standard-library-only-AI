@@ -428,6 +428,99 @@ int main(int argc, char **argv)
         mha_free(mfull);
     }
 
+    /* ================== 5. nucleus 采样（top_p） ================== */
+    printf("\n[5] nucleus 采样（top_p）\n");
+    {
+        const int vocab = 8, d_model = 8, heads = 2, d_ff = 16, layers = 1, max_len = 12;
+        CausalLM *m = llm_create(vocab, d_model, heads, d_ff, layers, max_len, 0.0, 7);
+
+        /* 先过拟合一条短序列，让下一步分布变尖 —— 这样 top_p = 0.5 只可能留下 argmax */
+        int seq[8] = { 1, 4, 2, 7, 3, 5, 0, 6 };
+        const int *seqs[1] = { seq };
+        int lens[1] = { 8 };
+        (void)llm_fit(m, seqs, lens, 1, 80, 0.02, 0, 1, NULL);
+
+        int prompt[2] = { 1, 4 };
+        const int max_new = 4;
+        int a[6], b[6], g[6];
+        llm_generate(m, prompt, 2, max_new, 1.0, 0, a, 42);
+        llm_generate_p(m, prompt, 2, max_new, 1.0, 0, 1.0, b, 42);
+        check_true("top_p = 1.0 与 llm_generate 逐位一致",
+                   memcmp(a, b, sizeof(a)) == 0);
+
+        /* top_p = 1.0 时不应多抽随机数：同一 seed 连续两次结果相同 */
+        int c[6];
+        llm_generate_p(m, prompt, 2, max_new, 1.0, 0, 1.0, c, 42);
+        check_true("top_p = 1.0 同 seed 可复现", memcmp(b, c, sizeof(b)) == 0);
+
+        /* 前提：分布足够尖，argmax 概率 > 0.5（否则下面的等价性检查没有意义） */
+        int dims_l[2] = { 2, vocab };
+        Tensor *lg = tensor_new(2, dims_l);
+        llm_forward(m, prompt, 2, lg);
+        double p[8];
+        for (int v = 0; v < vocab; v++) p[v] = lg->data[(size_t)(2 - 1) * vocab + v];
+        double mx = p[0];
+        for (int v = 1; v < vocab; v++) if (p[v] > mx) mx = p[v];
+        double sum = 0.0;
+        for (int v = 0; v < vocab; v++) { p[v] = exp(p[v] - mx); sum += p[v]; }
+        double p_max = 1.0 / sum;   /* argmax 的概率（softmax 后 argmax 项的指数为 1） */
+        check_true("模型已足够尖（p_max > 0.5）", p_max > 0.5);
+        printf("    argmax 概率 = %.6f\n", p_max);
+
+        /* top_p = 0.5：只保留累积概率刚达到 0.5 的最小集合 → 当 p_max > 0.5 时就是 argmax，
+         * 因此与贪心（top_k = 1）逐 token 相同，任意 seed 都一样。 */
+        llm_generate(m, prompt, 2, max_new, 1.0, 1, g, 42);
+        int ok = 1;
+        for (unsigned long long sd = 0; sd < 5; sd++) {
+            int t[6];
+            llm_generate_p(m, prompt, 2, max_new, 1.0, 0, 0.5, t, sd);
+            if (memcmp(t, g, sizeof(g)) != 0) ok = 0;
+        }
+        check_true("top_p = 0.5 在尖分布上等价于贪心（5 个 seed）", ok);
+
+        /* top_p = 1.0 仍然随机：同一模型不同 seed 通常给出不同序列（这里只验证语义合法） */
+        int d[6];
+        int n = llm_generate_p(m, prompt, 2, max_new, 1.0, 0, 1.0, d, 12345);
+        check_true("top_p = 1.0 返回完整长度", n == 2 + max_new);
+        int in_range = 1;
+        for (int i = 0; i < n; i++) if (d[i] < 0 || d[i] >= vocab) in_range = 0;
+        check_true("生成的 token 都在词表范围内", in_range);
+
+        tensor_free(lg);
+        llm_free(m);
+    }
+
+    /* ================== 6. 困惑度 ================== */
+    printf("\n[6] 困惑度（llm_perplexity）\n");
+    {
+        const int vocab = 8, d_model = 8, heads = 2, d_ff = 16, layers = 1, max_len = 12;
+        CausalLM *m = llm_create(vocab, d_model, heads, d_ff, layers, max_len, 0.0, 11);
+        int s1[6] = { 1, 4, 2, 7, 3, 5 };
+        int s2[4] = { 6, 0, 3, 1 };
+        const int *seqs[2] = { s1, s2 };
+        int lens[2] = { 6, 4 };
+        (void)llm_fit(m, seqs, lens, 2, 10, 0.01, 0, 1, NULL);
+
+        double ev = llm_evaluate(m, seqs, lens, 2);
+        double pp = llm_perplexity(m, seqs, lens, 2);
+        check("perplexity == exp(evaluate)", fabs(pp - exp(ev)), 1e-12);
+        printf("    evaluate = %.6f  perplexity = %.6f\n", ev, pp);
+
+        /* 未训练的模型再验一次（另一条权重、另一个 loss 量级） */
+        CausalLM *m2 = llm_create(vocab, d_model, heads, d_ff, layers, max_len, 0.0, 13);
+        double ev2 = llm_evaluate(m2, seqs, lens, 2);
+        double pp2 = llm_perplexity(m2, seqs, lens, 2);
+        check("未训练模型也满足 perplexity == exp(evaluate)", fabs(pp2 - exp(ev2)), 1e-12);
+
+        /* 关于 loss > 700 的保护分支：llm_evaluate 与 Python 的 evaluate 一样把单位置概率
+         * 夹在 1e-12，因此平均 loss 的上界是 -log(1e-12) ≈ 27.631，永远到不了 700 ——
+         * 也就是说这个分支是纯防御性的（与 Python 的 perplexity() 完全对应），无法通过
+         * 公开 API 触发，这里不做（也无法做）行为测试。 */
+
+        llm_free(m);
+        llm_free(m2);
+    }
+
     printf("\n%s\n", g_fail ? "存在失败项" : "全部通过");
     return g_fail ? 1 : 0;
 }

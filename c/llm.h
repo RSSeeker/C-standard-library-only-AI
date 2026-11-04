@@ -74,6 +74,7 @@ typedef struct {
     double *dlogits;    /* (T, vocab_size) */
     double *probs;      /* (vocab_size) 临时 */
     double *tmp_row;    /* (max(vocab_size, d_model)) 临时 */
+    unsigned char *keep; /* (vocab_size) nucleus 采样的保留标记，仅 top_p < 1 时使用 */
 } CausalLM;
 
 /* 全部参数非正时报错退出；dropout 须在 [0,1) 内 */
@@ -118,6 +119,21 @@ double llm_fit(CausalLM *m, const int *const *seqs, const int *lens, int nseq,
  * 返回总长度。temperature > 0；top_k <= 0 或 >= vocab_size 表示不过滤。 */
 int llm_generate(CausalLM *m, const int *prompt, int prompt_len, int max_new,
                  double temperature, int top_k, int *out, unsigned long long seed);
+
+/* 带 nucleus（top-p）采样的生成，对应 Python 的 CausalLM._sample(top_p=...)：
+ *   top_p >= 1.0：与 llm_generate 完全等价 —— 走同一条路径、抽同样多的随机数、
+ *                 运算顺序不变，因此输出逐位相同；
+ *   0 < top_p < 1：在 top_k 过滤与温度缩放之后，按概率降序遍历，取出累积概率刚达到
+ *                 top_p 的最小 token 集合（并列时小下标在前），其余置 -INFINITY，
+ *                 再重新 softmax 采样。
+ * top_p 必须落在 (0, 1] 内，否则报错退出。 */
+int llm_generate_p(CausalLM *m, const int *prompt, int prompt_len, int max_new,
+                   double temperature, int top_k, double top_p, int *out,
+                   unsigned long long seed);
+
+/* 困惑度 = exp(平均交叉熵)，对应 Python 的 perplexity()；
+ * 平均 loss > 700 时返回 INFINITY（避免 exp 溢出）。 */
+double llm_perplexity(CausalLM *m, const int *const *seqs, const int *lens, int nseq);
 
 int llm_param_count(const CausalLM *m);
 /* 取出参数块表（顺序与 Python 一致），返回块数；cap 不够时报错退出 */
