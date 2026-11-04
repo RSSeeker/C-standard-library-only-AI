@@ -13,6 +13,7 @@
  *   8. Sequential(PositionalEncoding + TransformerEncoderLayer) 集成数值梯度
  *   9. PositionalEncoding：与 Python 公式逐项对照（sin/cos 表）
  *  10. Embedding：查表、同索引重复累加、grad_weight 数值梯度
+ *  11. TfLayerNorm（attention.c 私有）与 layers_norm.h 的 LayerNorm 逐位对照
  *
  * 全部通过返回 0；任何一项超差返回 1。
  * 编译：gcc -std=c17 -O2 -Wall -Wextra -o tests/test_attention.exe \
@@ -20,6 +21,7 @@
  */
 #include "../attention.h"
 #include "../containers.h"
+#include "../layers_norm.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -823,6 +825,98 @@ static void test_embedding(void)
 
 /* ------------------------------ main ------------------------------ */
 
+/* 11. TfLayerNorm 与 layers_norm.h 的 LayerNorm 逐位对照。
+ *
+ * attention.c 里的 TfLayerNorm 是按 (max_seq,d) 缓存 x_hat 的「整段」变体，供
+ * TransformerEncoderLayer 的反向使用；layers_norm.h 的 LayerNorm 是单样本版本。
+ * 两者公式相同但缓存布局不同，短期不合并（原因见 README「已知差异」）。这里用同一组
+ * gamma/beta/x/dout 逐步比对，确认两份实现的输出与梯度逐位相同——一旦有人改动其中
+ * 一份的运算顺序，这个测试会立刻报错。 */
+static double max_abs_diff(const double *a, const double *b, int n)
+{
+    double worst = 0.0;
+    for (int i = 0; i < n; i++) worst = fmax(worst, fabs(a[i] - b[i]));
+    return worst;
+}
+
+static void test_tf_layernorm_equiv(void)
+{
+    printf("\n[11] TfLayerNorm 与 LayerNorm（layers_norm.h）逐位对照\n");
+    const int ds[3] = { 4, 8, 16 };
+    const int rows = 3;
+
+    for (int di = 0; di < 3; di++) {
+        const int d = ds[di];
+        const int dims[1] = { d };
+
+        TfLayerNorm tf;
+        tfln_init(&tf, d, rows, 1e-5);
+        LayerNorm *ln = layernorm_create(d, 1e-5);
+
+        double *gamma = xmalloc((size_t)d * sizeof(double));
+        double *beta = xmalloc((size_t)d * sizeof(double));
+        for (int j = 0; j < d; j++) {
+            gamma[j] = 1.0 + deter(j + 3, 0.4);
+            beta[j] = deter(j + 11, 0.3);
+        }
+        memcpy(tf.gamma, gamma, (size_t)d * sizeof(double));
+        memcpy(tf.beta, beta, (size_t)d * sizeof(double));
+        layernorm_set_params(ln, gamma, beta);
+        tfln_zero_grad(&tf);
+
+        double *x = xmalloc((size_t)d * sizeof(double));
+        double *dout = xmalloc((size_t)d * sizeof(double));
+        double *out_tf = xmalloc((size_t)d * sizeof(double));
+        double *dx_tf = xmalloc((size_t)d * sizeof(double));
+        double *gg = xmalloc((size_t)d * sizeof(double));
+        double *gb = xmalloc((size_t)d * sizeof(double));
+        double *acc_gg = xmalloc((size_t)d * sizeof(double));
+        double *acc_gb = xmalloc((size_t)d * sizeof(double));
+        memset(acc_gg, 0, (size_t)d * sizeof(double));
+        memset(acc_gb, 0, (size_t)d * sizeof(double));
+
+        Tensor *tx = tensor_new(1, dims);
+        Tensor *to = tensor_new(1, dims);
+        Tensor *td = tensor_new(1, dims);
+        Tensor *tdx = tensor_new(1, dims);
+
+        double worst_f = 0.0, worst_dx = 0.0, worst_gg = 0.0, worst_gb = 0.0;
+        for (int row = 0; row < rows; row++) {
+            fill_deter(x, d, 0.8);
+            fill_deter(dout, d, 0.5);
+
+            tfln_forward_row(&tf, row, x, out_tf);
+            memcpy(tx->data, x, (size_t)d * sizeof(double));
+            layernorm_forward(ln, tx, to);
+            worst_f = fmax(worst_f, max_abs_diff(out_tf, to->data, d));
+
+            tfln_backward_row(&tf, row, dout, gg, gb, dx_tf);
+            memcpy(td->data, dout, (size_t)d * sizeof(double));
+            layernorm_backward(ln, td, tdx);
+            worst_dx = fmax(worst_dx, max_abs_diff(dx_tf, tdx->data, d));
+            for (int j = 0; j < d; j++) { acc_gg[j] += gg[j]; acc_gb[j] += gb[j]; }
+            worst_gg = fmax(worst_gg, max_abs_diff(acc_gg, layernorm_grad_gamma(ln), d));
+            worst_gb = fmax(worst_gb, max_abs_diff(acc_gb, layernorm_grad_beta(ln), d));
+        }
+
+        char label[64];
+        snprintf(label, sizeof(label), "d=%d forward", d);
+        check(label, worst_f, 0.0);
+        snprintf(label, sizeof(label), "d=%d dx", d);
+        check(label, worst_dx, 0.0);
+        snprintf(label, sizeof(label), "d=%d grad_gamma", d);
+        check(label, worst_gg, 0.0);
+        snprintf(label, sizeof(label), "d=%d grad_beta", d);
+        check(label, worst_gb, 0.0);
+
+        tensor_free(tx); tensor_free(to); tensor_free(td); tensor_free(tdx);
+        free(gamma); free(beta); free(x); free(dout); free(out_tf); free(dx_tf);
+        free(gg); free(gb); free(acc_gg); free(acc_gb);
+        layernorm_free(ln);
+        tfln_free(&tf);
+    }
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);   /* 关掉缓冲：万一崩了也能看到崩在哪一步 */
@@ -835,6 +929,7 @@ int main(void)
     test_transformer();
     test_pe();
     test_embedding();
+    test_tf_layernorm_equiv();
 
     printf("\n========================================\n");
     if (g_fail == 0) {

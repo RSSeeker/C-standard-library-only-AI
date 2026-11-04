@@ -20,11 +20,12 @@
  *   4. 形状不匹配一律 tensor_check_shape 报错退出，绝不静默截断
  *      （Python 版 PositionalEncoding 用 min(len(x), len(pe)) 静默截断，见 pe_forward 注释）。
  *
- * 关于 LayerNorm / Dropout：这两个组件按分工属于 layers_norm.h（另一位同事负责）。
- * 该文件目前尚不存在，为了让 TransformerEncoderLayer 能独立编译与自测，本文件自带一份
- * 私有实现（TfLayerNorm / TfDropout 与 tf_* / tfd_* 函数），数学与 AI.py 的
- * LayerNorm / Dropout 完全一致，且刻意保持接口可替换：待 layers_norm.h 落地后，
- * 只需把这两个结构体与函数替换成那边的同名实现即可（依赖见答复说明）。
+ * 关于 LayerNorm / Dropout：通用实现位于 layers_norm.h（单样本 LayerNorm、任意形状
+ * Dropout）。本文件另有一份 Transformer 专用的 TfLayerNorm / TfDropout：前者按
+ * (max_seq,d) 缓存每个 token 的 x_hat，供整段反向使用，与 LayerNorm 的单行缓存布局
+ * 不兼容；后者绑定 (max_seq,d) 且用 splitmix64，与 Dropout 的 xorshift64* 不同源。
+ * 两者的数学公式相同，tests/test_attention.c 第 [11] 节逐步比对 TfLayerNorm 与
+ * LayerNorm 的 forward / dx / 梯度并要求逐位相同；不合并的取舍见 README「已知差异」。
  */
 #ifndef AI_ATTENTION_H
 #define AI_ATTENTION_H
@@ -35,7 +36,7 @@
 #include "tensor.h"
 
 /* ==========================================================================
- *  私有 LayerNorm（与 layers_norm.h 的 LayerNorm 重复，后续统一）
+ *  私有 LayerNorm（与 layers_norm.h 的 LayerNorm 公式相同、缓存布局不同；取舍见 README）
  *
  *  Python 版 LayerNorm 作用在「单个 token 的 d 维向量」上，TransformerEncoderLayer
  *  逐 token 调用它。这里保留同样的逐行语义：行号由调用方显式给出，缓存按行号索引。
@@ -66,7 +67,7 @@ void tfln_backward_row(TfLayerNorm *ln, int row, const double *dout,
                        double *grad_gamma, double *grad_beta, double *dx);
 
 /* ==========================================================================
- *  私有 Dropout（与 layers_norm.h 的 Dropout 重复，后续统一）
+ *  私有 Dropout（与 layers_norm.h 的 Dropout 功能重复；RNG 与缓存布局不同，取舍见 README）
  *
  *  mask 按 token 存储（max_seq, d），与 Python 的 dropout?_masks[t][j] 一一对应。
  *  注意：C 侧无法复现 Python 的 Mersenne Twister 随机序列，因此 p>0 时数值上不可能

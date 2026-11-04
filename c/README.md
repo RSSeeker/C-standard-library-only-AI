@@ -288,7 +288,7 @@ python tools/attention_reference.py && ./tests/compare_attention   # 7 个用例
 | 存档的浮点文本 | C 用 `%.17g`，Python 用 `repr`（最短表示） | 文本不同，**解析回 double 完全相同** |
 | `pow` 相关的 1 ULP | MinGW 的 `pow` 非正确舍入（`pow(0.9,4)` = 0.65610000000000013），MSVC/glibc 返回正确舍入的 `0.6561` | 只影响 ExponentialLR 与 Adam 偏差修正；换 glibc 即消失 |
 | **libm 的超越函数**（`exp` / `tanh` / `pow`） | Windows 上 Python 用 UCRT，MinGW 自带一套实现：实测 `exp` 4010 个样本中 15 个差 1 ULP、`tanh` 2 个 | **Windows 上跨语言比对不可能天然逐位一致**，容易被误判成移植 bug。实测把 C 侧 libm 指到 `ucrtbase.dll`（`-Wl,--wrap=exp/tanh/pow`）后，RNN 的 56 项全部逐位相同。Linux/glibc 下两边同一套 libm，可直接逐位比对 |
-| `attention.c` 自带私有 `TfLayerNorm` / `TfDropout` | Attention 模块先于归一化模块完成；两者缓存布局不同：Tf 版按 `max_seq` 一次缓存所有行的 `x_hat` 供整段反向使用，`layers_norm` 版是单样本 + Module vtable | 保留两份（取舍见"未完成/待办"）；数值分别由 `compare_attention` 与 `compare_norm` 覆盖 |
+| `attention.c` 自带私有 `TfLayerNorm` / `TfDropout` | Attention 模块先于归一化模块完成；两者缓存布局不同：Tf 版按 `max_seq` 一次缓存所有行的 `x_hat` 供整段反向使用，`layers_norm` 版是单样本 + Module vtable | 保留两份（取舍见"未完成/待办"）；`test_attention` 第 11 节逐位对照两份 LayerNorm，TEL 梯度由 `compare_attention` 覆盖 |
 | 注意力权重 dropout 未实现 | C 的 `MultiHeadAttention` 只有 `dropout_p` 字段，没有 train 标志与 mask 缓冲；Python 的 mask 用 `self.rng.random()` 逐元素生成，跨语言无法复现 | 默认 `dropout=0` 时无影响（本文所有对拍都在该模式下）；`p>0` 时 MHA 行为与 Python 不同，TEL 的 dropout1/2 不受影响 |
 | **多步训练后的参数轨迹**（`compare_llm` 第 4 段） | 每步 `exp`/`log` 的 1 ULP 差异随步数累积：实测 3 轮后 `L0.attn.b_k` 差 3.7e-13（该参数本身约 1e-11，抵消把相对误差放大）、`out.W` 差 5.6e-17 | 结构错误是 1e-2 级，1e-13 可安全区分；比对程序对该段用 1e-12 容差 |
 | RNN 的 step cache 存副本 | Python 的 `_StepCacheMixin` 存的是引用（`self.x = x`） | C 侧存副本，调用方原地改写输入缓冲时不会污染缓存（有意差异） |
@@ -397,7 +397,10 @@ GCC 默认 `-ffp-contract=fast`，在支持 FMA 的机器上 `s += W*x` 可能�
   `TfDropout` 也绑定 `(max_seq,d)` 布局，`Dropout` 则是任意 size + `reserve`/`set_mask`。
   要合并就得改结构体和分配路径，属于"可能改变浮点运算顺序"的高风险改动；合并后还必须用
   `compare_attention`（TEL 梯度）与 `compare_norm`（21 项）同时证明 delta 0。当前两份代码
-  各自有逐位对拍覆盖，收益不足以抵消风险，因此只记录取舍、不做清理。
+  各自有逐位对拍覆盖，收益不足以抵消风险，因此只记录取舍、不做清理。`test_attention`
+  第 11 节现在用同一组 `gamma`/`beta`/`x`/`dout`（d=4/8/16、3 行）逐步比对两份
+  LayerNorm 的 forward、dx、`grad_gamma`、`grad_beta`，要求逐位相同（实测 0.000e+00）——
+  以后谁只改一份、把运算顺序改出 1 ULP，这个测试会立刻报错。
 - 跨语言等价性比对已覆盖归一化 / 卷积 / LLM / MHA+TEL（含 window/RoPE/GQA/MQA）；RNN 仍缺
   `rnn_reference.py` + `compare_rnn.c` 这一组前向/梯度对拍。
 - 未做 SIMD / OpenMP（本机 gcc 支持 `-fopenmp`），大矩阵还有数倍空间。
