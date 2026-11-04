@@ -12,7 +12,7 @@
 
 | 项目 | 状态 |
 |------|------|
-| 数值等价性 | MLP 前向/梯度、Conv2d/MaxPool2d/Flatten、BatchNorm1d/LayerNorm/Dropout、注意力组件、MHA/FFN/TransformerEncoderLayer 前向/反向 **全部与 Python 逐位一致**（0.000e+00，含 window/RoPE/GQA/MQA，见第 8 节） |
+| 数值等价性 | MLP 前向/梯度、Conv2d/MaxPool2d/Flatten、BatchNorm1d/LayerNorm/Dropout、注意力组件、MHA/FFN/TransformerEncoderLayer 前向/反向 **全部与 Python 逐位一致**（0.000e+00，含 window/RoPE/GQA/MQA 与注意力权重 dropout 的注入 mask 对拍，见第 8 节） |
 | 训练循环 | **零分配**（预热后 `malloc` 调用次数 = 0，用链接器 `--wrap` 统计，与机器负载无关） |
 | 性能 | MLP[64,256,128,8]、5 万参数、1000 样本 × 5 轮：C 约 1.3 s vs Python 约 77 s（**约 58–68 倍**） |
 | 存档互通 | 与 Python 的 `save_model` / `load_model` **双向互通**，两个方向都逐位一致 |
@@ -29,7 +29,7 @@
 | `Conv2d` / `MaxPool2d` / `Flatten` | `layers_conv.c` | 已完成，12 项逐位一致 |
 | `Dropout` / `BatchNorm1d` / `LayerNorm` | `layers_norm.c` | 已完成，21 项逐位一致 |
 | `RNNCell/RNN` / `LSTMCell/LSTM` / `GRUCell/GRU` + step cache | `rnn.c` | 已完成 |
-| `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成（含 `causal` 因果掩码开关、`mha_set_window` 滑动窗口、`mha_set_rope` 旋转位置编码、`mha_create_gqa` 的 GQA/MQA、`mha_forward_step` 增量前向） |
+| `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成（含 `causal` 因果掩码开关、`mha_set_window` 滑动窗口、`mha_set_rope` 旋转位置编码、`mha_create_gqa` 的 GQA/MQA、`mha_forward_step` 增量前向、`mha_set_training` + `mha_set_attn_mask` 的注意力权重 dropout） |
 | `MultiHeadAttention(causal=True)` / `CausalLM`（LLM） | `attention.c` + `llm.c` | 已完成：因果掩码、teacher forcing 训练、自回归生成、`llm_generate_p`（nucleus 采样）、`llm_perplexity` |
 | `Sequential` / `ResidualBlock` | `containers.c` | 已完成（Module vtable） |
 | `TextProcessor` / `generate_text` / `softmax_with_temp` | `text.c` | 已完成，逐位一致 |
@@ -152,7 +152,7 @@ Python 写 -> C 读：  最大差异 0.000e+00  PASS   （含 softmax 输出层�
 python tools/norm_reference.py && ./tests/compare_norm     # 21 项，全部 0.000e+00
 python tools/conv_reference.py && ./tests/compare_conv     # 12 项，全部 0.000e+00
 python tools/llm_reference.py && ./tests/compare_llm      # 6 段，见下
-python tools/attention_reference.py && ./tests/compare_attention  # 7 个用例，见第 8 节
+python tools/attention_reference.py && ./tests/compare_attention  # 9 个用例，见第 8 节
 ```
 
 覆盖：BatchNorm1d（训练 forward/反向 dx/grad_gamma/grad_beta/running 统计量/mean/var/inv_std/x_hat、
@@ -225,7 +225,7 @@ KV 存在每层的 `cache_K` / `cache_V` 里，位置取「当前窗口内下标
 ### 8. 注意力 / TEL 跨语言对拍（`tests/compare_attention.c`）
 
 ```
-python tools/attention_reference.py && ./tests/compare_attention   # 7 个用例，全部 0.000e+00
+python tools/attention_reference.py && ./tests/compare_attention   # 9 个用例，全部 0.000e+00
 ```
 
 `attention_reference.py` 用固定种子在 Python 侧建模型，把权重、输入 `x`、上游梯度 `dout`、
@@ -241,15 +241,26 @@ python tools/attention_reference.py && ./tests/compare_attention   # 7 个用例
 | `mha_mqa` | h=4, kv=1, T=5 | 同上 |
 | `mha_combo` | h=4, kv=2, window=2, RoPE, T=6 | 同上 |
 | `tel_causal` | d=8, h=2, ff=16, T=4 | out / dx / 注意力 8 组 / FFN 4 组 / LN 4 组梯度 |
+| `mha_dropout_p50` | d=8, h=2, T=4, p=0.5, training=1 | out / dx / 8 组梯度 / `forward_step`（注入 Python 生成的 mask） |
+| `mha_dropout_ctrl` | 同上权重，p=0, training=1 | 同上（dropout=0 对照，确认默认路径不变） |
 
 全部用例容差 0（`0.000e+00`）。RoPE 的 `pow`/`cos`/`sin` 在 msvcrt 与 CPython 3.14 上实测
 逐位相同（`%a` 与 `float.hex()` 只是格式不同），所以这一组不需要放宽容差。
+
+**注意力权重 dropout 怎么对拍的（不依赖 RNG 同源）**：Python 的 mask 来自
+`self.rng.random()`，C 用自己的 splitmix64，两边天然不同源。所以这一组不用 RNG 对拍，
+而是**注入 mask**：导出脚本把模型的 `rng` 换成一个只有 `.random()` 的假对象（按预生成
+列表返回），于是 Python 实际用的 `(num_heads,T,T)` mask 完全确定，一并写进 JSON；C 侧
+`mha_set_training(1)` + `mha_set_attn_mask()` 灌入同一份 mask，再比较 out / dx / 8 组梯度。
+两边乘的是同一串 double，任何差异都只能来自实现（mask 作用位置、dV 用哪份权重、softmax
+雅可比是否用干净权重），容差仍是 0。实测 `mha_dropout_p50` 全部 `0.000e+00`；
+`mha_dropout_ctrl`（同权重、p=0）也全部 `0.000e+00`，说明默认路径没有被动到。
 
 > **顺带修掉一个真实的 GQA/MQA bug**：`mha_forward` 给 `v_full` 加 bias 时循环上界误用了
 > `d_model`，而 `b_v` 只有 `kv_dim` 长。GQA/MQA 下这会越界读 `b_v`，并把值写进 `v_full`
 > 下一行的开头（最后一行的写甚至越过缓冲区）。`mha_mqa` 用例第一次跑就暴露：输出差
 > `3.902e-01`，`grad_W_o` 差 `4.114e-01`；组合用例差到 `2.460e+00`。改成按 `kv_dim` 循环后
-> 7 个用例全部逐位相同；默认 `kv_dim == d_model` 时循环次数与顺序不变，`compare_llm` /
+> 修复后全部用例逐位相同；默认 `kv_dim == d_model` 时循环次数与顺序不变，`compare_llm` /
 > `test_llm_ext` 的既有结果未变。这个 bug 之前的 C 侧自测没抓到，是因为默认路径和
 > （碰巧拿到清零堆内存的）GQA 用例都没有触发可见差异。
 
@@ -289,7 +300,7 @@ python tools/attention_reference.py && ./tests/compare_attention   # 7 个用例
 | `pow` 相关的 1 ULP | MinGW 的 `pow` 非正确舍入（`pow(0.9,4)` = 0.65610000000000013），MSVC/glibc 返回正确舍入的 `0.6561` | 只影响 ExponentialLR 与 Adam 偏差修正；换 glibc 即消失 |
 | **libm 的超越函数**（`exp` / `tanh` / `pow`） | Windows 上 Python 用 UCRT，MinGW 自带一套实现：实测 `exp` 4010 个样本中 15 个差 1 ULP、`tanh` 2 个 | **Windows 上跨语言比对不可能天然逐位一致**，容易被误判成移植 bug。实测把 C 侧 libm 指到 `ucrtbase.dll`（`-Wl,--wrap=exp/tanh/pow`）后，RNN 的 56 项全部逐位相同。Linux/glibc 下两边同一套 libm，可直接逐位比对 |
 | `attention.c` 自带私有 `TfLayerNorm` / `TfDropout` | Attention 模块先于归一化模块完成；两者缓存布局不同：Tf 版按 `max_seq` 一次缓存所有行的 `x_hat` 供整段反向使用，`layers_norm` 版是单样本 + Module vtable | 保留两份（取舍见"未完成/待办"）；`test_attention` 第 11 节逐位对照两份 LayerNorm，TEL 梯度由 `compare_attention` 覆盖 |
-| 注意力权重 dropout 未实现 | C 的 `MultiHeadAttention` 只有 `dropout_p` 字段，没有 train 标志与 mask 缓冲；Python 的 mask 用 `self.rng.random()` 逐元素生成，跨语言无法复现 | 默认 `dropout=0` 时无影响（本文所有对拍都在该模式下）；`p>0` 时 MHA 行为与 Python 不同，TEL 的 dropout1/2 不受影响 |
+| 注意力权重 dropout 的**随机 mask 本身** | C 侧用 splitmix64 生成 mask（`mha_set_training(1)` 且未注入 mask 时），Python 用 `self.rng.random()`（Mersenne Twister）；两者不可能逐位相同 | `p>0` 且**未注入 mask** 时，C 与 Python 抽到的 mask 不同，因此这一模式**不能**做逐位对比（只保证分布语义相同：丢弃概率 `p`、保留位置乘 `1/(1-p)`）。逐位对拍一律走注入 mask：Python 导出假 RNG 产生的 mask，C 侧 `mha_set_attn_mask()` 灌入（第 8 节，实测 0.000e+00）。`p=0` 或 `training=0` 时完全不生成 mask，默认路径与 Python 逐位一致 |
 | **多步训练后的参数轨迹**（`compare_llm` 第 4 段） | 每步 `exp`/`log` 的 1 ULP 差异随步数累积：实测 3 轮后 `L0.attn.b_k` 差 3.7e-13（该参数本身约 1e-11，抵消把相对误差放大）、`out.W` 差 5.6e-17 | 结构错误是 1e-2 级，1e-13 可安全区分；比对程序对该段用 1e-12 容差 |
 | RNN 的 step cache 存副本 | Python 的 `_StepCacheMixin` 存的是引用（`self.x = x`） | C 侧存副本，调用方原地改写输入缓冲时不会污染缓存（有意差异） |
 | **任意 top_p / 随机采样的 token 不能跨语言逐位比较** | C 用 splitmix64，Python 用 `random.MT19937`；即使 logits 逐位相同，`_sample` 消耗的随机数也不同 | 确定性部分（logits、`perplexity`、`top_p` 只含 argmax 时的 token）已逐位对拍；随机采样只在 C 侧自测（同 seed 可复现、cached 与重算一致） |
@@ -337,9 +348,9 @@ Python 的模块有两种 backward 返回约定（元组取末位 / 非元组整
 2. **BPTT 的梯度缓冲是内部数组**：`get_grads()` 返回的就是 cell 内部缓冲，
    调用方不能再手工累加，否则等于自己加自己（Python 侧曾因此让梯度按 2 的幂放大）。
 
-### 三个注意力扩展与"默认路径不变"
+### 四个注意力扩展与"默认路径不变"
 
-三条扩展都遵守同一条纪律：**不打开就不进新代码路径**，所以默认配置下的运算序列与旧版完全相同
+四条扩展都遵守同一条纪律：**不打开就不进新代码路径**，所以默认配置下的运算序列与旧版完全相同
 （`compare_llm` 六段的判定就是这条纪律的回归测试）。
 
 - **滑动窗口**（`mha_set_window`）：`window > 0` 时隐含因果——先无条件屏蔽未来，再把
@@ -360,6 +371,15 @@ Python 的模块有两种 backward 返回约定（元组取末位 / 非元组整
 - **为什么没有 `mha_set_num_kv_heads`**：`W_k`/`W_v`、`k_full`/`v_full`、`grad_W_k`/`grad_W_v`
   的尺寸都在 create 时定死，事后改要么重分配丢掉训练好的权重，要么静默越界；Python 侧
   `num_kv_heads` 同样是构造参数，所以 C 侧用第二个构造函数。
+- **注意力权重 dropout**（`mha_set_training` + `dropout_p`）：只有 `training=1 && p>0` 才进
+  新分支，默认 `training=0`（构造即 eval）时 `used == attn`，`m->dropout_active` 为 0，
+  `mha_forward`/`mha_backward` 的运算序列与旧版完全相同。`mha_forward_step` 与
+  增量路径都不做 dropout（与 Python 的 `forward_step` 一致）。mask 缓冲按
+  `(num_heads, max_seq, max_seq)` 一次性预分配（与 `attn`/`d_scores` 同一套 `h*T*T` 布局，
+  构造时定死，不动态重分配）；`T < max_seq` 时只用前 `T` 行/列。反向严格照 Python：
+  `dV` 用乘过 mask 的 `attn_drop`，`d_attn` 先乘 mask，而 softmax 雅可比的 `s_t` 与
+  `attn[t][j]*(...)` 仍用干净 `attn`。跨语言验证走 `mha_set_attn_mask()` 注入，
+  不依赖两边 RNG 同源（见第 8 节）。
 - **nucleus 采样**：`llm_generate` 只是一行委托 `llm_generate_p(..., 1.0, ...)`；`top_p >= 1.0`
   时那段代码**整块跳过**（不多抽一次随机数、不做额外运算），这才是"默认逐位一致"的原因，
   而不是"数值上恰好相等"。
@@ -382,15 +402,6 @@ GCC 默认 `-ffp-contract=fast`，在支持 FMA 的机器上 `s += W*x` 可能�
 
 ## 未完成 / 待办
 
-- 注意力**权重** dropout 尚未在 C 侧实现。Python 的 `MultiHeadAttention.forward` 在
-  `training and dropout>0` 时用 `self.rng.random()` 逐元素生成 `(T,T)` mask，前向用
-  `attn*mask`、反向 `dV` 用 mask 后的权重而 softmax 雅可比用干净权重。C 侧结构里只有
-  `dropout_p` 字段，没有 train 标志、`attn_dropped` / `attn_masks` 缓冲，也没有像
-  `dropout_set_mask()` 那样的注入口；照搬实现至少要加两套 `h*T*T` 缓冲和一个可注入 mask 的
-  测试钩子。更关键的是跨语言对拍需要同一份 mask，而两边 RNG 不同——没有注入口就只能做
-  C 侧统计自测，无法证明逐位等价。本次优先保证 window/RoPE/GQA/MQA 的**确定性**前向/梯度
-  逐位对拍，dropout 留待以后按"注入 mask + 固定 p 的梯度对拍"的方式补。默认 `dropout=0`
-  时这条差异不可见（所有对拍都在 eval/0 下进行）。
 - `attention.c` 自带的私有 `TfLayerNorm` / `TfDropout` **有意保留两份**：`TfLayerNorm` 按
   `max_seq` 缓存所有 token 的 `x_hat`，配合 `TransformerEncoderLayer` 的整段反向；而
   `layers_norm.h` 的 `LayerNorm` 是单样本 + Module vtable（缓存只有一份 `x_hat`），
