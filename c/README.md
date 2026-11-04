@@ -348,6 +348,22 @@ Python 的模块有两种 backward 返回约定（元组取末位 / 非元组整
 2. **BPTT 的梯度缓冲是内部数组**：`get_grads()` 返回的就是 cell 内部缓冲，
    调用方不能再手工累加，否则等于自己加自己（Python 侧曾因此让梯度按 2 的幂放大）。
 
+### 输入校验：该报错就报错，不静默
+
+C 侧的错误风格是 `fprintf(stderr, ...)` + `exit(1)`（Python 版抛异常）。两类"报了也白报"的
+情况专门补了防护，都是先把错翻成一句话再退出：
+
+| 位置 | 检查 | 为什么必须查 |
+|------|------|--------------|
+| `check_ids` | 序列长度 1..`max_len`，每个 id 在 `[0, vocab_size)` | 越界会读坏缓冲 |
+| `llm_generate_p` / `llm_generate_cached` | `temperature > 0`、`top_p ∈ (0,1]`、**`top_k >= 0`** | `top_k < 0` 原来等价于"不过滤"，调用方以为自己在做 top-k |
+| `llm_loss_and_backward` / `llm_evaluate` | 前向后的 logits 必须全部有限 | 权重混进 NaN/Inf 时，loss 会被夹成 `-log(1e-12)=27.63`，训练照跑、梯度全 NaN，最难查 |
+| `softmax_row_inplace` | 整行 `-inf` 时直接返回全 0 | `exp(-inf - -inf)` 是 NaN。C 没有 `pad_mask`，正常路径进不到；与 Python 的 `_softmax_row` 保持同一语义 |
+
+注意这与"默认路径逐位一致"不冲突：上面每条都只在非法输入或原本会出 NaN 的分支上触发，
+合法输入的浮点运算顺序一位没动（11 个 `test_*.exe`、`compare_attention` 98 项、
+`compare_llm` 六段修复后仍全部 0.000e+00）。
+
 ### 四个注意力扩展与"默认路径不变"
 
 四条扩展都遵守同一条纪律：**不打开就不进新代码路径**，所以默认配置下的运算序列与旧版完全相同

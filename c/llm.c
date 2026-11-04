@@ -93,6 +93,12 @@ static void softmax_row_inplace(double *v, int n)
 {
     double mx = v[0];
     for (int i = 1; i < n; i++) if (v[i] > mx) mx = v[i];
+    /* 整行都是 -inf（例如 query 的可见 key 全被掩码掉）时，exp(-inf - -inf)
+     * 是 NaN；与 Python 的 _softmax_row 一致，这种情况下返回全 0。 */
+    if (mx == -INFINITY) {
+        for (int i = 0; i < n; i++) v[i] = 0.0;
+        return;
+    }
     for (int i = 0; i < n; i++) v[i] = exp(v[i] - mx);
     double s = sum_neumaier(v, n);
     for (int i = 0; i < n; i++) v[i] = v[i] / s;
@@ -322,6 +328,23 @@ static void check_ids(const CausalLM *m, const int *ids, int T, const char *who)
     }
 }
 
+/* 校验 logits 全部有限：权重里混进 NaN/Inf 时，loss 会被 clamp 成
+ * -log(1e-12)=27.63，训练照跑但梯度全是 NaN。宁可在这里打断。 */
+static void check_finite_logits(const double *logits, int T, int V,
+                                const char *who)
+{
+    for (int t = 0; t < T; t++) {
+        const double *row = logits + (size_t)t * V;
+        for (int v = 0; v < V; v++) {
+            if (!isfinite(row[v])) {
+                fprintf(stderr, "%s: 第 %d 行 logits 含 NaN/Inf（参数可能已损坏）\n",
+                        who, t);
+                exit(1);
+            }
+        }
+    }
+}
+
 void llm_forward(CausalLM *m, const int *ids, int T, Tensor *logits)
 {
     check_ids(m, ids, T, "llm_forward");
@@ -373,6 +396,8 @@ double llm_loss_and_backward(CausalLM *m, const int *ids, int T)
     Tensor logits_view = *m->logits_buf;
     set_shape2(&logits_view, n, V);
     llm_forward(m, ids, n, &logits_view);
+
+    check_finite_logits(m->logits_buf->data, n, V, "llm_loss_and_backward");
 
     double loss = 0.0;
     for (int t = 0; t < n; t++) {
@@ -473,6 +498,7 @@ double llm_evaluate(CausalLM *m, const int *const *seqs, const int *lens, int ns
         Tensor logits_view = *m->logits_buf;
         set_shape2(&logits_view, T - 1, V);
         llm_forward(m, ids, T - 1, &logits_view);
+        check_finite_logits(m->logits_buf->data, T - 1, V, "llm_evaluate");
         for (int t = 0; t < T - 1; t++) {
             memcpy(m->probs, m->logits_buf->data + (size_t)t * V, (size_t)V * sizeof(double));
             softmax_row_inplace(m->probs, V);
@@ -631,6 +657,11 @@ int llm_generate_p(CausalLM *m, const int *prompt, int prompt_len, int max_new,
         fprintf(stderr, "llm_generate_p: top_p 必须在 (0, 1] 内（收到 %g）\n", top_p);
         exit(1);
     }
+    if (top_k < 0) {
+        fprintf(stderr, "llm_generate_p: top_k 必须 >= 0（0 表示不过滤，收到 %d）\n",
+                top_k);
+        exit(1);
+    }
     check_ids(m, prompt, prompt_len, "llm_generate");
     if (prompt_len > m->max_len) {
         fprintf(stderr, "llm_generate: prompt 长度 %d 超过 max_len=%d\n",
@@ -740,6 +771,11 @@ int llm_generate_cached(CausalLM *m, const int *prompt, int prompt_len, int max_
     }
     if (!(top_p > 0.0) || top_p > 1.0) {
         fprintf(stderr, "llm_generate_cached: top_p 必须在 (0, 1] 内（收到 %g）\n", top_p);
+        exit(1);
+    }
+    if (top_k < 0) {
+        fprintf(stderr, "llm_generate_cached: top_k 必须 >= 0（0 表示不过滤，收到 %d）\n",
+                top_k);
         exit(1);
     }
     check_ids(m, prompt, prompt_len, "llm_generate_cached");
