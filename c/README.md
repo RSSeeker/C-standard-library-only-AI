@@ -17,6 +17,7 @@
 | 性能 | MLP[64,256,128,8]、5 万参数、1000 样本 × 5 轮：C 约 1.3 s vs Python 约 77 s（**约 58–68 倍**） |
 | 存档互通 | 与 Python 的 `save_model` / `load_model` **双向互通**，两个方向都逐位一致 |
 | 因果语言模型 | `CausalLM`（因果掩码 + GPT 式并行训练）：前向 logits、loss、19 个梯度块、一步 Adam、贪心生成 **全部与 Python 逐位一致**；多步训练受 libm `exp/log` 的 1 ULP 影响（见"已知差异"） |
+| 扩展特性 | 滑动窗口注意力、RoPE、GQA/MQA、nucleus（top-p）采样、困惑度：语义与 Python 版逐项对齐；**默认路径（不做任何 setter 调用时）仍与 Python 逐位一致**——`compare_llm` 的 5 段判定未变 |
 | 编译 | `-std=c17 -O2 -Wall -Wextra` 下**零警告** |
 | 副产品 | 移植中在 **Python 版发现并修复了一个真实梯度 bug**（见文末） |
 
@@ -28,8 +29,8 @@
 | `Conv2d` / `MaxPool2d` / `Flatten` | `layers_conv.c` | 已完成，12 项逐位一致 |
 | `Dropout` / `BatchNorm1d` / `LayerNorm` | `layers_norm.c` | 已完成，21 项逐位一致 |
 | `RNNCell/RNN` / `LSTMCell/LSTM` / `GRUCell/GRU` + step cache | `rnn.c` | 已完成 |
-| `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成（含 `causal` 因果掩码开关） |
-| `MultiHeadAttention(causal=True)` / `CausalLM`（LLM） | `attention.c` + `llm.c` | 已完成：因果掩码、teacher forcing 训练、自回归生成 |
+| `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成（含 `causal` 因果掩码开关、`mha_set_window` 滑动窗口、`mha_set_rope` 旋转位置编码、`mha_create_gqa` 的 GQA/MQA） |
+| `MultiHeadAttention(causal=True)` / `CausalLM`（LLM） | `attention.c` + `llm.c` | 已完成：因果掩码、teacher forcing 训练、自回归生成、`llm_generate_p`（nucleus 采样）、`llm_perplexity` |
 | `Sequential` / `ResidualBlock` | `containers.c` | 已完成（Module vtable） |
 | `TextProcessor` / `generate_text` / `softmax_with_temp` | `text.c` | 已完成，逐位一致 |
 | `save_model` / `load_model`（JSON） | `json.c` + `model_io.c` | 已完成，双向互通 |
@@ -54,6 +55,18 @@ make test       # 运行全部 C 自测（含 tests/test_llm：因果性 / 数�
 make check      # 与 Python 版做数值等价比对
 ```
 
+没有 make 时自测/比对程序也照「同一份源码列表 + 目标 .c」编译（`tests/test_llm_ext.c` 是新增的
+扩展特性自测，不需要额外的 c/ 源文件）：
+
+```bash
+SRC="ai.c tensor.c layers_conv.c layers_norm.c rnn.c attention.c llm.c containers.c \
+     json.c model_io.c text.c sched.c model_high.c"
+gcc -std=c17 -O2 -Wall -Wextra -o tests/compare_llm tests/compare_llm.c $SRC -lm
+gcc -std=c17 -O2 -Wall -Wextra -o tests/test_llm_ext tests/test_llm_ext.c $SRC -lm
+python tools/llm_reference.py && ./tests/compare_llm   # 5 段比对
+./tests/test_llm_ext self                              # 6 段扩展特性自测
+```
+
 `./demo` 输出三段：分类、回归、**因果语言模型**（字符级「012012…」，约 0.06 s 把 loss 从 2.2 降到 0.003，贪心续写 `0120120120120`）。
 
 `tools/` 下的 Python 脚本需要能找到本 Python 版仓库，查找顺序是
@@ -71,8 +84,8 @@ c/
 ├── layers_conv.h/.c       Conv2d / MaxPool2d / Flatten
 ├── layers_norm.h/.c       BatchNorm1d / LayerNorm / Dropout
 ├── rnn.h / rnn.c          RNNCell/RNN、LSTMCell/LSTM、GRUCell/GRU（含 step cache）
-├── attention.h / .c       MultiHeadAttention / FeedForward / TransformerEncoder / PositionalEncoding / Embedding（含 causal 掩码）
-├── llm.h / llm.c          CausalLM：因果语言模型（复用 attention.c 的编码器 + 词表头 + Adam）
+├── attention.h / .c       MultiHeadAttention / FeedForward / TransformerEncoder / PositionalEncoding / Embedding（含 causal 掩码、滑动窗口、RoPE、GQA/MQA）
+├── llm.h / llm.c          CausalLM：因果语言模型（复用 attention.c 的编码器 + 词表头 + Adam + nucleus 采样 + 困惑度）
 ├── containers.h / .c      Sequential / ResidualBlock（基于 Module vtable）
 ├── json.h / json.c        极简 JSON 读写（供存档互通）
 ├── model_io.h / .c        与 Python 的 save_model/load_model 格式互通
@@ -83,7 +96,7 @@ c/
 ├── bench.c                性能基准
 ├── compare_python.c       跨语言数值等价比对
 ├── check_noalloc.c        训练循环零分配验证
-├── tests/                 各模块自测（含有限差分梯度校验）
+├── tests/                 各模块自测（含有限差分梯度校验、test_llm_ext 的扩展特性自测）
 └── tools/                 参考数据导出、对等基准、互通比对脚本
 ```
 
@@ -153,6 +166,27 @@ Conv2d（两种配置的 forward/grad_w/grad_b/dx）、MaxPool2d（两种配置�
 > 注意 `Conv2d.forward` 在 Python 里走的是 `_matmul`（内部 `sum(map(mul, ...))` = Neumaier 补偿求和），
 > 不是朴素三重循环累加——C 侧照此实现才能逐位一致。
 
+### 6. 扩展特性自测（`tests/test_llm_ext.c`）
+
+`./tests/test_llm_ext self`，六段，全部通过（有限差分统一 eps=1e-6、rel tol=1e-5）：
+
+```
+[1] 滑动窗口（window=3，未开 causal）  窗口外权重 0.000e+00 / 每行和 2.220e-16 /
+                                       未来位置 0.000e+00 / window>=T 与全因果逐位一致 0.000e+00
+[2] RoPE 开关                        rope 关掉后与默认路径逐位一致 0.000e+00 / 打开后输出确实改变 /
+                                       位置 0 不变（theta=0）0.000e+00 / 不同 rope_base 输出不同
+[3] RoPE 梯度                         W_q[46] 2.370e-10 / W_v[12] 1.613e-10 / W_k[26] 1.570e-10
+[4] GQA（4 头 / 2 KV 头）            W_q[13] 3.075e-10 / W_k[26] 8.197e-10 / b_k[5] 4.347e-311 /
+                                       KV 头复制后与普通多头逐位一致 0.000e+00 / 冒烟 25.386758→1.294080
+[5] nucleus 采样                     top_p=1.0 与 llm_generate 逐位一致 / top_p=0.5 在尖分布上
+                                       （argmax 概率 0.996495）5 个 seed 全部等价于贪心
+[6] 困惑度                            perplexity == exp(evaluate) 0.000e+00（evaluate 0.445626 → 1.561467）
+```
+
+[1] 的「每行和」用 `1e-12` 容差：softmax 后各行和与 1 的偏差就是 `2.2e-16`（一个 ULP 量级），
+不可能更小——这是浮点性质，不是实现误差。[4] 的 GQA 训练冒烟用 `lr=0.002`：损失取
+`0.5*||out||²` 时步长上界是 `2/λmax`，`lr=0.05` 会直接发散到 nan（不是 bug）。
+
 ---
 
 ## 移植过程中在 Python 版发现的 bug
@@ -191,6 +225,9 @@ Conv2d（两种配置的 forward/grad_w/grad_b/dx）、MaxPool2d（两种配置�
 | `attention.c` 自带私有 `TfLayerNorm` / `TfDropout` | Attention 模块先于归一化模块完成，为避免跨文件依赖各自实现了一份 | **待统一**：应改为复用 `layers_norm.h` 的 `LayerNorm` / `Dropout` |
 | **多步训练后的参数轨迹**（`compare_llm` 第 4 段） | 每步 `exp`/`log` 的 1 ULP 差异随步数累积：实测 3 轮后 `L0.attn.b_k` 差 3.7e-13（该参数本身约 1e-11，抵消把相对误差放大）、`out.W` 差 5.6e-17 | 结构错误是 1e-2 级，1e-13 可安全区分；比对程序对该段用 1e-12 容差 |
 | RNN 的 step cache 存副本 | Python 的 `_StepCacheMixin` 存的是引用（`self.x = x`） | C 侧存副本，调用方原地改写输入缓冲时不会污染缓存（有意差异） |
+| **扩展特性还没有跨语言参考数据** | `tools/llm_reference.py` 只导出默认配置（无窗口 / 无 RoPE / 全 KV 头 / greedy）的张量；window / rope / GQA / top_p 的语义是逐行照 Python 源码实现的 | 这些配置用 C 侧中心差分 + 结构不变量验证（"验证"第 6 节）；**默认路径**仍由 `compare_llm` 五段逐位比对 |
+| 困惑度的 `loss > 700` 保护分支不可达 | `llm_evaluate` 与 Python 的 `evaluate` 一样把单位置概率夹在 `1e-12`，平均 loss 上界 `-log(1e-12) = 27.631021` | 纯防御代码（与 Python 的 `perplexity()` 完全对应），公开 API 无法触发；测试里不做行为断言并注明原因 |
+| nucleus 采样的并列概率 | Python 用 `sorted(..., reverse=True)` 的稳定排序（并列时小下标在前）；C 用 O(V²) 的「未保留中概率严格更大」扫描 | 选出的 token 集合完全相同；`top_p < 1` 时多 O(V²) 扫描，`top_p >= 1` 根本进不到该分支（故默认路径逐位一致） |
 
 ## 所有权契约（容易踩，务必先读）
 
@@ -233,6 +270,32 @@ Python 的模块有两种 backward 返回约定（元组取末位 / 非元组整
 2. **BPTT 的梯度缓冲是内部数组**：`get_grads()` 返回的就是 cell 内部缓冲，
    调用方不能再手工累加，否则等于自己加自己（Python 侧曾因此让梯度按 2 的幂放大）。
 
+### 三个注意力扩展与"默认路径不变"
+
+三条扩展都遵守同一条纪律：**不打开就不进新代码路径**，所以默认配置下的运算序列与旧版完全相同
+（`compare_llm` 五段的判定就是这条纪律的回归测试）。
+
+- **滑动窗口**（`mha_set_window`）：`window > 0` 时隐含因果——先无条件屏蔽未来，再把
+  `j < t - window + 1` 也置 `-INFINITY`；`window <= 0` 时整个分支不进。掩码在 softmax 之前，
+  被屏蔽位置权重恰好为 0。C 侧没有 Python 的 `forward_step` 增量 KV cache（生成每步整段重算），
+  所以窗口只需在 `mha_forward` 处理。
+- **RoPE**（`mha_set_rope`）：GPT-NeoX 版式，`freq_i = 1/(base^(2i/d_k))`，把维度 `i` 与
+  `i + d_k/2` 配对。位置编码在**拆头之后、打分之前**就地在 `m->Q` / `m->K` 上施加（与 Python
+  缓存旋转后的 `self.Q` 一致），反向在拼回 `dQ_full` / `dK_full` 之前用 `sign = -1` 逆旋转。
+  打开 RoPE 时 `llm_set_rope` 同时把 `use_abs_pos` 置 0，`llm_forward` 用 memcpy 跳过
+  `PositionalEncoding`（两套位置信息叠加会互相干扰）。
+- **GQA / MQA**（`mha_create_gqa`）：`W_k` / `W_v` 变成 `(kv_dim, d_model)`，但前向在拆头时
+  把共享 KV 按 `kv_off = (head / kv_group) * d_k` **复制成每头一份**，于是打分与反向代码与普通
+  多头完全共用。反向里必须先 `memset` 再对共享头累加（`dK_full` / `dV_full` 是累加缓冲，
+  不清零会跨调用累积——这个 bug 曾把梯度放大到发散）。默认 `num_kv_heads == num_heads` 时
+  `kv_dim == d_model`，随机初始化序列与旧版相同，因此逐位一致。
+- **为什么没有 `mha_set_num_kv_heads`**：`W_k`/`W_v`、`k_full`/`v_full`、`grad_W_k`/`grad_W_v`
+  的尺寸都在 create 时定死，事后改要么重分配丢掉训练好的权重，要么静默越界；Python 侧
+  `num_kv_heads` 同样是构造参数，所以 C 侧用第二个构造函数。
+- **nucleus 采样**：`llm_generate` 只是一行委托 `llm_generate_p(..., 1.0, ...)`；`top_p >= 1.0`
+  时那段代码**整块跳过**（不多抽一次随机数、不做额外运算），这才是"默认逐位一致"的原因，
+  而不是"数值上恰好相等"。
+
 ### 读参考数据必须用 strtod，不能用 `fscanf("%lf")`
 
 msvcrt 的 `scanf("%lf")` 对某些 17 位十进制串会**解析错 1 ULP**（实测
@@ -254,4 +317,8 @@ GCC 默认 `-ffp-contract=fast`，在支持 FMA 的机器上 `s += W*x` 可能�
 - 注意力**权重** dropout 尚未在 C 侧实现（`MultiHeadAttention.dropout_p` 只保存，Python 版已实现并在固定 mask 下做过梯度校验）
 - `attention.c` 自带的私有 `TfLayerNorm` / `TfDropout` 待与 `layers_norm.h` 统一（见"已知差异"）
 - 跨语言等价性比对已覆盖归一化 / 卷积 / LLM，RNN 与注意力还缺参考数据导出
+- 扩展特性（滑动窗口 / RoPE / GQA / nucleus 采样）目前只有 C 侧自测，可以再补 `llm_reference.py`
+  的导出，把**默认路径之外**的配置也纳入逐位比对
+- C 侧没有 Python 的 `_generate_cached` / `forward_step` 增量 KV cache，生成每步整段重算——
+  正确但慢（O(T²) 每步），补 KV cache 是下一个数量级的提速点
 - 未做 SIMD / OpenMP（本机 gcc 支持 `-fopenmp`），大矩阵还有数倍空间
