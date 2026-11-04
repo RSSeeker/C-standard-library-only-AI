@@ -106,6 +106,20 @@ typedef struct {
     double rope_base;       /* RoPE 频率基数（默认 10000.0，与 Python 的 rope_base 一致） */
     double *rope_freq;      /* (d_k/2) 预计算频率 1/(base^(2i/d_k))；仅 rope 打开时使用 */
 
+    /* ---------- 增量推理（KV cache，单 token 前向）----------
+     * 只用于生成，不参与反向：cache 存每个 KV 头在窗口内的 K/V 与已写入位置。
+     * 位置是「**当前窗口内**的位置」（0..cache_pos-1），与 llm_generate 每次把
+     * 窗口当作位置 0..T-1 重算的语义一致；窗口滑动后必须 mha_cache_reset 再重建。
+     * K 存的是**施加 RoPE 之后**的值（与 Python 的 forward_step 先旋转再 append 一致）。 */
+    int cache_pos;          /* 已写入的 token 数（下一个 token 的窗口内位置） */
+    double *cache_K;        /* (num_kv_heads, max_seq_len, d_k) */
+    double *cache_V;        /* (num_kv_heads, max_seq_len, d_k) */
+    double *step_q;         /* (d_model) 单步投影临时 */
+    double *step_k;         /* (kv_dim) */
+    double *step_v;         /* (kv_dim) */
+    double *step_scores;    /* (max_seq_len) 单步注意力分数 */
+    double *step_head;      /* (d_model) 各头输出拼回 */
+
     /* 参数（行主序）：W_q / W_o 为 (d_model, d_model)，按 Python 的 self.W_?[j][i] 展平；
      * W_k / W_v 为 (kv_dim, d_model) —— 默认 kv_dim == d_model 时就是 (d_model, d_model) */
     double *W_q, *W_k, *W_v, *W_o;
@@ -182,6 +196,15 @@ void mha_set_params(MultiHeadAttention *m,
                     const double *W_v, const double *b_v,
                     const double *W_o, const double *b_o);
 int  mha_param_count(const MultiHeadAttention *m);
+/* 清空增量缓存（生成开始前 / 窗口滑动后重建 cache 时调用） */
+void mha_cache_reset(MultiHeadAttention *m);
+/* 单 token 增量前向（推理专用，不写反向缓存）：x_t 长度 d_model → out_t 长度 d_model。
+ * 语义照抄 Python 的 MultiHeadAttention.forward_step：q/k/v 投影逐行 Neumaier 点积，
+ * K/V 追加进第 kv_head 个缓存槽，scores 只对 0..cache_pos 个已见位置计算，
+ * 窗口（window > 0）外更早的位置置 -inf。调用顺序必须是 pos = 0,1,2,...；
+ * eval 模式下与 mha_forward(整个窗口) 的最后一行逐位相同（见 tests/test_llm_cache.c）。
+ * 注意：本函数不做 dropout（与 Python 的 forward_step 一致），只在 eval 语义下有意义。 */
+void mha_forward_step(MultiHeadAttention *m, const double *x_t, double *out_t);
 /* 包装成 tensor.h 的 Module（供 Sequential / ResidualBlock 使用）。
  * 所有权：包装器接管 m，module_free() 会连同底层一起释放；不要重复 free。 */
 Module *mha_module(MultiHeadAttention *m);
@@ -204,12 +227,15 @@ typedef struct {
     double *x;      /* (T, d_model) 输入副本 */
     double *h;      /* (T, d_ff) 缓存（ReLU 之后的激活，Python 的 self.h） */
     double *dh;     /* (T, d_ff) 反向缓冲 */
+    double *step_h; /* (d_ff) 单 token 前向的 ReLU 临时（不碰上面的整段缓存） */
 } FeedForward;
 
 FeedForward *ff_create(int d_model, int d_ff, int max_seq_len);
 void ff_free(FeedForward *f);
 void ff_zero_grad(FeedForward *f);
 void ff_forward(FeedForward *f, const Tensor *x, Tensor *out);
+/* 单 token 前向：x_t 长度 d_model → out_t 长度 d_model（与 ff_forward 的单行同序） */
+void ff_forward_step(FeedForward *f, const double *x_t, double *out_t);
 void ff_backward(FeedForward *f, const Tensor *dout, Tensor *dx);
 void ff_set_params(FeedForward *f, const double *W1, const double *b1,
                    const double *W2, const double *b2);
@@ -251,6 +277,10 @@ void tel_free(TransformerEncoderLayer *l);
 void tel_set_causal(TransformerEncoderLayer *l, int causal);
 void tel_zero_grad(TransformerEncoderLayer *l);
 void tel_forward(TransformerEncoderLayer *l, const Tensor *x, Tensor *out);
+/* 单 token 增量前向（eval 语义，不走 dropout）：x_t → out_t，长度都是 d_model。
+ * 与 tel_forward 的最后一行逐位相同（前提：KV cache 已按 pos=0,1,... 顺序填好）。 */
+void tel_cache_reset(TransformerEncoderLayer *l);
+void tel_forward_step(TransformerEncoderLayer *l, const double *x_t, double *out_t);
 void tel_backward(TransformerEncoderLayer *l, const Tensor *dout, Tensor *dx);
 /* 用累积梯度做一次 SGD：param -= lr * grad（对应 Python 的 TransformerEncoderLayer.sgd_step） */
 void tel_sgd_step(TransformerEncoderLayer *l, double lr);
@@ -269,6 +299,8 @@ typedef struct {
     TransformerEncoderLayer **layers;
     Tensor *buf_a;  /* (T, d_model) 乒乓缓冲 */
     Tensor *buf_b;
+    double *step_a; /* (d_model) 单 token 乒乓缓冲（增量前向用） */
+    double *step_b;
 } TransformerEncoder;
 
 TransformerEncoder *te_create(int d_model, int num_heads, int d_ff, int num_layers,
@@ -278,6 +310,9 @@ void te_free(TransformerEncoder *e);
 void te_set_causal(TransformerEncoder *e, int causal);
 void te_zero_grad(TransformerEncoder *e);
 void te_forward(TransformerEncoder *e, const Tensor *x, Tensor *out);
+/* 单 token 增量前向：清空全部层的 KV cache / 逐层单步前向（x_t、out_t 长度都是 d_model） */
+void te_cache_reset(TransformerEncoder *e);
+void te_forward_step(TransformerEncoder *e, const double *x_t, double *out_t);
 void te_backward(TransformerEncoder *e, const Tensor *dout, Tensor *dx);
 void te_sgd_step(TransformerEncoder *e, double lr);
 void te_set_train(TransformerEncoder *e, int train);

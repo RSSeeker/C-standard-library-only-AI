@@ -385,6 +385,19 @@ MultiHeadAttention *mha_create_gqa(int d_model, int num_heads, int num_kv_heads,
     m->head_out = xmalloc(hT * m->d_k * sizeof(double));
     m->concat = xmalloc(T * d1 * sizeof(double));
 
+    /* 增量推理缓存：KV 头 × 窗口长度 × d_k；默认 kv_dim == d_model，尺寸按 kv 头算，
+     * GQA 时同比例变小（与 Python 的 KV cache 宽度一致）。 */
+    m->cache_K = xmalloc((size_t)m->kv_dim * T * sizeof(double));
+    m->cache_V = xmalloc((size_t)m->kv_dim * T * sizeof(double));
+    memset(m->cache_K, 0, (size_t)m->kv_dim * T * sizeof(double));
+    memset(m->cache_V, 0, (size_t)m->kv_dim * T * sizeof(double));
+    m->cache_pos = 0;
+    m->step_q = xmalloc(d1 * sizeof(double));
+    m->step_k = xmalloc(kvd * sizeof(double));
+    m->step_v = xmalloc(kvd * sizeof(double));
+    m->step_scores = xmalloc(T * sizeof(double));
+    m->step_head = xmalloc(d1 * sizeof(double));
+
     m->d_concat = xmalloc(T * d1 * sizeof(double));
     m->d_head = xmalloc(hT * m->d_k * sizeof(double));
     m->d_scores = xmalloc(hTT * sizeof(double));
@@ -434,6 +447,9 @@ void mha_free(MultiHeadAttention *m)
     xfree(m->d_concat); xfree(m->d_head); xfree(m->d_scores);
     xfree(m->dQ); xfree(m->dK); xfree(m->dV);
     xfree(m->dQ_full); xfree(m->dK_full); xfree(m->dV_full); xfree(m->tmp);
+    xfree(m->cache_K); xfree(m->cache_V);
+    xfree(m->step_q); xfree(m->step_k); xfree(m->step_v);
+    xfree(m->step_scores); xfree(m->step_head);
     xfree(m->rope_freq);
     xfree(m);
 }
@@ -542,6 +558,86 @@ static void rope_rotate(double *vec, int dk, int pos, double sign, const double 
         vec[i] = x0 * c - x1 * s;
         vec[i + half] = x0 * s + x1 * c;
     }
+}
+
+/* ================= 增量推理：KV cache + 单 token 前向 =================
+ * 严格照 Python 的 MultiHeadAttention.forward_step 逐项实现：
+ *   - q/k/v 投影逐行 dot_neumaier（与整段前向的 mm_nt 同序）；
+ *   - K 先做 RoPE 再进 cache（Python 也是先旋转再 append）；
+ *   - 只对已见位置 0..pos 打分，window>0 时更早的位置置 -inf；
+ *   - 注意力输出 sum_j attn[j] * V[j][c] 沿 j 升序补偿求和。
+ * 因此 eval 模式下每一步的 logits 与整段重算的最后一行逐位相同（测试见
+ * tests/test_llm_cache.c）。本路径不写反向缓存、不做 dropout。 */
+
+void mha_cache_reset(MultiHeadAttention *m)
+{
+    if (!m) {
+        fprintf(stderr, "mha_cache_reset: m 为 NULL\n");
+        exit(1);
+    }
+    m->cache_pos = 0;
+}
+
+void mha_forward_step(MultiHeadAttention *m, const double *x_t, double *out_t)
+{
+    if (!x_t || !out_t) {
+        fprintf(stderr, "mha_forward_step: x_t / out_t 为 NULL\n");
+        exit(1);
+    }
+    const int d = m->d_model, h = m->num_heads, dk = m->d_k, kvd = m->kv_dim;
+    const int pos = m->cache_pos;
+    if (pos < 0 || pos >= m->max_seq_len) {
+        fprintf(stderr, "mha_forward_step: cache 已满（pos=%d, max_seq_len=%d），需要先 mha_cache_reset\n",
+                pos, m->max_seq_len);
+        exit(1);
+    }
+
+    /* 投影：与 mha_forward 的 mm_nt 完全同序（Neumaier 点积 + 偏置） */
+    for (int j = 0; j < d; j++)
+        m->step_q[j] = dot_neumaier(x_t, m->W_q + (size_t)j * d, d) + m->b_q[j];
+    for (int j = 0; j < kvd; j++) {
+        m->step_k[j] = dot_neumaier(x_t, m->W_k + (size_t)j * d, d) + m->b_k[j];
+        m->step_v[j] = dot_neumaier(x_t, m->W_v + (size_t)j * d, d) + m->b_v[j];
+    }
+
+    /* 写 KV cache：K 存旋转后的值；同一 KV 组内的 Q 头共享这份 K/V。 */
+    for (int kvh = 0; kvh < m->num_kv_heads; kvh++) {
+        double *kc = m->cache_K + ((size_t)kvh * m->max_seq_len + pos) * dk;
+        double *vc = m->cache_V + ((size_t)kvh * m->max_seq_len + pos) * dk;
+        memcpy(kc, m->step_k + (size_t)kvh * dk, (size_t)dk * sizeof(double));
+        memcpy(vc, m->step_v + (size_t)kvh * dk, (size_t)dk * sizeof(double));
+        if (m->rope) rope_rotate(kc, dk, pos, 1.0, m->rope_freq);
+    }
+
+    const double scale = 1.0 / sqrt((double)dk);
+    for (int head = 0; head < h; head++) {
+        const int off = head * dk;
+        const int kvh = head / m->kv_group;
+        const double *kc = m->cache_K + (size_t)kvh * m->max_seq_len * dk;
+        const double *vc = m->cache_V + (size_t)kvh * m->max_seq_len * dk;
+        double *qh = m->step_q + off;
+        if (m->rope) rope_rotate(qh, dk, pos, 1.0, m->rope_freq);
+
+        double *sc = m->step_scores;
+        for (int j = 0; j <= pos; j++)
+            sc[j] = dot_neumaier(qh, kc + (size_t)j * dk, dk) * scale;
+        if (m->window > 0) {
+            int lo = pos - m->window + 1;
+            if (lo < 0) lo = 0;
+            for (int j = 0; j < lo; j++) sc[j] = -INFINITY;
+        }
+        softmax_row_inplace(sc, pos + 1);
+
+        /* attn @ V 的每一列：沿已见位置 j 升序（与 mm_nn 的 dot_strided 同序） */
+        double *ho = m->step_head + off;
+        for (int c = 0; c < dk; c++)
+            ho[c] = dot_strided(sc, 1, vc + c, dk, pos + 1);
+    }
+
+    for (int j = 0; j < d; j++)
+        out_t[j] = dot_neumaier(m->step_head, m->W_o + (size_t)j * d, d) + m->b_o[j];
+
+    m->cache_pos = pos + 1;
 }
 
 void mha_forward(MultiHeadAttention *m, const Tensor *x, Tensor *out)
@@ -807,6 +903,7 @@ FeedForward *ff_create(int d_model, int d_ff, int max_seq_len)
     f->x = xmalloc(T * d_model * sizeof(double));
     f->h = xmalloc(T * d_ff * sizeof(double));
     f->dh = xmalloc(T * d_ff * sizeof(double));
+    f->step_h = xmalloc((size_t)d_ff * sizeof(double));
 
     /* 与 Python 一致：W1 ~ N(0, sqrt(2/d_model))，W2 ~ N(0, sqrt(2/d_ff)) */
     unsigned long long rng = 0x13198A2E03707344ULL;
@@ -832,7 +929,7 @@ void ff_free(FeedForward *f)
     if (!f) return;
     xfree(f->W1); xfree(f->b1); xfree(f->W2); xfree(f->b2);
     xfree(f->grad_W1); xfree(f->grad_b1); xfree(f->grad_W2); xfree(f->grad_b2);
-    xfree(f->x); xfree(f->h); xfree(f->dh);
+    xfree(f->x); xfree(f->h); xfree(f->dh); xfree(f->step_h);
     xfree(f);
 }
 
@@ -885,6 +982,23 @@ void ff_forward(FeedForward *f, const Tensor *x, Tensor *out)
     mm_nt(f->h, dff, f->W2, dff, out->data, dm, T, dff, dm);
     for (int t = 0; t < T; t++)
         for (int j = 0; j < dm; j++) out->data[(size_t)t * dm + j] += f->b2[j];
+}
+
+/* 单 token 前向：逐步对应 ff_forward 的 T == 1 情形，用 step_h 做 ReLU 临时，
+ * 不覆盖 f->x / f->h / f->dh（生成时即使之后要反向也不会读错缓存）。 */
+void ff_forward_step(FeedForward *f, const double *x_t, double *out_t)
+{
+    if (!x_t || !out_t) {
+        fprintf(stderr, "ff_forward_step: x_t / out_t 为 NULL\n");
+        exit(1);
+    }
+    const int dm = f->d_model, dff = f->d_ff;
+    for (int j = 0; j < dff; j++) {
+        double v = dot_neumaier(x_t, f->W1 + (size_t)j * dm, dm) + f->b1[j];
+        f->step_h[j] = (v > 0.0) ? v : 0.0;
+    }
+    for (int j = 0; j < dm; j++)
+        out_t[j] = dot_neumaier(f->step_h, f->W2 + (size_t)j * dff, dff) + f->b2[j];
 }
 
 void ff_backward(FeedForward *f, const Tensor *dout, Tensor *dx)
@@ -1021,6 +1135,38 @@ void tel_forward(TransformerEncoderLayer *l, const Tensor *x, Tensor *out)
         tfln_forward_row(&l->ln2, t, l->buf2 + (size_t)t * d, out->data + (size_t)t * d);
 }
 
+/* ================= 单 token 增量前向（推理） =================
+ * 与 tel_forward 一一对应，只是 T == 1：attn → dropout1（eval 恒等）→ res1 → LN1
+ * → FFN → dropout2（eval 恒等）→ res2 → LN2。Python 的 forward_step 本身也不做
+ * dropout，所以生成路径在 eval 模式下与整段前向的最后一行逐位相同。
+ * x_t 与 out_t 可以相同（out_t 在最后一步才写），但不能是 l->buf1。 */
+
+void tel_cache_reset(TransformerEncoderLayer *l)
+{
+    if (!l) {
+        fprintf(stderr, "tel_cache_reset: l 为 NULL\n");
+        exit(1);
+    }
+    mha_cache_reset(l->self_attn);
+}
+
+void tel_forward_step(TransformerEncoderLayer *l, const double *x_t, double *out_t)
+{
+    if (!x_t || !out_t) {
+        fprintf(stderr, "tel_forward_step: x_t / out_t 为 NULL\n");
+        exit(1);
+    }
+    const int d = l->d_model;
+    double *attn_out = l->buf1;   /* 单行，长度 d */
+
+    mha_forward_step(l->self_attn, x_t, attn_out);
+    for (int j = 0; j < d; j++) attn_out[j] += x_t[j];   /* res1 */
+    tfln_forward_row(&l->ln1, 0, attn_out, l->buf2);     /* buf2 = ln1_out */
+    ff_forward_step(l->ffn, l->buf2, l->buf3);           /* buf3 = ffn_out */
+    for (int j = 0; j < d; j++) l->buf2[j] += l->buf3[j];/* res2 */
+    tfln_forward_row(&l->ln2, 0, l->buf2, out_t);        /* out = ln2(res2) */
+}
+
 void tel_backward(TransformerEncoderLayer *l, const Tensor *dout, Tensor *dx)
 {
     const int d = l->d_model;
@@ -1146,6 +1292,8 @@ TransformerEncoder *te_create(int d_model, int num_heads, int d_ff, int num_laye
     dims[0] = max_seq_len; dims[1] = d_model;
     e->buf_a = tensor_new(2, dims);
     e->buf_b = tensor_new(2, dims);
+    e->step_a = xmalloc((size_t)d_model * sizeof(double));
+    e->step_b = xmalloc((size_t)d_model * sizeof(double));
     return e;
 }
 
@@ -1156,6 +1304,7 @@ void te_free(TransformerEncoder *e)
     xfree(e->layers);
     tensor_free(e->buf_a);
     tensor_free(e->buf_b);
+    xfree(e->step_a); xfree(e->step_b);
     xfree(e);
 }
 
@@ -1210,6 +1359,36 @@ void te_forward(TransformerEncoder *e, const Tensor *x, Tensor *out)
         cur = v;
     }
     tel_forward(e->layers[e->num_layers - 1], cur, out);
+}
+
+/* 单 token 增量前向：逐层单步，层间用 step_a/step_b 乒乓（与 te_forward 的
+ * buf_a/buf_b 布局对应）。x_t 与 out_t 可以相同。 */
+void te_cache_reset(TransformerEncoder *e)
+{
+    if (!e) {
+        fprintf(stderr, "te_cache_reset: e 为 NULL\n");
+        exit(1);
+    }
+    for (int i = 0; i < e->num_layers; i++) tel_cache_reset(e->layers[i]);
+}
+
+void te_forward_step(TransformerEncoder *e, const double *x_t, double *out_t)
+{
+    if (!e || !x_t || !out_t) {
+        fprintf(stderr, "te_forward_step: e / x_t / out_t 为 NULL\n");
+        exit(1);
+    }
+    if (e->num_layers == 1) {
+        tel_forward_step(e->layers[0], x_t, out_t);
+        return;
+    }
+    const double *cur = x_t;
+    for (int i = 0; i < e->num_layers - 1; i++) {
+        double *dst = (i % 2 == 0) ? e->step_a : e->step_b;
+        tel_forward_step(e->layers[i], cur, dst);
+        cur = dst;
+    }
+    tel_forward_step(e->layers[e->num_layers - 1], cur, out_t);
 }
 
 void te_backward(TransformerEncoder *e, const Tensor *dout, Tensor *dx)

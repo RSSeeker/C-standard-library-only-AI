@@ -187,6 +187,37 @@ Conv2d（两种配置的 forward/grad_w/grad_b/dx）、MaxPool2d（两种配置�
 不可能更小——这是浮点性质，不是实现误差。[4] 的 GQA 训练冒烟用 `lr=0.002`：损失取
 `0.5*||out||²` 时步长上界是 `2/λmax`，`lr=0.05` 会直接发散到 nan（不是 bug）。
 
+### 7. 增量 KV cache 生成（`tests/test_llm_cache.c`）
+
+`llm_generate` / `llm_generate_p` 每生成一个 token 都把整个窗口重算一遍（O(T²)）。
+新增的 `llm_generate_cached` 走增量路径：预填充一次，之后每个新 token 只做一次单 token 前向
+（`llm_forward_step`，内部是各层的 `te_forward_step` / `tel_forward_step` / `mha_forward_step`），
+KV 存在每层的 `cache_K` / `cache_V` 里，位置取「当前窗口内下标」。
+
+- **默认行为不变**：老接口原样保留；新接口是 `llm_cache_reset` / `llm_forward_step` /
+  `llm_generate_cached` 三个新函数。`llm_generate_p` 只是把采样部分抽成 `sample_row` 供两条路径共用
+  （同一份 top_k / top_p / 温度 / RNG 消耗顺序），原有数值路径未改。
+- **逐位相同**：`./tests/test_llm_cache` 共 368 项检查、0 失败，容差 0。覆盖
+  `max_len` = 20/16/8/5/4（生成长度 16，即大于/等于/小于三种情形）× 绝对位置编码/RoPE，
+  每一步的 logits 都与 `llm_forward` 对当前窗口的整段重算逐位对照；token 序列另在
+  5 种 `max_len` × 2 种位置编码 × 5 组采样参数（贪心、top_k=3、top_p=0.9×2、top_k=5、
+  top_p=0.5、temperature=0.8/1.2）下与 `llm_generate_p` 完全一致，且同 seed 重复调用可复现。
+  窗口滑动时会重建 `max_len` 个 token 的 cache（与 Python `_generate_cached` 的重建分支一致），
+  这就是「位置重基」——重算路径每步也把窗口当位置 0..T-1，二者语义相同。
+- **实测加速比**（`clock()`，prompt 8 + 新增 40，d_model=32，heads=4，d_ff=64，贪心；
+  每项重复 20 次取平均）：
+
+  | 层数 | max_len | 重算 | cached | 加速 |
+  |---|---|---|---|---|
+  | 2 | 64（不滑动） | 56.700 ms | 2.800 ms | **20.25×** |
+  | 4 | 64（不滑动） | 99.950 ms | 4.800 ms | **20.82×** |
+  | 2 | 16（每步都滑动） | 24.300 ms | 21.150 ms | 1.15× |
+  | 4 | 16（每步都滑动） | 44.950 ms | 41.000 ms | 1.10× |
+
+  加速比与 Python 侧报告的 17.8× 同量级。窗口远大于生成长度时收益最大；`max_len` 等于窗口、
+  每步都触发重建时，增量路径也要重算 `max_len` 个 token（单 token 前向的循环开销还略高于
+  批量 `mm_nt`），所以只剩 ~1.1×——这是算法本身的性质，不是退化 bug。
+
 ---
 
 ## 移植过程中在 Python 版发现的 bug

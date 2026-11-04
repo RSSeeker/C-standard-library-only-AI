@@ -548,6 +548,69 @@ int llm_generate(CausalLM *m, const int *prompt, int prompt_len, int max_new,
     return llm_generate_p(m, prompt, prompt_len, max_new, temperature, top_k, 1.0, out, seed);
 }
 
+/* 从一行 logits 采样一个 token：top_k → 温度缩放 → top_p（nucleus）→ softmax →
+ * 逆变换采样。会就地改写 row（调用方传入 m->tmp_row），并消耗一次 rng。
+ * 这段逻辑原先内联在 llm_generate_p 里；抽出来是为了让 llm_generate_cached 复用
+ * 完全相同的采样顺序（两者逐位一致的另一个前提）。 */
+static int sample_row(CausalLM *m, double *row, double temperature, int top_k,
+                      double top_p, unsigned long long *rng)
+{
+    const int V = m->vocab_size;
+
+    if (top_k > 0 && top_k < V) {
+        /* 只保留最大的 top_k 个，其余置 -INFINITY（等价于 Python 的 sorted + keep） */
+        for (int v = 0; v < V; v++) {
+            int rank = 0;
+            for (int u = 0; u < V; u++) {
+                if (row[u] > row[v] || (row[u] == row[v] && u < v)) rank++;
+            }
+            if (rank >= top_k) row[v] = -INFINITY;
+        }
+    }
+    for (int v = 0; v < V; v++) row[v] = row[v] / temperature;
+
+    if (top_p < 1.0) {
+        /* nucleus 采样（Python 的 CausalLM._sample 中 top_p < 1 的分支）：
+         * 1) 用同一个温度缩放的 logits 算出原始概率 probs_raw；
+         * 2) 按概率降序（并列时小下标在前）累加，取累积刚达到 top_p 的最小集合；
+         * 3) 集合外的位置置 -INFINITY，随后照常重新 softmax 再采样。
+         * 复用 m->probs 当 probs_raw 缓冲（生成路径不跑反向，不会冲突）。 */
+        double *probs_raw = m->probs;
+        memcpy(probs_raw, row, (size_t)V * sizeof(double));
+        softmax_row_inplace(probs_raw, V);
+        for (int v = 0; v < V; v++) m->keep[v] = 0;
+        double acc_p = 0.0;
+        for (int k = 0; k < V; k++) {
+            /* 每轮取「尚未保留、概率最大」的 token；相等时保留下标更小的那个 ——
+             * 与 Python 的 sorted(..., reverse=True)（稳定排序）顺序一致。 */
+            int best_v = -1;
+            double best_p = 0.0;
+            for (int v = 0; v < V; v++) {
+                if (m->keep[v]) continue;
+                if (best_v < 0 || probs_raw[v] > best_p) { best_v = v; best_p = probs_raw[v]; }
+            }
+            if (best_v < 0) break;   /* 理论上不会发生 */
+            m->keep[best_v] = 1;
+            acc_p += best_p;
+            if (acc_p >= top_p) break;
+        }
+        for (int v = 0; v < V; v++) {
+            if (!m->keep[v]) row[v] = -INFINITY;
+        }
+    }
+
+    softmax_row_inplace(row, V);
+
+    double u = rng_uniform(rng);
+    double acc = 0.0;
+    int pick = V - 1;
+    for (int v = 0; v < V; v++) {
+        acc += row[v];
+        if (u < acc) { pick = v; break; }
+    }
+    return pick;
+}
+
 int llm_generate_p(CausalLM *m, const int *prompt, int prompt_len, int max_new,
                    double temperature, int top_k, double top_p, int *out,
                    unsigned long long seed)
@@ -593,58 +656,137 @@ int llm_generate_p(CausalLM *m, const int *prompt, int prompt_len, int max_new,
         double *row = m->tmp_row;
         memcpy(row, last, (size_t)V * sizeof(double));
 
-        if (top_k > 0 && top_k < V) {
-            /* 只保留最大的 top_k 个，其余置 -INFINITY（等价于 Python 的 sorted + keep） */
-            for (int v = 0; v < V; v++) {
-                int rank = 0;
-                for (int u = 0; u < V; u++) {
-                    if (row[u] > row[v] || (row[u] == row[v] && u < v)) rank++;
-                }
-                if (rank >= top_k) row[v] = -INFINITY;
-            }
-        }
-        for (int v = 0; v < V; v++) row[v] = row[v] / temperature;
-
-        if (top_p < 1.0) {
-            /* nucleus 采样（Python 的 CausalLM._sample 中 top_p < 1 的分支）：
-             * 1) 用同一个温度缩放的 logits 算出原始概率 probs_raw；
-             * 2) 按概率降序（并列时小下标在前）累加，取累积刚达到 top_p 的最小集合；
-             * 3) 集合外的位置置 -INFINITY，随后照常重新 softmax 再采样。
-             * 复用 m->probs 当 probs_raw 缓冲（生成路径不跑反向，不会冲突）。 */
-            double *probs_raw = m->probs;
-            memcpy(probs_raw, row, (size_t)V * sizeof(double));
-            softmax_row_inplace(probs_raw, V);
-            for (int v = 0; v < V; v++) m->keep[v] = 0;
-            double acc_p = 0.0;
-            for (int k = 0; k < V; k++) {
-                /* 每轮取「尚未保留、概率最大」的 token；相等时保留下标更小的那个 ——
-                 * 与 Python 的 sorted(..., reverse=True)（稳定排序）顺序一致。 */
-                int best_v = -1;
-                double best_p = 0.0;
-                for (int v = 0; v < V; v++) {
-                    if (m->keep[v]) continue;
-                    if (best_v < 0 || probs_raw[v] > best_p) { best_v = v; best_p = probs_raw[v]; }
-                }
-                if (best_v < 0) break;   /* 理论上不会发生 */
-                m->keep[best_v] = 1;
-                acc_p += best_p;
-                if (acc_p >= top_p) break;
-            }
-            for (int v = 0; v < V; v++) {
-                if (!m->keep[v]) row[v] = -INFINITY;
-            }
-        }
-
-        softmax_row_inplace(row, V);
-
-        double u = rng_uniform(&rng);
-        double acc = 0.0;
-        int pick = V - 1;
-        for (int v = 0; v < V; v++) {
-            acc += row[v];
-            if (u < acc) { pick = v; break; }
-        }
+        int pick = sample_row(m, row, temperature, top_k, top_p, &rng);
         ids[len++] = pick;
+    }
+
+    memcpy(out, ids, (size_t)len * sizeof(int));
+    free(ids);
+    return len;
+}
+
+/* ---------------------- 增量 KV cache 生成 ----------------------
+ * 与 llm_generate_p 的采样顺序完全相同，只是把「每步对整段窗口重算」换成
+ * 「预填充一次 + 每个新 token 一次单 token 前向」。窗口滑动时位置整体左移，
+ * 增量 cache 无法原地续用，于是按新窗口重建（Python _generate_cached 同样如此）。
+ * 因此结果（token 序列与每步 logits）与 llm_generate_p 逐位相同。 */
+
+void llm_cache_reset(CausalLM *m)
+{
+    if (!m) {
+        fprintf(stderr, "llm_cache_reset: m 为 NULL\n");
+        exit(1);
+    }
+    te_cache_reset(m->enc);
+}
+
+void llm_forward_step(CausalLM *m, int token, int pos, double *logits)
+{
+    if (!m || !logits) {
+        fprintf(stderr, "llm_forward_step: m / logits 为 NULL\n");
+        exit(1);
+    }
+    const int d = m->d_model, V = m->vocab_size;
+    if (token < 0 || token >= V) {
+        fprintf(stderr, "llm_forward_step: token=%d 越界 [0, %d)\n", token, V);
+        exit(1);
+    }
+    if (pos < 0 || pos >= m->max_len) {
+        fprintf(stderr, "llm_forward_step: pos=%d 越界 [0, %d)\n", pos, m->max_len);
+        exit(1);
+    }
+    /* cache 必须正好走到 pos：调用方要先 llm_cache_reset 再按 0,1,2,... 喂 token。
+     * 这个断言能立刻抓住「窗口滑动后忘了重建」这类错误。 */
+    const int cache_pos = m->enc->layers[0]->self_attn->cache_pos;
+    if (cache_pos != pos) {
+        fprintf(stderr, "llm_forward_step: cache_pos=%d 与 pos=%d 不一致"
+                        "（需要先 llm_cache_reset 并按顺序喂 token）\n", cache_pos, pos);
+        exit(1);
+    }
+
+    /* x = embedding[token] (+ 绝对位置编码[pos])；RoPE 模式不加绝对 PE，
+     * 位置由各层 MHA 的 cache_pos 决定。 */
+    double *x = m->x_buf->data;   /* 只用第 0 行（长度 d） */
+    const double *row = m->emb->weight + (size_t)token * d;
+    if (m->use_abs_pos) {
+        const double *pe = m->pe->pe + (size_t)pos * d;
+        for (int j = 0; j < d; j++) x[j] = row[j] + pe[j];
+    } else {
+        memcpy(x, row, (size_t)d * sizeof(double));
+    }
+
+    double *h = m->h_buf->data;   /* 第 0 行 */
+    te_forward_step(m->enc, x, h);
+
+    for (int v = 0; v < V; v++)
+        logits[v] = dot_neumaier(h, m->W_out + (size_t)v * d, d) + m->b_out[v];
+}
+
+int llm_generate_cached(CausalLM *m, const int *prompt, int prompt_len, int max_new,
+                        double temperature, int top_k, double top_p, int *out,
+                        unsigned long long seed)
+{
+    if (!prompt || prompt_len < 1) {
+        fprintf(stderr, "llm_generate_cached: prompt 不能为空\n");
+        exit(1);
+    }
+    if (max_new < 0) {
+        fprintf(stderr, "llm_generate_cached: max_new 不能为负（收到 %d）\n", max_new);
+        exit(1);
+    }
+    if (!(temperature > 0.0)) {
+        fprintf(stderr, "llm_generate_cached: temperature 必须 > 0（收到 %g）\n", temperature);
+        exit(1);
+    }
+    if (!(top_p > 0.0) || top_p > 1.0) {
+        fprintf(stderr, "llm_generate_cached: top_p 必须在 (0, 1] 内（收到 %g）\n", top_p);
+        exit(1);
+    }
+    check_ids(m, prompt, prompt_len, "llm_generate_cached");
+    if (prompt_len > m->max_len) {
+        fprintf(stderr, "llm_generate_cached: prompt 长度 %d 超过 max_len=%d\n",
+                prompt_len, m->max_len);
+        exit(1);
+    }
+    const int V = m->vocab_size;
+    int *ids = xmalloc((size_t)(prompt_len + max_new) * sizeof(int));
+    memcpy(ids, prompt, (size_t)prompt_len * sizeof(int));
+    int len = prompt_len;
+
+    unsigned long long rng = seed;
+    llm_set_train(m, 0);
+
+    double *logits = m->logits_buf->data;   /* 第 0 行，长度 V */
+
+    /* 预填充：只喂当前窗口（prompt 长于 max_len 时取最后 max_len 个） */
+    int start = prompt_len > m->max_len ? prompt_len - m->max_len : 0;
+    const int T0 = prompt_len - start;
+    llm_cache_reset(m);
+    for (int i = 0; i < T0; i++)
+        llm_forward_step(m, ids[start + i], i, logits);
+    int pos = T0;
+
+    for (int step = 0; step < max_new; step++) {
+        double *row = m->tmp_row;
+        memcpy(row, logits, (size_t)V * sizeof(double));
+        int pick = sample_row(m, row, temperature, top_k, top_p, &rng);
+        ids[len++] = pick;
+
+        int new_start = len > m->max_len ? len - m->max_len : 0;
+        if (new_start == start) {
+            /* 窗口没滑：增量算新 token，位置就是窗口内下标 */
+            llm_forward_step(m, pick, pos, logits);
+            pos++;
+        } else {
+            /* 窗口左移一格：所有位置重编号，旧 cache 作废，按新窗口重建。
+             * 与 Python _generate_cached 的 new_window 重建分支一致。 */
+            start = new_start;
+            const int Tw = m->max_len;   /* 此时 len - start 恒等于 max_len */
+            llm_cache_reset(m);
+            for (int i = 0; i < Tw; i++)
+                llm_forward_step(m, ids[start + i], i, logits);
+            pos = Tw;
+        }
     }
 
     memcpy(out, ids, (size_t)len * sizeof(int));

@@ -131,6 +131,31 @@ int llm_generate_p(CausalLM *m, const int *prompt, int prompt_len, int max_new,
                    double temperature, int top_k, double top_p, int *out,
                    unsigned long long seed);
 
+/* ---------------- 增量 KV cache 生成（推理加速） ----------------
+ * 与 llm_generate_p 语义完全相同的另一条实现：预填充一次后用单 token 增量前向，
+ * 不再对整段窗口重算。逐位一致的保证：
+ *   - 采样逻辑与 llm_generate_p 共用同一个 sample_row（同样的 top_k / top_p /
+ *     温度 / RNG 消耗顺序）；
+ *   - 单 token 前向与整段前向的最后一行逐位相同（Neumaier 点积、同一 softmax）；
+ *   - 窗口滑动时按新窗口重建 cache（位置重基为 0..max_len-1），与重算路径一致。
+ * 代价：窗口滑动那一步要重建 max_len 个 token（与 Python _generate_cached 相同），
+ * 所以 max_len 远大于生成长度时收益最大。
+ * 默认行为不变：llm_generate / llm_generate_p 原样保留，本组函数是新入口。 */
+
+/* 清空所有层的 KV cache（生成开始 / 窗口重建前调用） */
+void llm_cache_reset(CausalLM *m);
+
+/* 单 token 前向：token 在窗口内的位置 pos，logits 写 V 个数。
+ * 调用约定：先 llm_cache_reset，再按 pos = 0,1,2,... 顺序调用；
+ * pos 必须等于内部 cache_pos（不匹配会报错退出，防止窗口滑动后忘记重建）。 */
+void llm_forward_step(CausalLM *m, int token, int pos, double *logits);
+
+/* 增量生成：参数与返回值同 llm_generate_p；out 容量 >= prompt_len + max_new。
+ * 与 llm_generate_p(prompt, ..., top_p, ...) 在 eval 模式下逐位相同。 */
+int llm_generate_cached(CausalLM *m, const int *prompt, int prompt_len, int max_new,
+                        double temperature, int top_k, double top_p, int *out,
+                        unsigned long long seed);
+
 /* 困惑度 = exp(平均交叉熵)，对应 Python 的 perplexity()；
  * 平均 loss > 700 时返回 INFINITY（避免 exp 溢出）。 */
 double llm_perplexity(CausalLM *m, const int *const *seqs, const int *lens, int nseq);
