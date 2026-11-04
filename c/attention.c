@@ -426,6 +426,15 @@ void mha_set_causal(MultiHeadAttention *m, int causal)
     m->causal = causal ? 1 : 0;
 }
 
+void mha_set_window(MultiHeadAttention *m, int window)
+{
+    if (!m) {
+        fprintf(stderr, "mha_set_window: m 为 NULL\n");
+        exit(1);
+    }
+    m->window = window > 0 ? window : 0;
+}
+
 void mha_set_params(MultiHeadAttention *m,
                     const double *W_q, const double *b_q,
                     const double *W_k, const double *b_k,
@@ -508,12 +517,20 @@ void mha_forward(MultiHeadAttention *m, const Tensor *x, Tensor *out)
         for (int i = 0; i < T * T; i++) attn[i] *= scale;
 
         /* 因果掩码：位置 t 只能看到 0..t，其余置 -INFINITY。
+         * 滑动窗口（window > 0）隐含因果：先无条件屏蔽未来，再把 t-window+1 之前的一并屏蔽
+         * （对应 Python 的 `if self.causal or self.window is not None` 分支）。
          * softmax 后这些位置恰为 0（exp(-inf - mx) == 0），因此反向完全不用改：
-         * d_scores = attn * (...) 在掩码处自然是 0。与 Python 的 causal 分支同序。 */
-        if (m->causal) {
+         * d_scores = attn * (...) 在掩码处自然是 0。 */
+        if (m->causal || m->window > 0) {
             for (int t = 0; t < T; t++) {
                 double *row = attn + (size_t)t * T;
                 for (int j = t + 1; j < T; j++) row[j] = -INFINITY;
+                if (m->window > 0) {
+                    /* j < t-window+1 的更早位置不可见；lo <= 0 时不用屏蔽 */
+                    const int lo = t - m->window + 1;
+                    const int end = lo > 0 ? lo : 0;
+                    for (int j = 0; j < end; j++) row[j] = -INFINITY;
+                }
             }
         }
 

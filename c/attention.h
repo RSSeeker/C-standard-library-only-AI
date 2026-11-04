@@ -98,6 +98,7 @@ typedef struct {
     int seq_len;            /* 最近一次 forward 的序列长度 */
     double dropout_p;       /* 注意力权重 dropout 的 p；C 侧只保存、mask 逻辑尚未移植 */
     int causal;             /* 1 = 因果掩码：位置 t 只能看到 0..t（自回归语言模型用） */
+    int window;             /* 滑动窗口：>0 时位置 t 只看最近 window 个位置（隐含因果）；0 = 关闭 */
 
     /* 参数（行主序）：W_? 为 (d_model, d_model)，按 Python 的 self.W_?[j][i] 展平 */
     double *W_q, *W_k, *W_v, *W_o;
@@ -135,6 +136,12 @@ typedef struct {
 MultiHeadAttention *mha_create(int d_model, int num_heads, int max_seq_len, double dropout_p);
 /* 打开/关闭因果掩码（默认关闭）。必须在 mha_forward 之前调用。 */
 void mha_set_causal(MultiHeadAttention *m, int causal);
+/* 滑动窗口（Mistral 式局部因果），对应 Python 的 window 参数。
+ * window >= 1：位置 t 只能看到 [t-window+1, t]，更早的一律屏蔽；window <= 0：关闭（默认）。
+ * 设了窗口就隐含因果 —— 未来位置无条件屏蔽，与 m->causal 的取值无关。
+ * 必须在 mha_forward 之前调用。C 侧没有 forward_step 增量路径（llm_generate 每次整段重算），
+ * 因此这里只影响 mha_forward 与（通过 attn 缓存隐含的）mha_backward。 */
+void mha_set_window(MultiHeadAttention *m, int window);
 void mha_free(MultiHeadAttention *m);
 void mha_zero_grad(MultiHeadAttention *m);
 /* x: (seq_len, d_model) → out: (seq_len, d_model) */
