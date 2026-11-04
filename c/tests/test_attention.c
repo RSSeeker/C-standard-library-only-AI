@@ -5,6 +5,8 @@
  *   1. MultiHeadAttention forward 形状 (seq_len, d_model) → (seq_len, d_model)
  *   2. MultiHeadAttention 的数值梯度（W_q/W_k/W_v/W_o/b_?/输入）中心差分校验
  *      —— 历史上的「整体转置」bug 就是靠这个查出来的
+ *   2b. 注意力权重 dropout：training=0 恒等、注入 mask 的语义（丢弃位置为 0、
+ *      保留位置 = 干净权重×1/(1-p)）、固定 mask 下 grad_W_v 的相对误差
  *   3. FeedForward 数值梯度 + 形状
  *   4. Sequential：前向串联顺序、反向逆序、参数量/清零/递归释放
  *   5. ResidualBlock：dx = dout + 子层输入梯度（有限差分验证）
@@ -47,6 +49,9 @@ static void check(const char *what, double worst, double tol)
     if (!ok) g_fail++;
     printf("  %-30s 最大误差 %.3e  %s\n", what, worst, ok ? "[OK]" : "[超出容差]");
 }
+
+/* 定义在第 [11] 节附近；提前声明，供第 2b 节使用 */
+static double max_abs_diff(const double *a, const double *b, int n);
 
 /* 确定性「伪随机」填充：不用 rand()，保证每次运行、每个平台结果一致 */
 static double deter(int i, double scale)
@@ -250,6 +255,189 @@ static void test_mha(void)
 
     tensor_free(x); tensor_free(out); tensor_free(coef); tensor_free(dx);
     mha_free(m);
+}
+
+/* --------------------- 2b. 注意力权重 dropout --------------------- */
+
+/* 相对误差版中心差分：题目要求固定 mask 下 grad_W_v 的相对误差 < 1e-5。
+ * 分母取 |解析| 与 |数值| 的较大者，并同时打印绝对误差 —— 若个别元素接近 0，
+ * 绝对误差能说明是不是分母太小放大了相对误差，而不是梯度真的错了。 */
+static void fd_check_rel(const char *what, double *p, const double *analytic, int n,
+                         double (*loss)(void *), void *ctx)
+{
+    const double rel_tol = 1e-5;
+    double worst_abs = 0.0, worst_rel = 0.0;
+    int at = -1;
+    for (int i = 0; i < n; i++) {
+        double saved = p[i];
+        p[i] = saved + g_eps;
+        double lp = loss(ctx);
+        p[i] = saved - g_eps;
+        double lm = loss(ctx);
+        p[i] = saved;
+        double num = (lp - lm) / (2.0 * g_eps);
+        double abs_err = fabs(num - analytic[i]);
+        if (abs_err > worst_abs) worst_abs = abs_err;
+        double denom = fmax(fabs(num), fabs(analytic[i]));
+        if (denom > 1e-9) {
+            double rel = abs_err / denom;
+            if (rel > worst_rel) { worst_rel = rel; at = i; }
+        }
+    }
+    int ok = (worst_rel <= rel_tol);
+    if (!ok) g_fail++;
+    printf("  %-30s 绝对 %.3e 相对 %.3e  %s\n", what, worst_abs, worst_rel,
+           ok ? "[OK]" : "[超出相对容差]");
+    if (!ok) printf("      index %d: 解析 %.17g\n", at, analytic[at]);
+}
+
+static void test_attn_dropout(void)
+{
+    const int d_model = 8, heads = 2, T = 4, max_seq = 8;
+    const double p = 0.5, inv = 1.0 / (1.0 - p);
+    const int dd = d_model * d_model;
+    const int hT = heads * T * T;
+
+    /* 同一组权重、同一条输入，分别建 p=0.5 与 p=0 的模型：
+     *   - training=0 时两者的前向/反向/梯度必须逐位相同；
+     *   - training=1 时给 p=0.5 注入固定 mask，再验证 mask 语义与 grad_W_v。 */
+    MultiHeadAttention *m = mha_create(d_model, heads, max_seq, p);
+    MultiHeadAttention *ref = mha_create(d_model, heads, max_seq, 0.0);
+
+    double *W[4], *B[4];
+    for (int k = 0; k < 4; k++) {
+        W[k] = xmalloc((size_t)dd * sizeof(double));
+        B[k] = xmalloc((size_t)d_model * sizeof(double));
+        fill_deter(W[k], dd, 0.6);
+        fill_deter(B[k], d_model, 0.4);
+    }
+    mha_set_params(m, W[0], B[0], W[1], B[1], W[2], B[2], W[3], B[3]);
+    mha_set_params(ref, W[0], B[0], W[1], B[1], W[2], B[2], W[3], B[3]);
+    for (int k = 0; k < 4; k++) { free(W[k]); free(B[k]); }
+
+    int xs[2] = { T, d_model };
+    Tensor *x = tensor_new(2, xs), *coef = tensor_new(2, xs);
+    Tensor *o0 = tensor_new(2, xs), *o1 = tensor_new(2, xs);
+    Tensor *d0 = tensor_new(2, xs), *d1 = tensor_new(2, xs);
+    fill_deter(x->data, x->size, 1.0);
+    fill_deter(coef->data, coef->size, 1.0);
+
+    printf("\n=== 2b. 注意力权重 dropout（p=%.2f，注入固定 mask）===\n", p);
+
+    /* (1) training=0：p>0 也不做 dropout，与 p=0 逐位相同 */
+    mha_set_training(m, 0);
+    mha_zero_grad(m);
+    mha_zero_grad(ref);
+    mha_forward(m, x, o0);
+    mha_forward(ref, x, o1);
+    mha_backward(m, coef, d0);
+    mha_backward(ref, coef, d1);
+    check("training=0 前向 == p=0", max_abs_diff(o0->data, o1->data, o0->size), 0.0);
+    check("training=0 反向 == p=0", max_abs_diff(d0->data, d1->data, d0->size), 0.0);
+
+    struct { double *a, *b; int n; } gp[8] = {
+        { m->grad_W_q, ref->grad_W_q, dd },
+        { m->grad_b_q, ref->grad_b_q, d_model },
+        { m->grad_W_k, ref->grad_W_k, dd },
+        { m->grad_b_k, ref->grad_b_k, d_model },
+        { m->grad_W_v, ref->grad_W_v, dd },
+        { m->grad_b_v, ref->grad_b_v, d_model },
+        { m->grad_W_o, ref->grad_W_o, dd },
+        { m->grad_b_o, ref->grad_b_o, d_model },
+    };
+    double gdiff = 0.0;
+    for (int i = 0; i < 8; i++) {
+        double d = max_abs_diff(gp[i].a, gp[i].b, gp[i].n);
+        if (d > gdiff) gdiff = d;
+    }
+    check("training=0 8 组梯度 == p=0", gdiff, 0.0);
+
+    /* (2) mask 注入接口：合法 T 接受，T 与当前序列长度不符 / 超上限必须拒绝 */
+    double *mask = xmalloc((size_t)hT * sizeof(double));
+    for (int hh = 0; hh < heads; hh++)
+        for (int t = 0; t < T; t++)
+            for (int j = 0; j < T; j++)
+                mask[((size_t)hh * T + t) * T + j] =
+                    ((t + j + hh) % 3 == 0) ? 0.0 : inv;
+
+    mha_set_training(m, 1);
+    int acc = mha_set_attn_mask(m, mask, T);
+    int rej_short = mha_set_attn_mask(m, mask, T - 1);
+    int rej_long = mha_set_attn_mask(m, mask, T + 1);
+    int rej_big = mha_set_attn_mask(m, mask, max_seq + 1);
+    printf("  %-30s %s\n", "mha_set_attn_mask 接受 T",
+           acc ? "[OK]" : "[错误]");
+    if (!acc) g_fail++;
+    printf("  %-30s %s\n", "T 不符 / 超上限被拒绝",
+           (!rej_short && !rej_long && !rej_big) ? "[OK]" : "[错误]");
+    if (rej_short || rej_long || rej_big) g_fail++;
+    if (!mha_set_attn_mask(m, mask, T)) {   /* 失败调用没有改动 mask，这里再显式注入一次 */
+        fprintf(stderr, "无法重新注入 mask\n");
+        g_fail++;
+    }
+
+    /* (3) 注入 mask 后：丢弃位置权重为 0，保留位置 == 干净权重 × 1/(1-p) */
+    mha_zero_grad(m);
+    mha_forward(m, x, o0);
+    mha_backward(m, coef, d0);
+    double worst_zero = 0.0, worst_keep = 0.0;
+    int n_zero = 0, n_keep = 0;
+    for (int hh = 0; hh < heads; hh++)
+        for (int t = 0; t < T; t++)
+            for (int j = 0; j < T; j++) {
+                size_t idx = ((size_t)hh * T + t) * T + j;
+                if (mask[idx] == 0.0) {
+                    n_zero++;
+                    double d = fabs(m->attn_drop[idx]);
+                    if (d > worst_zero) worst_zero = d;
+                } else {
+                    n_keep++;
+                    /* 期望值用 inv 直接算，而不是复用 mask[idx]，避免自证 */
+                    double d = fabs(m->attn_drop[idx] - m->attn[idx] * inv);
+                    if (d > worst_keep) worst_keep = d;
+                }
+            }
+    check("mask=0 位置权重为 0", worst_zero, 0.0);
+    check("保留位置 == 干净权重 × inv", worst_keep, 0.0);
+    printf("  %-30s 丢弃 %d / 保留 %d %s\n", "mask 覆盖", n_zero, n_keep,
+           (n_zero > 0 && n_keep > 0) ? "[OK]" : "[错误]");
+    if (n_zero == 0 || n_keep == 0) g_fail++;
+
+    /* (4) 固定 mask 下的解析梯度 vs 中心差分（相对误差 < 1e-5）。
+     *     loss_eval 每次都会重新 forward，而注入的 mask 一直有效，因此
+     *     有限差分与解析梯度看到的是同一份 mask。 */
+    LossCtx ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.kind = 0;
+    ctx.mha = m;
+    ctx.x = x;
+    ctx.coef = coef;
+    ctx.out = o0;
+    fd_check_rel("grad_W_v（固定 mask）", m->W_v, m->grad_W_v, dd, loss_eval, &ctx);
+
+    /* (5) 清除注入后走自带的 splitmix64：取值只能是 0 或 inv，且两次前向不同 */
+    (void)mha_set_attn_mask(m, NULL, 0);
+    mha_forward(m, x, o0);
+    int bad = 0, gen_zero = 0, gen_keep = 0;
+    for (int i = 0; i < hT; i++) {
+        if (m->attn_mask[i] == 0.0) gen_zero++;
+        else if (m->attn_mask[i] == inv) gen_keep++;
+        else bad = 1;
+    }
+    printf("  %-30s %s（丢弃 %d / 保留 %d）\n", "自带 RNG 生成 mask 取值合法",
+           bad ? "[错误]" : "[OK]", gen_zero, gen_keep);
+    if (bad) g_fail++;
+    mha_forward(m, x, o1);
+    double rng_diff = max_abs_diff(o0->data, o1->data, o0->size);
+    printf("  %-30s 差异 %.3e %s\n", "两次训练态前向不同（RNG 前进）",
+           rng_diff, rng_diff > 0.0 ? "[OK]" : "[错误]");
+    if (rng_diff <= 0.0) g_fail++;
+
+    free(mask);
+    tensor_free(x); tensor_free(coef);
+    tensor_free(o0); tensor_free(o1); tensor_free(d0); tensor_free(d1);
+    mha_free(m);
+    mha_free(ref);
 }
 
 /* ------------------------------ 3. FeedForward ------------------------------ */
@@ -924,6 +1112,7 @@ int main(void)
     printf("中心差分步长 eps=%.0e，误差容差=%.0e\n", g_eps, g_tol);
 
     test_mha();
+    test_attn_dropout();
     test_ff();
     test_containers();
     test_transformer();

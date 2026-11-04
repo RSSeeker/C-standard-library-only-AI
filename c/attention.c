@@ -340,6 +340,11 @@ MultiHeadAttention *mha_create_gqa(int d_model, int num_heads, int num_kv_heads,
                 num_heads, num_kv_heads);
         exit(1);
     }
+    /* 与 Python 的 MultiHeadAttention 校验一致；p 越界会在反向产生除零/放大 */
+    if (!(dropout_p >= 0.0 && dropout_p < 1.0)) {
+        fprintf(stderr, "mha_create_gqa: dropout=%g 必须在 [0,1) 内\n", dropout_p);
+        exit(1);
+    }
     MultiHeadAttention *m = xmalloc(sizeof(*m));
     memset(m, 0, sizeof(*m));
     m->d_model = d_model;
@@ -350,6 +355,12 @@ MultiHeadAttention *mha_create_gqa(int d_model, int num_heads, int num_kv_heads,
     m->kv_group = num_heads / num_kv_heads;
     m->max_seq_len = max_seq_len;
     m->dropout_p = dropout_p;
+    /* 默认 eval（与 Python 的 m.eval() 语义一致，也是所有既有对拍的前提）；
+     * rng 只在「training && p>0 且没有注入 mask」时被消耗。 */
+    m->training = 0;
+    m->rng = 0xD1B54A32D192ED03ULL;
+    m->mask_T = 0;
+    m->dropout_active = 0;
 
     const size_t dd = (size_t)d_model * d_model;
     const size_t kvd = (size_t)m->kv_dim;
@@ -382,6 +393,10 @@ MultiHeadAttention *mha_create_gqa(int d_model, int num_heads, int num_kv_heads,
     m->K = xmalloc(hT * m->d_k * sizeof(double));
     m->V = xmalloc(hT * m->d_k * sizeof(double));
     m->attn = xmalloc(hTT * sizeof(double));
+    m->attn_drop = xmalloc(hTT * sizeof(double));
+    m->attn_mask = xmalloc(hTT * sizeof(double));
+    memset(m->attn_drop, 0, hTT * sizeof(double));
+    memset(m->attn_mask, 0, hTT * sizeof(double));
     m->head_out = xmalloc(hT * m->d_k * sizeof(double));
     m->concat = xmalloc(T * d1 * sizeof(double));
 
@@ -443,7 +458,9 @@ void mha_free(MultiHeadAttention *m)
     xfree(m->grad_W_q); xfree(m->grad_W_k); xfree(m->grad_W_v); xfree(m->grad_W_o);
     xfree(m->grad_b_q); xfree(m->grad_b_k); xfree(m->grad_b_v); xfree(m->grad_b_o);
     xfree(m->x); xfree(m->q_full); xfree(m->k_full); xfree(m->v_full);
-    xfree(m->Q); xfree(m->K); xfree(m->V); xfree(m->attn); xfree(m->head_out); xfree(m->concat);
+    xfree(m->Q); xfree(m->K); xfree(m->V); xfree(m->attn);
+    xfree(m->attn_drop); xfree(m->attn_mask);
+    xfree(m->head_out); xfree(m->concat);
     xfree(m->d_concat); xfree(m->d_head); xfree(m->d_scores);
     xfree(m->dQ); xfree(m->dK); xfree(m->dV);
     xfree(m->dQ_full); xfree(m->dK_full); xfree(m->dV_full); xfree(m->tmp);
@@ -505,6 +522,36 @@ void mha_set_rope(MultiHeadAttention *m, int enable, double base)
     for (int i = 0; i < half; i++) {
         m->rope_freq[i] = 1.0 / pow(m->rope_base, 2.0 * (double)i / (double)m->d_k);
     }
+}
+
+void mha_set_training(MultiHeadAttention *m, int on)
+{
+    if (!m) {
+        fprintf(stderr, "mha_set_training: m 为 NULL\n");
+        exit(1);
+    }
+    m->training = on ? 1 : 0;
+}
+
+int mha_set_attn_mask(MultiHeadAttention *m, const double *mask, int T)
+{
+    if (!m) {
+        fprintf(stderr, "mha_set_attn_mask: m 为 NULL\n");
+        exit(1);
+    }
+    if (!mask) {
+        /* 清除注入：之后 forward 回到「用自带 splitmix64 生成 mask」的路径 */
+        m->mask_T = 0;
+        return 1;
+    }
+    if (T <= 0) return 0;
+    /* T 是本次 forward 的序列长度：不能超过预分配上限，也不能与已经跑过的 forward 冲突。
+     * 尚未 forward 时（seq_len == 0）无法比较，留给 forward 再检查一次。 */
+    if (T > m->max_seq_len) return 0;
+    if (m->seq_len > 0 && T != m->seq_len) return 0;
+    memcpy(m->attn_mask, mask, (size_t)m->num_heads * T * T * sizeof(double));
+    m->mask_T = T;
+    return 1;
 }
 
 void mha_set_params(MultiHeadAttention *m,
@@ -649,6 +696,16 @@ void mha_forward(MultiHeadAttention *m, const Tensor *x, Tensor *out)
     tensor_check_shape(out, 2, dims, "mha_forward(out)");
     m->seq_len = T;
 
+    /* 注意力权重 dropout 只在 training 且 p>0 时生效；否则整段代码不进，
+     * used == attn，运算序列与旧版完全相同（默认路径逐位不变的关键）。 */
+    const int drop = (m->training && m->dropout_p > 0.0);
+    if (drop && m->mask_T > 0 && m->mask_T != T) {
+        fprintf(stderr, "mha_forward: 注入 mask 的 T=%d 与本次 seq_len=%d 不一致\n",
+                m->mask_T, T);
+        exit(1);
+    }
+    m->dropout_active = drop;
+
     /* Python 存的是引用（self.x = x_seq）；C 侧拷一份，避免调用方复用缓冲后反向算错 */
     memcpy(m->x, x->data, (size_t)T * d * sizeof(double));
 
@@ -730,8 +787,29 @@ void mha_forward(MultiHeadAttention *m, const Tensor *x, Tensor *out)
 
         for (int t = 0; t < T; t++) softmax_row_inplace(attn + (size_t)t * T, T);
 
-        /* out = attn @ v_h */
-        mm_nn(attn, T, vh, dk, ho, dk, T, T, dk);
+        /* 注意力权重 dropout（Python: training and dropout>0）：
+         *   keep = 1-p, inv = 1/keep
+         *   mask[t][j] = inv if rng.random() < keep else 0.0
+         *   used = attn * mask
+         * 注入 mask 时原样使用（inverted mask 已由调用方给出），不再消耗 RNG；
+         * 否则用 splitmix64 逐元素生成。干净权重留在 m->attn 里，供反向的
+         * softmax 雅可比使用；乘过 mask 的权重留在 m->attn_drop，供前向与 dV 使用。 */
+        const double *used = attn;
+        if (drop) {
+            double *dm = m->attn_mask + (size_t)head * T * T;
+            if (m->mask_T == 0) {
+                const double keep = 1.0 - m->dropout_p;
+                const double inv = 1.0 / keep;
+                for (int i = 0; i < T * T; i++)
+                    dm[i] = (rng_uniform(&m->rng) < keep) ? inv : 0.0;
+            }
+            double *ud = m->attn_drop + (size_t)head * T * T;
+            for (int i = 0; i < T * T; i++) ud[i] = attn[i] * dm[i];
+            used = ud;
+        }
+
+        /* out = used @ v_h */
+        mm_nn(used, T, vh, dk, ho, dk, T, T, dk);
 
         /* 拼回 d_model */
         for (int t = 0; t < T; t++)
@@ -790,8 +868,13 @@ void mha_backward(MultiHeadAttention *m, const Tensor *dout, Tensor *dx)
         double *dV = m->dV + (size_t)head * T * dk;
         double *ds = m->d_scores + (size_t)head * T * T;
 
-        /* dV = attn^T @ d_out ：attn 是 (T×T)，结果 (T×d_k) */
-        mm_tn(attn, T, d_out, dk, dV, dk, T, T, dk, 0);
+        /* dV = used^T @ d_out ：attn 是 (T×T)，结果 (T×d_k)。
+         * 关键：dropout 生效时必须用乘过 mask 的权重（Python: attn_used），
+         * 不能用干净权重；否则 dropout=0 与 >0 两条路径的 dV 会串味。 */
+        const double *used = m->dropout_active
+                                 ? m->attn_drop + (size_t)head * T * T
+                                 : attn;
+        mm_tn(used, T, d_out, dk, dV, dk, T, T, dk, 0);
 
         /* d_attn = d_out @ V^T —— 先写进 d_scores，随后原地覆盖成 d_scores */
         mm_nt(d_out, dk, vh, dk, ds, T, T, dk, T);
@@ -799,10 +882,18 @@ void mha_backward(MultiHeadAttention *m, const Tensor *dout, Tensor *dx)
         /* softmax 反向：d_scores[t][j] = attn[t][j] * (d_attn[t][j] - s_t) * scale，
          * 其中 s_t = sum_i attn[t][i]*d_attn[t][i] 只依赖 t，
          * 必须提到 j 循环外面（Python 的注释：原来每个 (t,j) 都重算 → O(seq²) 冗余）。
-         * 原地写回是安全的：s_t 在覆盖 row_d 之前就已算好，且每个 j 只读自己的旧值。 */
+         * 原地写回是安全的：s_t 在覆盖 row_d 之前就已算好，且每个 j 只读自己的旧值。
+         *
+         * dropout 生效时先把 d_attn 乘一遍 mask（Python: row_d[j] *= row_m[j]），
+         * 但 softmax 雅可比与 s_t 仍用干净权重 row_a —— 这是 Python 的实现顺序，
+         * 漏掉乘 mask 会让保留位置拿到不该有的梯度、丢弃位置反而有梯度。 */
         for (int t = 0; t < T; t++) {
             const double *row_a = attn + (size_t)t * T;
             double *row_d = ds + (size_t)t * T;
+            if (m->dropout_active) {
+                const double *row_m = m->attn_mask + (size_t)head * T * T + (size_t)t * T;
+                for (int j = 0; j < T; j++) row_d[j] *= row_m[j];
+            }
             double s = dot_neumaier(row_a, row_d, T);
             for (int j = 0; j < T; j++)
                 row_d[j] = row_a[j] * (row_d[j] - s) * scale;
@@ -1103,8 +1194,16 @@ void tel_zero_grad(TransformerEncoderLayer *l)
 
 void tel_set_train(TransformerEncoderLayer *l, int train)
 {
+    if (!l) {
+        fprintf(stderr, "tel_set_train: l 为 NULL\n");
+        exit(1);
+    }
+    /* Python 的 layer.train() 会递归调用所有子模块的 train()，其中 self_attn 的
+     * training 决定注意力权重是否做 dropout；C 侧同样必须转发，否则 TEL 在训练
+     * 模式下只有残差后的 Dropout 生效，而注意力权重 dropout 永远不触发。 */
     l->dropout1.train = train ? 1 : 0;
     l->dropout2.train = train ? 1 : 0;
+    mha_set_training(l->self_attn, train ? 1 : 0);
 }
 
 void tel_forward(TransformerEncoderLayer *l, const Tensor *x, Tensor *out)
@@ -1120,7 +1219,8 @@ void tel_forward(TransformerEncoderLayer *l, const Tensor *x, Tensor *out)
     Tensor b2 = make_view(l->buf2, T, d);
     Tensor b3 = make_view(l->buf3, T, d);
 
-    /* 1) Self-Attention（Python 的 MHA 内部不做 dropout，dropout1 在外面逐 token 做） */
+    /* 1) Self-Attention：MHA 内部在 training 且 dropout_p>0 时对注意力权重做 dropout
+     *    （见 mha_forward）；dropout1 是注意力输出之后的逐 token dropout，两者独立。 */
     mha_forward(l->self_attn, x, &b1);                       /* buf1 = attn_out */
     for (int t = 0; t < T; t++)
         tfd_forward_row(&l->dropout1, t, l->buf1 + (size_t)t * d, l->buf1 + (size_t)t * d);

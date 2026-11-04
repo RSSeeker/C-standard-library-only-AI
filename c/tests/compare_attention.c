@@ -4,7 +4,9 @@
  * 前向，逐项比对。
  *
  * 覆盖：普通因果 MHA、滑动窗口、RoPE、GQA、MQA、窗口+RoPE+GQA 组合、
- *       TEL（LN + FFN + 注意力）的 forward + backward。
+ *       TEL（LN + FFN + 注意力）的 forward + backward，以及注意力权重 dropout
+ *       （training=1 时注入 Python 生成的 mask，逐位比对 out/dx/8 组梯度；
+ *       同一组权重另有一个 dropout=0 的对照用例，确保默认路径不变）。
  *
  * 用法: compare_attention [attention_reference.json] [容差]
  * 退出码: 0 = 全部在容差内（默认要求逐位相同），1 = 存在超差项
@@ -35,6 +37,13 @@ static const JsonValue *need(const JsonValue *obj, const char *key, const char *
 static int need_int(const JsonValue *obj, const char *key, const char *who)
 {
     return (int)json_num(need(obj, key, who), 0.0);
+}
+
+/* 可选整数字段：缺省返回 0（老用例没有 training 字段，等价于 eval） */
+static int opt_int(const JsonValue *obj, const char *key)
+{
+    const JsonValue *v = obj ? json_get(obj, key) : NULL;
+    return v ? (int)json_num(v, 0.0) : 0;
 }
 
 static void report(const char *what, const double *got, const double *want, int n)
@@ -95,6 +104,8 @@ static void run_mha(const JsonValue *c)
     const int window = need_int(cfg, "window", "config");
     const int rope = need_int(cfg, "rope", "config");
     const double rope_base = json_num(need(cfg, "rope_base", "config"), 10000.0);
+    const double dropout = json_num(need(cfg, "dropout", "config"), 0.0);
+    const int training = opt_int(cfg, "training");
     const int dk = d / h;
     const int kv_dim = kv * dk;
 
@@ -105,11 +116,35 @@ static void run_mha(const JsonValue *c)
         exit(2);
     }
 
-    MultiHeadAttention *m = (kv == h) ? mha_create(d, h, max_seq, 0.0)
-                                      : mha_create_gqa(d, h, kv, max_seq, 0.0);
+    MultiHeadAttention *m = (kv == h) ? mha_create(d, h, max_seq, dropout)
+                                      : mha_create_gqa(d, h, kv, max_seq, dropout);
     mha_set_causal(m, causal);
     mha_set_window(m, window);
     if (rope) mha_set_rope(m, 1, rope_base);
+
+    /* 注意力权重 dropout：training 由参考数据显式给出；mask 有就注入，
+     * 这样跨语言比较用的是同一份 mask，与两边 RNG 是否同源无关。 */
+    if (training) mha_set_training(m, 1);
+    const JsonValue *maskv = json_get(c, "mask");
+    if (maskv && json_array_len(maskv) > 0) {
+        if (json_array_len(maskv) != h * T * T) {
+            fprintf(stderr, "mask 长度 %d != num_heads*T*T = %d\n",
+                    json_array_len(maskv), h * T * T);
+            exit(2);
+        }
+        double *mask = load_flat(c, "mask", h * T * T, "case");
+        if (!mha_set_attn_mask(m, mask, T)) {
+            fprintf(stderr, "mha_set_attn_mask 拒绝了 T=%d 的 mask\n", T);
+            exit(2);
+        }
+        printf("  dropout: p=%g training=%d，注入 Python 生成的 mask（%d 个元素）\n",
+               dropout, training, h * T * T);
+        free(mask);
+    } else if (training) {
+        printf("  dropout: p=%g training=%d，%s\n", dropout, training,
+               dropout > 0.0 ? "未注入 mask（用 C 自带 splitmix64）"
+                             : "p=0，不做 dropout（默认路径对照）");
+    }
 
     const JsonValue *p = need(c, "params", "case");
     double *Wq = load_flat(p, "W_q", d * d, "params");

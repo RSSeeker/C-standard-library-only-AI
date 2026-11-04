@@ -26,6 +26,12 @@
  * 不兼容；后者绑定 (max_seq,d) 且用 splitmix64，与 Dropout 的 xorshift64* 不同源。
  * 两者的数学公式相同，tests/test_attention.c 第 [11] 节逐步比对 TfLayerNorm 与
  * LayerNorm 的 forward / dx / 梯度并要求逐位相同；不合并的取舍见 README「已知差异」。
+ *
+ * 关于注意力权重 dropout：Python 的 MultiHeadAttention 在 training 且 dropout>0 时
+ * 对 softmax 后的权重做 inverted dropout（mask 含 1/(1-p) 缩放），前向用 mask 后的
+ * 权重，反向 dV 也用 mask 后的权重、而 softmax 雅可比仍用干净权重。C 侧照此实现，
+ * 并额外提供 mha_set_attn_mask() 注入口：跨语言逐位对拍时把 Python 生成的 mask 灌进来，
+ * 绕开「两边 RNG 不同源」的问题。未注入时用本文件自带的 splitmix64 生成 mask。
  */
 #ifndef AI_ATTENTION_H
 #define AI_ATTENTION_H
@@ -100,7 +106,11 @@ typedef struct {
     int kv_group;           /* num_heads / num_kv_heads：每 kv_group 个 Q 头共享一个 KV 头 */
     int max_seq_len;        /* 预分配的最大序列长度 */
     int seq_len;            /* 最近一次 forward 的序列长度 */
-    double dropout_p;       /* 注意力权重 dropout 的 p；C 侧只保存、mask 逻辑尚未移植 */
+    double dropout_p;       /* 注意力权重 dropout 的 p（[0,1)）；仅 training 且 p>0 时生效 */
+    int training;           /* 1 = 训练（做注意力权重 dropout）；0 = 推理（默认，与旧版逐位相同） */
+    unsigned long long rng; /* splitmix64 状态；只在「未注入 mask」时用来生成 dropout mask */
+    int mask_T;             /* 注入 mask 的有效序列长度；0 = 未注入（用自带 RNG 生成） */
+    int dropout_active;     /* 最近一次 forward 是否真的做了 dropout（backward 用它选权重） */
     int causal;             /* 1 = 因果掩码：位置 t 只能看到 0..t（自回归语言模型用） */
     int window;             /* 滑动窗口：>0 时位置 t 只看最近 window 个位置（隐含因果）；0 = 关闭 */
     int rope;               /* 1 = 对 q/k 施加旋转位置编码（RoPE，GPT-NeoX 版式）；0 = 关闭 */
@@ -137,7 +147,9 @@ typedef struct {
     double *Q;          /* (h, T, d_k) —— 与 Python 的 self.Q[head] 一一对应（KV 已按头展开） */
     double *K;
     double *V;
-    double *attn;       /* (h, T, T) —— 每头的注意力权重矩阵 */
+    double *attn;       /* (h, T, T) —— 每头的干净注意力权重（softmax 输出，反向雅可比用） */
+    double *attn_drop;  /* (h, T, T) —— 乘过 dropout mask 的权重（前向 attn@V / 反向 dV 用） */
+    double *attn_mask;  /* (h, max_seq, max_seq) —— 最近一次 forward 用的 mask（或注入的 mask） */
     double *head_out;   /* (h, T, d_k) */
     double *concat;     /* (T, d_model) */
 
@@ -154,7 +166,8 @@ typedef struct {
     double *tmp;        /* (T, d_model) 通用临时 */
 } MultiHeadAttention;
 
-/* dropout_p 仅保存不使用，保持与 Python 构造签名一致；max_seq_len 为预分配上限 */
+/* dropout_p 是注意力权重 dropout 的概率（[0,1)）；默认 training=0，因此构造后不会做 dropout。
+ * 需要训练语义时再调用 mha_set_training(m, 1)。max_seq_len 为预分配上限 */
 MultiHeadAttention *mha_create(int d_model, int num_heads, int max_seq_len, double dropout_p);
 /* 带 KV 头数的构造（GQA / MQA），对应 Python 的 num_kv_heads 参数：
  *   num_kv_heads == num_heads → 普通多头（与 mha_create 完全等价，随机初始化序列也相同）；
@@ -181,6 +194,19 @@ void mha_set_window(MultiHeadAttention *m, int window);
  * 注意：RoPE 只是把绝对位置信息混进 q/k，因此打开时通常应关闭 PositionalEncoding
  * （CausalLM 侧见 llm_set_rope）。 */
 void mha_set_rope(MultiHeadAttention *m, int enable, double base);
+/* 训练/推理模式（默认 0 = 推理）。只有 training=1 且 dropout_p>0 时才对注意力权重做
+ * inverted dropout；training=0 时整段 dropout 代码不进，数值与旧版逐位相同。
+ * 与 Python 的 mha.train() / mha.eval() 对应；tel_set_train 会转发给 self_attn。 */
+void mha_set_training(MultiHeadAttention *m, int on);
+/* 注入一份外部 dropout mask（跨语言逐位验证用；也便于 C 侧固定 mask 的梯度测试）。
+ * mask 按 (num_heads, T, T) 行主序，值应是 inverted dropout 的 mask（保留位置 1/(1-p)、
+ * 丢弃位置 0）；forward 会原样乘到干净权重上，不再重新生成。
+ *   - 返回 1：注入成功；mask == NULL 表示清除注入、之后用自带 RNG 生成；
+ *   - 返回 0：mask != NULL 但 T <= 0 / T > max_seq_len /
+ *             已经 forward 过且 T != 当前 seq_len（本实现不重分配，超上限直接拒绝）。
+ * 注入的 mask 会一直生效（便于对同一 mask 反复 forward 做数值梯度），直到再次调用本函数
+ * 覆盖或传 NULL 清除。forward 时若注入长度与当前序列长度不一致会直接报错退出。 */
+int mha_set_attn_mask(MultiHeadAttention *m, const double *mask, int T);
 void mha_free(MultiHeadAttention *m);
 void mha_zero_grad(MultiHeadAttention *m);
 /* x: (seq_len, d_model) → out: (seq_len, d_model) */
