@@ -55,6 +55,30 @@ static void report_scalar(const char *what, double got, double want)
     report(what, &got, &want, 1);
 }
 
+/* 逐 token 比较整数序列（token 是整数，必须逐位相同，不受 g_tol 影响） */
+static void check_tokens(const char *label, const int *got, int n, const JsonValue *want)
+{
+    int bad = 0;
+    if (json_array_len(want) != n) {
+        bad = 1;
+        printf("  %-24s 长度不符: C=%d py=%d\n", label, n, json_array_len(want));
+    } else {
+        for (int i = 0; i < n; i++) {
+            int wv = (int)json_num(json_at(want, i), 0.0);
+            if (wv != got[i]) {
+                printf("  %-24s 位置 %d: C=%d py=%d\n", label, i, got[i], wv);
+                bad = 1;
+            }
+        }
+    }
+    if (bad) {
+        g_fail++;
+        printf("  %-24s [不一致]\n", label);
+    } else {
+        printf("  %-24s [OK]  (逐位相同)\n", label);
+    }
+}
+
 /* 把 JSON 里的 {name: [values]} 灌进模型（两边从同一组权重出发） */
 static void inject(LLMParamBlock *blocks, int nb, const JsonValue *obj, const char *who)
 {
@@ -395,6 +419,92 @@ int main(int argc, char **argv)
         free(prompt);
         free(out);
         llm_free(m);
+    }
+
+    /* ------------------ 7. 生成罚分 / min_p（top_k=1，确定性） ------------------
+     * top_k=1 时采样退化为 argmax，与随机数发生器无关；每条用例同时比对
+     * llm_generate_ex（整段重算）与 llm_generate_cached_ex（增量 cache）两条路径，
+     * 二者也都必须与 Python 的 use_cache=False / True 逐 token 相同。 */
+    {
+        CausalLM *m = llm_create(vocab, d_model, heads, d_ff, layers, max_len,
+                                 dropout, 12345);
+        LLMParamBlock blocks[MAX_BLOCKS];
+        int nb = llm_param_blocks(m, blocks, MAX_BLOCKS);
+        inject(blocks, nb, init, "init");
+        llm_set_train(m, 0);
+
+        const JsonValue *cases = need(root, "gen_penalty_cases", "root");
+        int ncases = json_array_len(cases);
+        printf("\n[7] 生成罚分 / min_p（top_k=1，与 RNG 无关）\n");
+
+        for (int ci = 0; ci < ncases; ci++) {
+            const JsonValue *c = json_at(cases, ci);
+            const char *name = json_str(json_get(c, "name"), "?");
+            const JsonValue *pv = need(c, "prompt", "gen_penalty_cases");
+            int pn = json_array_len(pv);
+            int *prompt = malloc((size_t)pn * sizeof(int));
+            for (int i = 0; i < pn; i++) prompt[i] = (int)json_num(json_at(pv, i), 0.0);
+            int max_new = need_int(c, "max_new", "gen_penalty_cases");
+
+            const JsonValue *kw = json_get(c, "kwargs");
+            double rp = 1.0, pp = 0.0, fp = 0.0, min_p = 0.0;
+            int ngram = 0;
+            if (kw) {
+                const JsonValue *v;
+                if ((v = json_get(kw, "repetition_penalty"))) rp = json_num(v, 1.0);
+                if ((v = json_get(kw, "presence_penalty"))) pp = json_num(v, 0.0);
+                if ((v = json_get(kw, "frequency_penalty"))) fp = json_num(v, 0.0);
+                if ((v = json_get(kw, "no_repeat_ngram_size")))
+                    ngram = (int)json_num(v, 0.0);
+                if ((v = json_get(kw, "min_p"))) min_p = json_num(v, 0.0);
+            }
+
+            const int cap = pn + max_new;
+            int *out_full = malloc((size_t)cap * sizeof(int));
+            int *out_cache = malloc((size_t)cap * sizeof(int));
+            int tf = llm_generate_ex(m, prompt, pn, max_new, 1.0, 1, 1.0, min_p,
+                                     rp, pp, fp, ngram, out_full, 999);
+            int tc = llm_generate_cached_ex(m, prompt, pn, max_new, 1.0, 1, 1.0,
+                                            min_p, rp, pp, fp, ngram, out_cache, 999);
+
+            printf("  用例 %-9s rp=%.3g pp=%.3g fp=%.3g ngram=%d min_p=%.3g\n",
+                   name, rp, pp, fp, ngram, min_p);
+            check_tokens("tokens (整段重算)", out_full, tf,
+                         need(c, "tokens_full", "gen_penalty_cases"));
+            check_tokens("tokens (KV cache)", out_cache, tc,
+                         need(c, "tokens_cached", "gen_penalty_cases"));
+
+            free(prompt);
+            free(out_full);
+            free(out_cache);
+        }
+        llm_free(m);
+    }
+
+    /* ------------------ 8. min_p 截尾后的候选集合大小 ------------------
+     * 用 Python 导出的同一行 logits 调用 C 的 llm_min_p_candidates，整数计数必须相同。
+     * min_p=0 时两侧都应保留全部 vocab 个候选。 */
+    {
+        const JsonValue *lv = need(root, "min_p_probe_logits", "root");
+        int n = json_array_len(lv);
+        double *row = malloc((size_t)n * sizeof(double));
+        for (int i = 0; i < n; i++) row[i] = json_num(json_at(lv, i), 0.0);
+
+        const JsonValue *vv = need(root, "min_p_probe_values", "root");
+        const JsonValue *cv = need(root, "min_p_probe_counts", "root");
+        printf("\n[8] min_p 截尾候选集合大小（同一行 logits，vocab=%d）\n", n);
+        for (int i = 0; i < json_array_len(vv); i++) {
+            double mp = json_num(json_at(vv, i), 0.0);
+            int want = (int)json_num(json_at(cv, i), 0.0);
+            int got = llm_min_p_candidates(row, n, mp);
+            if (got != want) {
+                g_fail++;
+                printf("  min_p=%-6.3g C=%d py=%d [不一致]\n", mp, got, want);
+            } else {
+                printf("  min_p=%-6.3g C=%d py=%d [OK]\n", mp, got, want);
+            }
+        }
+        free(row);
     }
 
     printf("\n%s\n", g_fail ? "存在超差项" : "全部通过");

@@ -125,6 +125,52 @@ def main():
     out["gen_tokens_top_p"] = model3.generate(gen_prompt, max_new_tokens=gen_new,
                                               top_k=0, top_p=1e-9)
 
+    # 7) 生成罚分（repetition / presence / frequency / no_repeat_ngram）的确定性对拍。
+    #    top_k=1 时采样退化成 argmax，与 RNG 无关；每条用例同时导出 use_cache=True
+    #    与 False 两种结果，C 侧分别与 llm_generate_cached_ex / llm_generate_ex 比较。
+    penalty_cases = [
+        dict(name="rp_gt1", prompt=[2, 3], max_new=4,
+             kwargs=dict(repetition_penalty=2.0)),
+        dict(name="rp_lt1", prompt=[2, 3], max_new=8,
+             kwargs=dict(repetition_penalty=0.5)),
+        dict(name="presence", prompt=[2, 3], max_new=4,
+             kwargs=dict(presence_penalty=2.0)),
+        dict(name="frequency", prompt=[2, 3], max_new=4,
+             kwargs=dict(frequency_penalty=2.0)),
+        # prompt 里已经有 "1 1"，ngram=2 时第一步就必须禁止 token 1。
+        dict(name="ngram2", prompt=[1, 1], max_new=5,
+             kwargs=dict(no_repeat_ngram_size=2)),
+        dict(name="combined", prompt=[2, 3, 2], max_new=6,
+             kwargs=dict(repetition_penalty=2.0, presence_penalty=2.0,
+                         frequency_penalty=2.0, no_repeat_ngram_size=3,
+                         min_p=0.05)),
+    ]
+    out["gen_penalty_cases"] = []
+    for case in penalty_cases:
+        rec = {key: case[key] for key in ("name", "prompt", "max_new")}
+        rec["kwargs"] = case["kwargs"]
+        rec["tokens_full"] = model3.generate(
+            case["prompt"], max_new_tokens=case["max_new"], top_k=1,
+            use_cache=False, **case["kwargs"])
+        rec["tokens_cached"] = model3.generate(
+            case["prompt"], max_new_tokens=case["max_new"], top_k=1,
+            use_cache=True, **case["kwargs"])
+        if rec["tokens_full"] != rec["tokens_cached"]:
+            sys.exit(f"Python cache/full 不一致: {case['name']}")
+        out["gen_penalty_cases"].append(rec)
+
+    # 8) min_p 截尾后的候选集合大小。直接用上面已导出的最后一行 logits 计算，
+    #    这样 C 侧读到的是同一批 double，计数差异只可能来自算法实现。
+    probe_logits = out["forward_logits"][-1]
+    probe_values = [0.0, 0.05, 0.1, 0.2, 0.35, 0.5, 0.7, 0.9]
+    probe_counts = []
+    for mp in probe_values:
+        masked = AI._mask_min_p(probe_logits, mp)
+        probe_counts.append(sum(1 for v in masked if v != float("-inf")))
+    out["min_p_probe_logits"] = probe_logits
+    out["min_p_probe_values"] = probe_values
+    out["min_p_probe_counts"] = probe_counts
+
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(out, fh, ensure_ascii=False, indent=1)
         fh.write("\n")

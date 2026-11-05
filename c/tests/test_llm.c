@@ -10,6 +10,9 @@
  *   6. 训练分段等价：fit(2) 与 fit(1)+fit(1) 参数逐位相同（step_count 不能被重置）
  *   7. 生成：同种子可复现、top_k=1 是确定性的、eval 模式下两次前向一致
  *   8. 参数块灌入/读出：llm_param_blocks 拿到的是活指针
+ *   9. 生成罚分 / min_p：repetition 的正负 logit 两分支、presence 扣一次、
+ *      frequency 按次数扣、no_repeat_ngram 禁后继、min_p 的候选数
+ *  10. 旧生成 API 与 llm_generate_ex 全默认参数逐 token 一致（min_p=0 不变）
  *
  * 非法输入走 exit(1)，不在这里测（与其它 test_*.c 的约定一致：那是进程级行为）。
  * 全部通过返回 0；任何一项超差返回 1。
@@ -314,6 +317,126 @@ int main(int argc, char **argv)
         tensor_free(a);
         tensor_free(b);
         llm_free(d);
+    }
+
+    /* ------------------ 9. 生成罚分与 min_p ------------------ */
+    printf("\n[9] 生成罚分 / min_p\n");
+    {
+        CausalLM *t = llm_create(vocab, d_model, heads, d_ff, 1, max_len, 0.0, 5);
+
+        /* 9a. repetition_penalty：logit > 0 除以 rp，logit <= 0 乘以 rp */
+        int ids[5] = { 0, 1, 0, 2, 0 };   /* counts: 0→3, 1→1, 2→1 */
+        double row[7] = { 2.0, -2.0, 0.0, 1.0, -1.0, 3.0, -3.0 };
+        double want[7];
+
+        memcpy(want, row, sizeof(row));
+        want[0] = 1.0;    /* 2 / 2 */
+        want[1] = -4.0;   /* -2 * 2（非正分支） */
+        want[2] = 0.0;    /* 0 * 2（==0 也走乘法分支） */
+        llm_apply_generation_penalties(t, row, ids, 5, 2.0, 0.0, 0.0, 0);
+        double worst = 0.0;
+        for (int i = 0; i < vocab; i++) {
+            double d = fabs(row[i] - want[i]);
+            if (d > worst) worst = d;
+        }
+        check("repetition_penalty=2 正/负 logit", worst, 0.0);
+
+        /* 9b. rp < 1：正 logit 除以 <1 变大，负 logit 乘 <1 变接近 0 */
+        double clean[7] = { 2.0, -2.0, 0.0, 1.0, -1.0, 3.0, -3.0 };
+        memcpy(row, clean, sizeof(row));
+        want[0] = 4.0;    /* 2 / 0.5 */
+        want[1] = -1.0;   /* -2 * 0.5 */
+        want[2] = 0.0;
+        llm_apply_generation_penalties(t, row, ids, 5, 0.5, 0.0, 0.0, 0);
+        worst = 0.0;
+        for (int i = 0; i < vocab; i++) {
+            double d = fabs(row[i] - want[i]);
+            if (d > worst) worst = d;
+        }
+        check("repetition_penalty=0.5", worst, 0.0);
+
+        /* 9c. presence_penalty：每个出现过的 token 只扣一次 */
+        memcpy(row, clean, sizeof(row));
+        want[0] = 1.5;    /* 2 - 0.5（出现 3 次也只扣一次） */
+        want[1] = -2.5;
+        want[2] = -0.5;
+        llm_apply_generation_penalties(t, row, ids, 5, 1.0, 0.5, 0.0, 0);
+        worst = 0.0;
+        for (int i = 0; i < vocab; i++) {
+            double d = fabs(row[i] - want[i]);
+            if (d > worst) worst = d;
+        }
+        check("presence_penalty 只扣一次", worst, 0.0);
+
+        /* 9d. frequency_penalty：按出现次数扣 */
+        memcpy(row, clean, sizeof(row));
+        want[0] = 0.5;    /* 2 - 0.5*3 */
+        want[1] = -2.5;   /* -2 - 0.5*1 */
+        want[2] = -0.5;
+        llm_apply_generation_penalties(t, row, ids, 5, 1.0, 0.0, 0.5, 0);
+        worst = 0.0;
+        for (int i = 0; i < vocab; i++) {
+            double d = fabs(row[i] - want[i]);
+            if (d > worst) worst = d;
+        }
+        check("frequency_penalty 按次数扣", worst, 0.0);
+
+        /* 9e. no_repeat_ngram_size=2：历史里出现过 prefix 时禁掉后继
+         * ids = 3,4,5,4 → 最近 1 个 token 是 4；前文 i=1 处的 4 后继是 5，
+         * 所以 (4,5) 会重复，5 必须被禁。 */
+        int ng_ids[4] = { 3, 4, 5, 4 };
+        memcpy(row, clean, sizeof(row));
+        llm_apply_generation_penalties(t, row, ng_ids, 4, 1.0, 0.0, 0.0, 2);
+        int ngram_ok = (row[5] == -INFINITY);
+        for (int i = 0; i < vocab; i++) {
+            if (i != 5 && row[i] != clean[i]) ngram_ok = 0;
+        }
+        check_true("no_repeat_ngram=2 禁掉重复后继", ngram_ok);
+
+        /* 9f. n=3 同理：prefix 是最后 2 个 token */
+        int ng3_ids[5] = { 1, 2, 3, 1, 2 };
+        memcpy(row, clean, sizeof(row));
+        llm_apply_generation_penalties(t, row, ng3_ids, 5, 1.0, 0.0, 0.0, 3);
+        check_true("no_repeat_ngram=3 禁掉重复后继", row[3] == -INFINITY);
+
+        /* 9g. 全默认参数必须原样返回（逐位） */
+        memcpy(row, clean, sizeof(row));
+        llm_apply_generation_penalties(t, row, ids, 5, 1.0, 0.0, 0.0, 0);
+        check_true("全默认参数不改 row", memcmp(row, clean, sizeof(row)) == 0);
+
+        /* 9h. min_p 候选数：min_p<=0 全保留；0.5 只留峰值；0.1 全留 */
+        double lp[4] = { 2.0, 0.0, 0.0, 0.0 };
+        check_true("min_p=0 保留全部", llm_min_p_candidates(lp, 4, 0.0) == 4);
+        check_true("min_p=0.5 只留峰值", llm_min_p_candidates(lp, 4, 0.5) == 1);
+        check_true("min_p=0.1 全保留", llm_min_p_candidates(lp, 4, 0.1) == 4);
+        double linf[4] = { -INFINITY, -INFINITY, -INFINITY, -INFINITY };
+        check_true("整行 -inf 时 min_p 不擦除", llm_min_p_candidates(linf, 4, 0.5) == 4);
+
+        llm_free(t);
+    }
+
+    /* ------------------ 10. 旧 API 与 ex API 默认参数一致 ------------------ */
+    printf("\n[10] 旧生成 API 与 llm_generate_ex 默认参数逐 token 一致\n");
+    {
+        CausalLM *g = llm_create(vocab, d_model, heads, d_ff, 1, max_len, 0.0, 321);
+        int prompt[2] = { 2, 3 };
+        int a[6], b[6];
+
+        (void)llm_generate(g, prompt, 2, 6, 0.8, 0, a, 4242);
+        (void)llm_generate_ex(g, prompt, 2, 6, 0.8, 0, 1.0,
+                              0.0, 1.0, 0.0, 0.0, 0, b, 4242);
+        int same = 1;
+        for (int i = 0; i < 6; i++) if (a[i] != b[i]) same = 0;
+        check_true("llm_generate == ex(默认)", same);
+
+        (void)llm_generate_p(g, prompt, 2, 6, 0.8, 3, 0.9, a, 77);
+        (void)llm_generate_ex(g, prompt, 2, 6, 0.8, 3, 0.9,
+                              0.0, 1.0, 0.0, 0.0, 0, b, 77);
+        same = 1;
+        for (int i = 0; i < 6; i++) if (a[i] != b[i]) same = 0;
+        check_true("llm_generate_p == ex(默认)", same);
+
+        llm_free(g);
     }
 
     printf("\n%s\n", g_fail ? "存在失败项" : "全部通过");

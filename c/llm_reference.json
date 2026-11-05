@@ -5900,5 +5900,223 @@
   9,
   9,
   9
+ ],
+ "gen_penalty_cases": [
+  {
+   "name": "rp_gt1",
+   "prompt": [
+    2,
+    3
+   ],
+   "max_new": 4,
+   "kwargs": {
+    "repetition_penalty": 2.0
+   },
+   "tokens_full": [
+    2,
+    3,
+    9,
+    5,
+    8,
+    6
+   ],
+   "tokens_cached": [
+    2,
+    3,
+    9,
+    5,
+    8,
+    6
+   ]
+  },
+  {
+   "name": "rp_lt1",
+   "prompt": [
+    2,
+    3
+   ],
+   "max_new": 8,
+   "kwargs": {
+    "repetition_penalty": 0.5
+   },
+   "tokens_full": [
+    2,
+    3,
+    9,
+    9,
+    9,
+    9,
+    9,
+    9,
+    9,
+    9
+   ],
+   "tokens_cached": [
+    2,
+    3,
+    9,
+    9,
+    9,
+    9,
+    9,
+    9,
+    9,
+    9
+   ]
+  },
+  {
+   "name": "presence",
+   "prompt": [
+    2,
+    3
+   ],
+   "max_new": 4,
+   "kwargs": {
+    "presence_penalty": 2.0
+   },
+   "tokens_full": [
+    2,
+    3,
+    9,
+    5,
+    8,
+    6
+   ],
+   "tokens_cached": [
+    2,
+    3,
+    9,
+    5,
+    8,
+    6
+   ]
+  },
+  {
+   "name": "frequency",
+   "prompt": [
+    2,
+    3
+   ],
+   "max_new": 4,
+   "kwargs": {
+    "frequency_penalty": 2.0
+   },
+   "tokens_full": [
+    2,
+    3,
+    9,
+    5,
+    8,
+    6
+   ],
+   "tokens_cached": [
+    2,
+    3,
+    9,
+    5,
+    8,
+    6
+   ]
+  },
+  {
+   "name": "ngram2",
+   "prompt": [
+    1,
+    1
+   ],
+   "max_new": 5,
+   "kwargs": {
+    "no_repeat_ngram_size": 2
+   },
+   "tokens_full": [
+    1,
+    1,
+    5,
+    10,
+    10,
+    2,
+    2
+   ],
+   "tokens_cached": [
+    1,
+    1,
+    5,
+    10,
+    10,
+    2,
+    2
+   ]
+  },
+  {
+   "name": "combined",
+   "prompt": [
+    2,
+    3,
+    2
+   ],
+   "max_new": 6,
+   "kwargs": {
+    "repetition_penalty": 2.0,
+    "presence_penalty": 2.0,
+    "frequency_penalty": 2.0,
+    "no_repeat_ngram_size": 3,
+    "min_p": 0.05
+   },
+   "tokens_full": [
+    2,
+    3,
+    2,
+    9,
+    8,
+    5,
+    6,
+    10,
+    4
+   ],
+   "tokens_cached": [
+    2,
+    3,
+    2,
+    9,
+    8,
+    5,
+    6,
+    10,
+    4
+   ]
+  }
+ ],
+ "min_p_probe_logits": [
+  0.03227976812880816,
+  -1.1177948409745246,
+  -0.07120346472658062,
+  -0.9307026542948321,
+  1.7531755663876472,
+  3.6793517471062516,
+  0.634533766719452,
+  -0.13056721055727627,
+  2.9090178657379187,
+  2.7990835332131456,
+  0.7623806658675676
+ ],
+ "min_p_probe_values": [
+  0.0,
+  0.05,
+  0.1,
+  0.2,
+  0.35,
+  0.5,
+  0.7,
+  0.9
+ ],
+ "min_p_probe_counts": [
+  11,
+  5,
+  4,
+  3,
+  3,
+  1,
+  1,
+  1
  ]
 }

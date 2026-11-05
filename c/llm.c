@@ -237,6 +237,7 @@ CausalLM *llm_create(int vocab_size, int d_model, int num_heads, int d_ff,
     m->tmp_row = xcalloc((size_t)(vocab_size > d_model ? vocab_size : d_model),
                          sizeof(double));
     m->keep = xcalloc((size_t)vocab_size, sizeof(unsigned char));
+    m->penalty_counts = xcalloc((size_t)vocab_size, sizeof(int));
 
     build_blocks(m);
     return m;
@@ -274,6 +275,7 @@ void llm_free(CausalLM *m)
     free(m->probs);
     free(m->tmp_row);
     free(m->keep);
+    free(m->penalty_counts);
     free(m);
 }
 
@@ -574,12 +576,96 @@ int llm_generate(CausalLM *m, const int *prompt, int prompt_len, int max_new,
     return llm_generate_p(m, prompt, prompt_len, max_new, temperature, top_k, 1.0, out, seed);
 }
 
-/* 从一行 logits 采样一个 token：top_k → 温度缩放 → top_p（nucleus）→ softmax →
- * 逆变换采样。会就地改写 row（调用方传入 m->tmp_row），并消耗一次 rng。
+/* 生成罚分（对应 Python 的 _apply_generation_penalties）：
+ *   - 按**完整历史 ids**（不只是当前窗口）统计出现次数；
+ *   - repetition_penalty：logit > 0 除以 rp，否则乘以 rp（0 走乘法分支，仍是 0）；
+ *   - presence_penalty：每个出现过的 token 减一次；
+ *   - frequency_penalty：每个出现过的 token 减 count * frequency_penalty；
+ *   - no_repeat_ngram_size >= 2：最近 n-1 个 token 的片段若在历史中出现过，
+ *     把后继 token 的 logit 置 -INFINITY。
+ * 全部默认时直接返回、不改 row —— 这是旧生成路径逐位不变的关键。 */
+void llm_apply_generation_penalties(CausalLM *m, double *row, const int *ids, int len,
+                                    double repetition_penalty, double presence_penalty,
+                                    double frequency_penalty, int no_repeat_ngram_size)
+{
+    const int V = m->vocab_size;
+    const int has_ngram = no_repeat_ngram_size >= 2;
+    if (repetition_penalty == 1.0 && presence_penalty == 0.0 &&
+        frequency_penalty == 0.0 && !has_ngram) {
+        return;
+    }
+
+    int *counts = m->penalty_counts;
+    for (int v = 0; v < V; v++) counts[v] = 0;
+    for (int i = 0; i < len; i++) {
+        const int tok = ids[i];
+        if (tok >= 0 && tok < V) counts[tok]++;
+    }
+
+    for (int v = 0; v < V; v++) {
+        if (counts[v] == 0) continue;
+        if (repetition_penalty != 1.0) {
+            if (row[v] > 0.0) row[v] /= repetition_penalty;
+            else row[v] *= repetition_penalty;
+        }
+        row[v] -= presence_penalty;
+        row[v] -= frequency_penalty * (double)counts[v];
+    }
+
+    if (has_ngram) {
+        /* Python: prefix = ids[len-(n-1):]；for i in range(len(ids)-(n-1))。 */
+        const int k = no_repeat_ngram_size - 1;
+        const int npos = len - k;
+        if (npos > 0) {
+            const int *prefix = ids + len - k;
+            for (int i = 0; i < npos; i++) {
+                int match = 1;
+                for (int j = 0; j < k; j++) {
+                    if (ids[i + j] != prefix[j]) { match = 0; break; }
+                }
+                if (match) {
+                    const int nxt = ids[i + k];
+                    if (nxt >= 0 && nxt < V) row[nxt] = -INFINITY;
+                }
+            }
+        }
+    }
+}
+
+/* 把 min_p 截尾应用到一行 logits（就地改写），返回保留的候选数。
+ * 与 Python 的 _mask_min_p / _softmax_row 同构：softmax 用普通的顺序求和
+ * （不是 Neumaier），先逐元素除以总和，再取 max 作为 peak，
+ * 阈值 = min_p * peak，保留 prob >= 阈值的 token。probs 是长度 n 的调用方缓冲。
+ * 整行 -inf 时 Python 的 softmax 返回全 0、阈值 0，所有位置都 >= 阈值，
+ * 因此不掩码（行本身仍是 -inf），这里返回 n。 */
+static int mask_row_min_p(double *row, double *probs, int n, double min_p)
+{
+    double mx = row[0];
+    for (int i = 1; i < n; i++) if (row[i] > mx) mx = row[i];
+    if (mx == -INFINITY) return n;
+    for (int i = 0; i < n; i++) probs[i] = exp(row[i] - mx);
+    double s = 0.0;
+    for (int i = 0; i < n; i++) s += probs[i];
+    double peak = 0.0;
+    for (int i = 0; i < n; i++) {
+        probs[i] = probs[i] / s;
+        if (probs[i] > peak) peak = probs[i];
+    }
+    const double thresh = min_p * peak;
+    int kept = 0;
+    for (int i = 0; i < n; i++) {
+        if (probs[i] >= thresh) kept++;
+        else row[i] = -INFINITY;
+    }
+    return kept;
+}
+
+/* 从一行 logits 采样一个 token：top_k → 温度缩放 → top_p（nucleus）→ min_p →
+ * softmax → 逆变换采样。会就地改写 row（调用方传入 m->tmp_row），并消耗一次 rng。
  * 这段逻辑原先内联在 llm_generate_p 里；抽出来是为了让 llm_generate_cached 复用
  * 完全相同的采样顺序（两者逐位一致的另一个前提）。 */
 static int sample_row(CausalLM *m, double *row, double temperature, int top_k,
-                      double top_p, unsigned long long *rng)
+                      double top_p, double min_p, unsigned long long *rng)
 {
     const int V = m->vocab_size;
 
@@ -625,6 +711,11 @@ static int sample_row(CausalLM *m, double *row, double temperature, int top_k,
         }
     }
 
+    if (min_p > 0.0) {
+        /* 对应 Python 的 _mask_min_p（温度缩放后调用），细节见 mask_row_min_p。 */
+        (void)mask_row_min_p(row, m->probs, V, min_p);
+    }
+
     softmax_row_inplace(row, V);
 
     double u = rng_uniform(rng);
@@ -637,9 +728,11 @@ static int sample_row(CausalLM *m, double *row, double temperature, int top_k,
     return pick;
 }
 
-int llm_generate_p(CausalLM *m, const int *prompt, int prompt_len, int max_new,
-                   double temperature, int top_k, double top_p, int *out,
-                   unsigned long long seed)
+int llm_generate_ex(CausalLM *m, const int *prompt, int prompt_len, int max_new,
+                    double temperature, int top_k, double top_p, double min_p,
+                    double repetition_penalty, double presence_penalty,
+                    double frequency_penalty, int no_repeat_ngram_size,
+                    int *out, unsigned long long seed)
 {
     if (!prompt || prompt_len < 1) {
         fprintf(stderr, "llm_generate: prompt 不能为空\n");
@@ -655,6 +748,26 @@ int llm_generate_p(CausalLM *m, const int *prompt, int prompt_len, int max_new,
     }
     if (!(top_p > 0.0) || top_p > 1.0) {
         fprintf(stderr, "llm_generate_p: top_p 必须在 (0, 1] 内（收到 %g）\n", top_p);
+        exit(1);
+    }
+    if (!(min_p >= 0.0) || min_p >= 1.0) {
+        fprintf(stderr, "llm_generate_ex: min_p 必须在 [0, 1) 内（收到 %g）\n", min_p);
+        exit(1);
+    }
+    if (!(repetition_penalty > 0.0)) {
+        fprintf(stderr, "llm_generate_ex: repetition_penalty 必须 > 0（收到 %g）\n",
+                repetition_penalty);
+        exit(1);
+    }
+    if (!isfinite(presence_penalty) || !isfinite(frequency_penalty)) {
+        fprintf(stderr, "llm_generate_ex: presence_penalty / frequency_penalty"
+                        " 必须是有限数（收到 %g / %g）\n",
+                presence_penalty, frequency_penalty);
+        exit(1);
+    }
+    if (no_repeat_ngram_size < 0 || no_repeat_ngram_size == 1) {
+        fprintf(stderr, "llm_generate_ex: no_repeat_ngram_size 必须是 >= 0 且 != 1 的整数"
+                        "（收到 %d）\n", no_repeat_ngram_size);
         exit(1);
     }
     if (top_k < 0) {
@@ -687,13 +800,27 @@ int llm_generate_p(CausalLM *m, const int *prompt, int prompt_len, int max_new,
         double *row = m->tmp_row;
         memcpy(row, last, (size_t)V * sizeof(double));
 
-        int pick = sample_row(m, row, temperature, top_k, top_p, &rng);
+        /* 与 Python 的 generate 相同：罚分用完整历史 ids（含已滑出窗口的部分），
+         * 追加在采样之前；全默认时本调用直接返回，row 一个字节都不改。 */
+        llm_apply_generation_penalties(m, row, ids, len, repetition_penalty,
+                                       presence_penalty, frequency_penalty,
+                                       no_repeat_ngram_size);
+        int pick = sample_row(m, row, temperature, top_k, top_p, min_p, &rng);
         ids[len++] = pick;
     }
 
     memcpy(out, ids, (size_t)len * sizeof(int));
     free(ids);
     return len;
+}
+
+int llm_generate_p(CausalLM *m, const int *prompt, int prompt_len, int max_new,
+                   double temperature, int top_k, double top_p, int *out,
+                   unsigned long long seed)
+{
+    /* 旧入口：全部新参数取默认值，路径与 llm_generate_ex 的默认分支逐位相同。 */
+    return llm_generate_ex(m, prompt, prompt_len, max_new, temperature, top_k, top_p,
+                           0.0, 1.0, 0.0, 0.0, 0, out, seed);
 }
 
 /* ---------------------- 增量 KV cache 生成 ----------------------
@@ -753,9 +880,11 @@ void llm_forward_step(CausalLM *m, int token, int pos, double *logits)
         logits[v] = dot_neumaier(h, m->W_out + (size_t)v * d, d) + m->b_out[v];
 }
 
-int llm_generate_cached(CausalLM *m, const int *prompt, int prompt_len, int max_new,
-                        double temperature, int top_k, double top_p, int *out,
-                        unsigned long long seed)
+int llm_generate_cached_ex(CausalLM *m, const int *prompt, int prompt_len, int max_new,
+                           double temperature, int top_k, double top_p, double min_p,
+                           double repetition_penalty, double presence_penalty,
+                           double frequency_penalty, int no_repeat_ngram_size,
+                           int *out, unsigned long long seed)
 {
     if (!prompt || prompt_len < 1) {
         fprintf(stderr, "llm_generate_cached: prompt 不能为空\n");
@@ -776,6 +905,26 @@ int llm_generate_cached(CausalLM *m, const int *prompt, int prompt_len, int max_
     if (top_k < 0) {
         fprintf(stderr, "llm_generate_cached: top_k 必须 >= 0（0 表示不过滤，收到 %d）\n",
                 top_k);
+        exit(1);
+    }
+    if (!(min_p >= 0.0) || min_p >= 1.0) {
+        fprintf(stderr, "llm_generate_cached_ex: min_p 必须在 [0, 1) 内（收到 %g）\n", min_p);
+        exit(1);
+    }
+    if (!(repetition_penalty > 0.0)) {
+        fprintf(stderr, "llm_generate_cached_ex: repetition_penalty 必须 > 0（收到 %g）\n",
+                repetition_penalty);
+        exit(1);
+    }
+    if (!isfinite(presence_penalty) || !isfinite(frequency_penalty)) {
+        fprintf(stderr, "llm_generate_cached_ex: presence_penalty / frequency_penalty"
+                        " 必须是有限数（收到 %g / %g）\n",
+                presence_penalty, frequency_penalty);
+        exit(1);
+    }
+    if (no_repeat_ngram_size < 0 || no_repeat_ngram_size == 1) {
+        fprintf(stderr, "llm_generate_cached_ex: no_repeat_ngram_size 必须是 >= 0 且 != 1"
+                        " 的整数（收到 %d）\n", no_repeat_ngram_size);
         exit(1);
     }
     check_ids(m, prompt, prompt_len, "llm_generate_cached");
@@ -805,7 +954,11 @@ int llm_generate_cached(CausalLM *m, const int *prompt, int prompt_len, int max_
     for (int step = 0; step < max_new; step++) {
         double *row = m->tmp_row;
         memcpy(row, logits, (size_t)V * sizeof(double));
-        int pick = sample_row(m, row, temperature, top_k, top_p, &rng);
+        /* 与整段重算路径完全相同的罚分 + 采样顺序；ids 是完整历史。 */
+        llm_apply_generation_penalties(m, row, ids, len, repetition_penalty,
+                                       presence_penalty, frequency_penalty,
+                                       no_repeat_ngram_size);
+        int pick = sample_row(m, row, temperature, top_k, top_p, min_p, &rng);
         ids[len++] = pick;
 
         int new_start = len > m->max_len ? len - m->max_len : 0;
@@ -830,7 +983,29 @@ int llm_generate_cached(CausalLM *m, const int *prompt, int prompt_len, int max_
     return len;
 }
 
+int llm_generate_cached(CausalLM *m, const int *prompt, int prompt_len, int max_new,
+                        double temperature, int top_k, double top_p, int *out,
+                        unsigned long long seed)
+{
+    /* 旧入口：全部新参数取默认值，与 llm_generate_cached_ex 的默认分支逐位相同。 */
+    return llm_generate_cached_ex(m, prompt, prompt_len, max_new, temperature, top_k,
+                                  top_p, 0.0, 1.0, 0.0, 0.0, 0, out, seed);
+}
+
 /* ------------------------------ 查询 ------------------------------ */
+
+int llm_min_p_candidates(const double *logits, int n, double min_p)
+{
+    if (!logits || n <= 0) return 0;
+    if (!(min_p > 0.0)) return n;   /* 与 Python _mask_min_p 的 min_p <= 0 分支一致 */
+    double *row = xmalloc((size_t)n * sizeof(double));
+    double *probs = xmalloc((size_t)n * sizeof(double));
+    memcpy(row, logits, (size_t)n * sizeof(double));
+    const int kept = mask_row_min_p(row, probs, n, min_p);
+    free(row);
+    free(probs);
+    return kept;
+}
 
 int llm_param_count(const CausalLM *m)
 {

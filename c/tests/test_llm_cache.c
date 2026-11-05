@@ -7,6 +7,9 @@
  *       窗口长度取 > / == / < 生成长度三种情形。
  *   [3] llm_generate_cached 与 llm_generate_p 的 token 序列完全相同（贪心、top_k、
  *       top_p、温度四类采样），且同 seed 重复调用可复现。
+ *   [3b] 带 min_p / repetition_penalty / presence_penalty / frequency_penalty /
+ *       no_repeat_ngram_size 时，llm_generate_ex 与 llm_generate_cached_ex 的
+ *       token 序列逐位相同（含窗口滑动重建）；全默认参数时旧包装与 ex 路径一致。
  *   [4] clock() 计时：prompt 8 + 新增 40、d_model 32、2/4 层，打印加速比。
  *
  * 全部比较容差 0（bit-exact）；不涉及训练轨迹，因此不需要 1e-12 的容差。
@@ -191,6 +194,50 @@ static void test_tokens(int max_len, int rope, double temperature, int top_k, do
     llm_free(m);
 }
 
+/* ---------------- [3b] 带罚分 / min_p 的 cached vs 重算 ---------------- */
+
+static void test_tokens_penalties(int max_len, int rope, double temperature,
+                                  double min_p, double rp, double pp, double fp,
+                                  int ngram)
+{
+    const int V = 13, d = 32, h = 4, ff = 64, layers = 2;
+    const int prompt[4] = { 2, 7, 1, 5 };
+    const int max_new = 18;            /* 超过 max_len=4/8 时必然触发滑动重建 */
+    int a[64], b[64];
+
+    CausalLM *m = make_model(V, d, h, ff, layers, max_len, rope, 555u);
+    int na = llm_generate_ex(m, prompt, 4, max_new, temperature, 0, 1.0,
+                             min_p, rp, pp, fp, ngram, a, 24680u);
+    int nb = llm_generate_cached_ex(m, prompt, 4, max_new, temperature, 0, 1.0,
+                                    min_p, rp, pp, fp, ngram, b, 24680u);
+
+    char what[200];
+    snprintf(what, sizeof(what),
+             "ex len max_len=%d rope=%d T=%.1f min=%.2f rp=%.1f pp=%.1f fp=%.1f n=%d",
+             max_len, rope, temperature, min_p, rp, pp, fp, ngram);
+    check_int(what, nb, na);
+    check_true("ex token 序列", na == nb && memcmp(a, b, (size_t)na * sizeof(int)) == 0);
+    if (na != nb || memcmp(a, b, (size_t)na * sizeof(int)) != 0) {
+        printf("    full :");
+        for (int i = 0; i < na; i++) printf(" %d", a[i]);
+        printf("\n    cache:");
+        for (int i = 0; i < nb; i++) printf(" %d", b[i]);
+        printf("\n");
+    }
+
+    /* 全默认参数时，旧包装必须和新 ex 路径给出同一串 token */
+    if (min_p == 0.0 && rp == 1.0 && pp == 0.0 && fp == 0.0 && ngram == 0) {
+        int c[64];
+        int nc = llm_generate_cached(m, prompt, 4, max_new, temperature, 0, 1.0,
+                                     c, 24680u);
+        check_int("旧包装长度 == ex 默认", nc, nb);
+        check_true("旧包装 == ex 默认",
+                   nc == nb && memcmp(b, c, (size_t)nb * sizeof(int)) == 0);
+    }
+
+    llm_free(m);
+}
+
 /* ---------------- [4] 计时 ---------------- */
 
 static double now_sec(void)
@@ -251,6 +298,24 @@ int main(void)
         for (int rope = 0; rope <= 1; rope++)
             for (int c = 0; c < 5; c++)
                 test_tokens(ml[i], rope, temps[c], ks[c], ps[c]);
+
+    printf("[3b] token 序列 cached_ex vs generate_ex（罚分 / min_p / 窗口滑动）\n");
+    {
+        struct { int ml, rope, ng; double T, min_p, rp, pp, fp; } pc[] = {
+            { 64, 0, 0, 1.0, 0.05, 1.0, 0.0, 0.0 },   /* 只开 min_p */
+            { 16, 1, 0, 1.0, 0.00, 2.0, 0.0, 0.0 },   /* rp > 1（正分支） */
+            {  8, 0, 0, 0.9, 0.00, 0.5, 0.0, 0.0 },   /* rp < 1 + 窗口滑动 */
+            {  8, 1, 0, 1.0, 0.02, 1.5, 1.0, 0.5 },   /* presence + frequency */
+            {  4, 0, 2, 0.8, 0.10, 1.0, 0.5, 0.5 },   /* 立即滑动 + ngram=2 */
+            {  5, 1, 3, 1.0, 0.00, 1.0, 0.0, 0.0 },   /* ngram=3 */
+            {  8, 0, 2, 0.9, 0.05, 2.0, 1.0, 1.0 },   /* 全开 */
+        };
+        int n = (int)(sizeof(pc) / sizeof(pc[0]));
+        for (int i = 0; i < n; i++) {
+            test_tokens_penalties(pc[i].ml, pc[i].rope, pc[i].T, pc[i].min_p,
+                                  pc[i].rp, pc[i].pp, pc[i].fp, pc[i].ng);
+        }
+    }
 
     printf("[4] 计时：prompt 8 + 新增 40，d_model=32\n");
     bench(2, 64, 20);    /* 不滑动：理论收益最大 */

@@ -75,6 +75,7 @@ typedef struct {
     double *probs;      /* (vocab_size) 临时 */
     double *tmp_row;    /* (max(vocab_size, d_model)) 临时 */
     unsigned char *keep; /* (vocab_size) nucleus 采样的保留标记，仅 top_p < 1 时使用 */
+    int *penalty_counts; /* (vocab_size) 生成罚分用的出现次数统计，仅启用罚分时使用 */
 } CausalLM;
 
 /* 全部参数非正时报错退出；dropout 须在 [0,1) 内 */
@@ -131,6 +132,25 @@ int llm_generate_p(CausalLM *m, const int *prompt, int prompt_len, int max_new,
                    double temperature, int top_k, double top_p, int *out,
                    unsigned long long seed);
 
+/* 完整版采样入口：在 llm_generate_p 的 top_k / top_p 之外，再加 Python
+ * CausalLM._sample / _apply_generation_penalties 的五项能力。运算顺序与 Python 一致：
+ *   罚分（用**完整历史** ids）→ top_k → 温度 → top_p → min_p → softmax → 采样。
+ *   min_p：温度缩放后 softmax 概率 < min_p * max(prob) 的 token 置 -INFINITY；
+ *          取值 [0,1)，0 表示不启用（与旧路径逐位相同）。
+ *   repetition_penalty：出现过的 token，logit > 0 时除以该值，否则乘以该值；必须 > 0，
+ *          1.0 表示不惩罚。
+ *   presence_penalty：出现过的 token 的 logit 减去一次该值。
+ *   frequency_penalty：出现过的 token 的 logit 减去 count * frequency_penalty。
+ *   no_repeat_ngram_size：若最近 n-1 个 token 的片段在历史中出现过，把后继 token 的
+ *          logit 置 -INFINITY；0 关闭，1 非法（会禁掉所有已出现 token）。
+ * 全部取默认值（min_p=0, repetition=1, presence=0, frequency=0, ngram=0）时，
+ * 本函数与 llm_generate_p 逐位相同：额外代码只做分支判断，不改任何数值。 */
+int llm_generate_ex(CausalLM *m, const int *prompt, int prompt_len, int max_new,
+                    double temperature, int top_k, double top_p, double min_p,
+                    double repetition_penalty, double presence_penalty,
+                    double frequency_penalty, int no_repeat_ngram_size,
+                    int *out, unsigned long long seed);
+
 /* ---------------- 增量 KV cache 生成（推理加速） ----------------
  * 与 llm_generate_p 语义完全相同的另一条实现：预填充一次后用单 token 增量前向，
  * 不再对整段窗口重算。逐位一致的保证：
@@ -155,6 +175,26 @@ void llm_forward_step(CausalLM *m, int token, int pos, double *logits);
 int llm_generate_cached(CausalLM *m, const int *prompt, int prompt_len, int max_new,
                         double temperature, int top_k, double top_p, int *out,
                         unsigned long long seed);
+
+/* 增量版完整采样：参数、校验与语义同 llm_generate_ex，只是走 KV cache 前向。
+ * 因采样顺序、罚分用的完整历史、RNG 消耗次数都一致，结果与 llm_generate_ex 逐位相同
+ * （窗口滑动时按新窗口重建 cache，与整段重算的窗口重基一致）。 */
+int llm_generate_cached_ex(CausalLM *m, const int *prompt, int prompt_len, int max_new,
+                           double temperature, int top_k, double top_p, double min_p,
+                           double repetition_penalty, double presence_penalty,
+                           double frequency_penalty, int no_repeat_ngram_size,
+                           int *out, unsigned long long seed);
+
+/* 诊断 / 跨语言对拍用：把 min_p 截尾作用在一行 logits（长度 n，不修改原数组），
+ * 返回保留的候选数。语义与 Python 的 _mask_min_p 相同（min_p <= 0 时返回 n）。 */
+int llm_min_p_candidates(const double *logits, int n, double min_p);
+
+/* 诊断 / 自定义采样用：把 Python _apply_generation_penalties 的五项罚分就地作用到
+ * 一行 logits（长度 vocab_size）。ids 是**完整历史**（不是窗口）。默认参数全关时
+ * 直接返回、不改 row。生成路径内部用的就是这个函数。 */
+void llm_apply_generation_penalties(CausalLM *m, double *logits, const int *ids, int len,
+                                    double repetition_penalty, double presence_penalty,
+                                    double frequency_penalty, int no_repeat_ngram_size);
 
 /* 困惑度 = exp(平均交叉熵)，对应 Python 的 perplexity()；
  * 平均 loss > 700 时返回 INFINITY（避免 exp 溢出）。 */
