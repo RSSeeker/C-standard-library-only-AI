@@ -12,12 +12,12 @@
 
 | 项目 | 状态 |
 |------|------|
-| 数值等价性 | MLP 前向/梯度、Conv2d/MaxPool2d/Flatten、BatchNorm1d/LayerNorm/Dropout、注意力组件、MHA/FFN/TransformerEncoderLayer 前向/反向 **全部与 Python 逐位一致**（0.000e+00，含 window/RoPE/GQA/MQA 与注意力权重 dropout 的注入 mask 对拍，见第 8 节） |
+| 数值等价性 | MLP 前向/梯度、Conv2d/MaxPool2d/Flatten、BatchNorm1d/LayerNorm/Dropout、注意力组件、MHA/FFN/TransformerEncoderLayer 前向/反向 **全部与 Python 逐位一致**（0.000e+00，含 window/RoPE/GQA/MQA、ALiBi 与注意力权重 dropout 的注入 mask 对拍，见第 8 节） |
 | 训练循环 | **零分配**（预热后 `malloc` 调用次数 = 0，用链接器 `--wrap` 统计，与机器负载无关） |
 | 性能 | MLP[64,256,128,8]、5 万参数、1000 样本 × 5 轮：C 约 1.3 s vs Python 约 77 s（**约 58–68 倍**） |
 | 存档互通 | 与 Python 的 `save_model` / `load_model` **双向互通**，两个方向都逐位一致 |
-| 因果语言模型 | `CausalLM`（因果掩码 + GPT 式并行训练）：前向 logits、loss、19 个梯度块、一步 Adam、贪心生成 **全部与 Python 逐位一致**；多步训练受 libm `exp/log` 的 1 ULP 影响（见"已知差异"） |
-| 扩展特性 | 滑动窗口注意力、RoPE、GQA/MQA、nucleus（top-p）采样、困惑度：语义与 Python 版逐项对齐；window/RoPE/GQA/MQA 已纳入 `compare_attention` 逐位对拍，top_p（确定性 nucleus）与 perplexity 已纳入 `compare_llm`；**默认路径（不做任何 setter 调用时）仍与 Python 逐位一致**——`compare_llm` 的判定未变 |
+| 因果语言模型 | `CausalLM`（因果掩码 + GPT 式并行训练）：前向 logits、loss、19 个梯度块、一步 Adam、贪心生成、6 组带罚分/min_p 的确定性生成 **全部与 Python 逐位一致**；多步训练受 libm `exp/log` 的 1 ULP 影响（见"已知差异"） |
+| 扩展特性 | 滑动窗口注意力、RoPE、GQA/MQA、ALiBi、nucleus（top-p）采样、min_p、repetition/presence/frequency 罚分、no_repeat_ngram、困惑度：语义与 Python 版逐项对齐；window/RoPE/GQA/MQA/ALiBi 已纳入 `compare_attention` 逐位对拍，top_p（确定性 nucleus）、罚分/min_p 的确定性生成与候选数已纳入 `compare_llm`；**默认路径（不做任何 setter 调用、不传新参数时）仍与 Python 逐位一致**——`compare_llm` 的判定未变 |
 | 编译 | `-std=c17 -O2 -Wall -Wextra` 下**零警告** |
 | 副产品 | 移植中在 **Python 版发现并修复了一个真实梯度 bug**（见文末） |
 
@@ -29,8 +29,8 @@
 | `Conv2d` / `MaxPool2d` / `Flatten` | `layers_conv.c` | 已完成，12 项逐位一致 |
 | `Dropout` / `BatchNorm1d` / `LayerNorm` | `layers_norm.c` | 已完成，21 项逐位一致 |
 | `RNNCell/RNN` / `LSTMCell/LSTM` / `GRUCell/GRU` + step cache | `rnn.c` | 已完成 |
-| `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成（含 `causal` 因果掩码开关、`mha_set_window` 滑动窗口、`mha_set_rope` 旋转位置编码、`mha_create_gqa` 的 GQA/MQA、`mha_forward_step` 增量前向、`mha_set_training` + `mha_set_attn_mask` 的注意力权重 dropout） |
-| `MultiHeadAttention(causal=True)` / `CausalLM`（LLM） | `attention.c` + `llm.c` | 已完成：因果掩码、teacher forcing 训练、自回归生成、`llm_generate_p`（nucleus 采样）、`llm_perplexity` |
+| `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成（含 `causal` 因果掩码开关、`mha_set_window` 滑动窗口、`mha_set_rope` 旋转位置编码、`mha_create_gqa` 的 GQA/MQA、`mha_set_alibi` + `tel_set_alibi` / `te_set_alibi` 的 ALiBi 距离偏置、`mha_forward_step` 增量前向、`mha_set_training` + `mha_set_attn_mask` 的注意力权重 dropout） |
+| `MultiHeadAttention(causal=True)` / `CausalLM`（LLM） | `attention.c` + `llm.c` | 已完成：因果掩码、teacher forcing 训练、自回归生成、`llm_generate_p`（nucleus 采样）、`llm_generate_ex` / `llm_generate_cached_ex`（min_p + repetition/presence/frequency 罚分 + no_repeat_ngram）、`llm_perplexity` |
 | `Sequential` / `ResidualBlock` | `containers.c` | 已完成（Module vtable） |
 | `TextProcessor` / `generate_text` / `softmax_with_temp` | `text.c` | 已完成，逐位一致 |
 | `save_model` / `load_model`（JSON） | `json.c` + `model_io.c` | 已完成，双向互通 |
@@ -152,20 +152,22 @@ Python 写 -> C 读：  最大差异 0.000e+00  PASS   （含 softmax 输出层�
 python tools/norm_reference.py && ./tests/compare_norm     # 21 项，全部 0.000e+00
 python tools/conv_reference.py && ./tests/compare_conv     # 12 项，全部 0.000e+00
 python tools/llm_reference.py && ./tests/compare_llm      # 6 段，见下
-python tools/attention_reference.py && ./tests/compare_attention  # 9 个用例，见第 8 节
+python tools/attention_reference.py && ./tests/compare_attention  # 13 个用例，见第 8 节
 ```
 
 覆盖：BatchNorm1d（训练 forward/反向 dx/grad_gamma/grad_beta/running 统计量/mean/var/inv_std/x_hat、
 推理 forward）、LayerNorm（forward/反向/参数梯度/中间量）、Dropout（灌入 Python 的 mask 后逐位比对）、
 Conv2d（两种配置的 forward/grad_w/grad_b/dx）、MaxPool2d（两种配置）、Flatten。
 
-`compare_llm` 比对 CausalLM 的六段：前向 logits、loss + 19 个梯度块、一步 Adam 后的参数、
-训练 3 轮后的参数与 eval loss（含 perplexity）、贪心生成的 token、top_p 确定性生成。
-第 1/2/3/5/6 段**逐位相同**；第 4 段的前两轮也逐位相同，从第 3 轮起 3 个块出现 ≤3.7e-13
-的差异（msvcrt 与 UCRT 的 `exp`/`log` 差 1 ULP，随步数累积），因此这一段单独用 `1e-12`
-容差并在输出里注明。`perplexity = exp(loss)` 的 loss 逐位相同，`exp` 本身差 8.9e-16（1 ULP），
-同样用 `1e-12`；`top_p=1e-9` 时 nucleus 只含 argmax，采样与 RNG 无关，token 序列逐位相同
-（任意 `top_p` 的随机采样不能跨语言逐位比较，见"已知差异"）。
+`compare_llm` 比对 CausalLM 的八段：前向 logits、loss + 19 个梯度块、一步 Adam 后的参数、
+训练 3 轮后的参数与 eval loss（含 perplexity）、贪心生成的 token、top_p 确定性生成、
+六组带罚分/min_p 的 `top_k=1` 生成（`llm_generate_ex` 与 `llm_generate_cached_ex` 各比一遍）、
+8 个 `min_p` 取值下的候选集合大小。第 1/2/3/5/6/7/8 段**逐位相同**；第 4 段的前两轮也逐位相同，
+从第 3 轮起 3 个块出现 ≤3.7e-13 的差异（msvcrt 与 UCRT 的 `exp`/`log` 差 1 ULP，随步数累积），
+因此这一段单独用 `1e-12` 容差并在输出里注明。`perplexity = exp(loss)` 的 loss 逐位相同，
+`exp` 本身差 8.9e-16（1 ULP），同样用 `1e-12`；`top_p=1e-9` 时 nucleus 只含 argmax，
+采样与 RNG 无关，token 序列逐位相同（任意 `top_p` 的随机采样不能跨语言逐位比较，
+见"已知差异"）。
 
 > 注意 `Conv2d.forward` 在 Python 里走的是 `_matmul`（内部 `sum(map(mul, ...))` = Neumaier 补偿求和），
 > 不是朴素三重循环累加——C 侧照此实现才能逐位一致。
@@ -201,11 +203,16 @@ KV 存在每层的 `cache_K` / `cache_V` 里，位置取「当前窗口内下标
 - **默认行为不变**：老接口原样保留；新接口是 `llm_cache_reset` / `llm_forward_step` /
   `llm_generate_cached` 三个新函数。`llm_generate_p` 只是把采样部分抽成 `sample_row` 供两条路径共用
   （同一份 top_k / top_p / 温度 / RNG 消耗顺序），原有数值路径未改。
-- **逐位相同**：`./tests/test_llm_cache` 共 368 项检查、0 失败，容差 0。覆盖
+- **逐位相同**：`./tests/test_llm_cache` 共 382 项检查、0 失败，容差 0。覆盖
   `max_len` = 20/16/8/5/4（生成长度 16，即大于/等于/小于三种情形）× 绝对位置编码/RoPE，
   每一步的 logits 都与 `llm_forward` 对当前窗口的整段重算逐位对照；token 序列另在
   5 种 `max_len` × 2 种位置编码 × 5 组采样参数（贪心、top_k=3、top_p=0.9×2、top_k=5、
   top_p=0.5、temperature=0.8/1.2）下与 `llm_generate_p` 完全一致，且同 seed 重复调用可复现。
+  第 [3b] 节再把 `llm_generate_ex` 与 `llm_generate_cached_ex` 放在同一张表上比：7 组配置覆盖
+  `min_p`、`repetition_penalty`（>1 与 <1 两分支）、`presence/frequency_penalty`、
+  `no_repeat_ngram_size`（2/3）及其全开组合，`max_len` 取 4/5/8/16/64（4 与 5 保证每步滑动），
+  7×2 项 token 序列检查全部逐位相同；全默认参数时旧包装 `llm_generate_cached` 与
+  `llm_generate_cached_ex` 也返回同一串 token。
   窗口滑动时会重建 `max_len` 个 token 的 cache（与 Python `_generate_cached` 的重建分支一致），
   这就是「位置重基」——重算路径每步也把窗口当位置 0..T-1，二者语义相同。
 - **实测加速比**（`clock()`，prompt 8 + 新增 40，d_model=32，heads=4，d_ff=64，贪心；
@@ -218,6 +225,10 @@ KV 存在每层的 `cache_K` / `cache_V` 里，位置取「当前窗口内下标
   | 2 | 16（每步都滑动） | 24.300 ms | 21.150 ms | 1.15× |
   | 4 | 16（每步都滑动） | 44.950 ms | 41.000 ms | 1.10× |
 
+  > 上表是某一轮本机实测；绝对毫秒数随机器与负载变化。加入罚分/min_p 分支后复测，
+  > 同样的四组加速比为 20.91× / 21.67× / 1.31× / 1.00×，量级与趋势不变
+  > （罚分与 min_p 只在非默认参数时进入，贪心基准路径未改）。
+
   加速比与 Python 侧报告的 17.8× 同量级。窗口远大于生成长度时收益最大；`max_len` 等于窗口、
   每步都触发重建时，增量路径也要重算 `max_len` 个 token（单 token 前向的循环开销还略高于
   批量 `mm_nt`），所以只剩 ~1.1×——这是算法本身的性质，不是退化 bug。
@@ -225,7 +236,7 @@ KV 存在每层的 `cache_K` / `cache_V` 里，位置取「当前窗口内下标
 ### 8. 注意力 / TEL 跨语言对拍（`tests/compare_attention.c`）
 
 ```
-python tools/attention_reference.py && ./tests/compare_attention   # 9 个用例，全部 0.000e+00
+python tools/attention_reference.py && ./tests/compare_attention   # 13 个用例，全部 0.000e+00
 ```
 
 `attention_reference.py` 用固定种子在 Python 侧建模型，把权重、输入 `x`、上游梯度 `dout`、
@@ -240,7 +251,11 @@ python tools/attention_reference.py && ./tests/compare_attention   # 9 个用例
 | `mha_gqa` | h=4, kv=2, T=4 | 同上 |
 | `mha_mqa` | h=4, kv=1, T=5 | 同上 |
 | `mha_combo` | h=4, kv=2, window=2, RoPE, T=6 | 同上 |
+| `mha_alibi` | d=8, h=2, T=4, causal + ALiBi | out / dx / 8 组梯度 / `forward_step` 逐步输出 |
+| `mha_alibi_win` | h=4, kv=2, window=2, ALiBi, T=6 | 同上 |
+| `mha_alibi_rope` | h=2, T=5, causal + RoPE + ALiBi | 同上 |
 | `tel_causal` | d=8, h=2, ff=16, T=4 | out / dx / 注意力 8 组 / FFN 4 组 / LN 4 组梯度 |
+| `tel_alibi` | 同上 + ALiBi | 同上 |
 | `mha_dropout_p50` | d=8, h=2, T=4, p=0.5, training=1 | out / dx / 8 组梯度 / `forward_step`（注入 Python 生成的 mask） |
 | `mha_dropout_ctrl` | 同上权重，p=0, training=1 | 同上（dropout=0 对照，确认默认路径不变） |
 
@@ -256,6 +271,16 @@ python tools/attention_reference.py && ./tests/compare_attention   # 9 个用例
 雅可比是否用干净权重），容差仍是 0。实测 `mha_dropout_p50` 全部 `0.000e+00`；
 `mha_dropout_ctrl`（同权重、p=0）也全部 `0.000e+00`，说明默认路径没有被动到。
 
+**ALiBi 怎么对拍**：`mha_set_alibi(m, 1)` 后，前向在缩放后的 scores 上叠加
+`slope_h * (t - j)`（仅 `j <= t`），位置在 `softmax` 之前、因果/窗口掩码之前；反向不需要任何
+改动——常数偏置在 softmax 雅可比里自然抵消，`d_scores` 用的是已经含偏置的 `attn`。
+`slope_h = 2^(-8*(h+1)/num_heads)`；对拍用例取 `h = 2/4`，斜率恰为 2 的整数次幂
+（2^-4、2^-8 或 2^-2..2^-8），二进制可精确表示，所以 `pow` 的 1 ULP 问题不会出现，
+容差维持 0。4 个 ALiBi 用例（含 window、RoPE 组合与 TEL 透传）的 out / dx / 8 组梯度 /
+`forward_step` 全部 `0.000e+00`。单元测试另在 `test_attention` 第 2c 节把 `W_q`/`W_k` 置 0，
+直接验证 `attn[t][j] == softmax_j(slope*(t-j))` 的闭式解（实测 0.000e+00）、关闭后退化为
+均匀权重、`forward_step` 与整段一致，以及 `tel_set_alibi` / `te_set_alibi` 的逐层透传。
+
 > **顺带修掉一个真实的 GQA/MQA bug**：`mha_forward` 给 `v_full` 加 bias 时循环上界误用了
 > `d_model`，而 `b_v` 只有 `kv_dim` 长。GQA/MQA 下这会越界读 `b_v`，并把值写进 `v_full`
 > 下一行的开头（最后一行的写甚至越过缓冲区）。`mha_mqa` 用例第一次跑就暴露：输出差
@@ -263,6 +288,53 @@ python tools/attention_reference.py && ./tests/compare_attention   # 9 个用例
 > 修复后全部用例逐位相同；默认 `kv_dim == d_model` 时循环次数与顺序不变，`compare_llm` /
 > `test_llm_ext` 的既有结果未变。这个 bug 之前的 C 侧自测没抓到，是因为默认路径和
 > （碰巧拿到清零堆内存的）GQA 用例都没有触发可见差异。
+
+### 9. 生成采样增强：min_p 与五种罚分（`llm_generate_ex`）
+
+在原有 `temperature` / `top_k` / `top_p` 之外，新增与 Python `CausalLM.generate` 对齐的五个参数：
+
+```c
+int llm_generate_ex(CausalLM *m, const int *prompt, int prompt_len, int max_new,
+                    double temperature, int top_k, double top_p, double min_p,
+                    double repetition_penalty, double presence_penalty,
+                    double frequency_penalty, int no_repeat_ngram_size,
+                    int *out, unsigned long long seed);
+int llm_generate_cached_ex(/* 同参数 */);
+```
+
+旧的 `llm_generate` / `llm_generate_p` / `llm_generate_cached` 签名与行为一位没变：
+它们只是用默认值 `min_p=0, repetition_penalty=1, presence=0, frequency=0, ngram=0`
+转调 `*_ex`，而 `*_ex` 在「全部默认」时直接跳过罚分与 min_p 分支。`test_llm` 第 [10] 节用
+同 seed 比较新旧接口的 token 序列（贪心与 top_p 两组）逐位相同；`compare_llm` 第 [1]-[6] 段
+（前向、loss/梯度、Adam、训练、生成、top_p）结论也未变。
+
+**运算顺序**与 Python 完全一致：先用**完整历史 ids**（不只是当前窗口）做罚分，再 `top_k`
+（对原始 logits 排序）→ 除以 `temperature` → `top_p` 截尾 → `min_p` 截尾 → softmax → 逆变换采样。
+增量路径每步在 `llm_forward_step` 得到的 logits 上做同一套处理，因此 cached 与整段重算逐位一致。
+
+- `repetition_penalty`：对出现过的 token，`logit > 0` 时除以系数、`logit <= 0` 时乘以系数
+  （`== 0` 走乘法分支，结果仍为 0）；`1.0` 表示不惩罚。
+- `presence_penalty`：每个出现过的 token 扣一次；`frequency_penalty`：按出现次数扣
+  `count * frequency_penalty`。
+- `no_repeat_ngram_size = n >= 2`：取最近 `n-1` 个 token 作 prefix，扫描历史中所有相同
+  prefix，把其后继 token 的 logit 置 `-INFINITY`；`n = 0` 关闭，`n = 1` 非法。
+- `min_p ∈ [0,1)`：先对 `logits/temperature` 做 softmax，`thresh = min_p * max(prob)`，
+  概率严格小于阈值的 token 被置 `-INFINITY`；`min_p = 0` 时整段跳过。
+- 参数校验（`fprintf(stderr, ...)` + `exit(1)`，与其它入口一致）：`min_p` 必须为
+  `[0,1)` 内的有限数、`repetition_penalty > 0`、`presence/frequency` 有限、
+  `no_repeat_ngram_size >= 0 且 != 1`。
+
+**跨语言验证（容差 0）**：`tools/llm_reference.py` 新增 6 组 `gen_penalty_cases`，
+全部走 `top_k=1`（argmax 确定性，绕开 C/Python RNG 不同源的问题），每组同时导出
+`tokens_full` 与 `tokens_cached`（Python 侧先自检两条路径一致）。覆盖
+`repetition_penalty` 的 >1 / <1、`presence`、`frequency`、`ngram=2`、以及
+`rp+presence+frequency+ngram=3+min_p` 全开组合；其中 `rp=0.5, max_new=8` 与组合用例
+会触发窗口滑动。`compare_llm` 第 [7] 段用 `llm_generate_ex` 与 `llm_generate_cached_ex`
+分别比 `tokens_full` / `tokens_cached`，第 [8] 段用 `llm_min_p_candidates()` 比 8 个
+`min_p` 取值下的候选集合大小（11/5/4/3/3/1/1/1），全部 `[OK] (逐位相同)`。
+`llm_apply_generation_penalties()` 与 `llm_min_p_candidates()` 也作为公开诊断函数导出，
+`test_llm` 第 [9] 节直接用它们测正/负 logit 两分支、presence 只扣一次、frequency 按次数、
+ngram 禁后继、min_p 候选数（含整行 `-inf` 的边界）。
 
 ---
 
@@ -304,6 +376,8 @@ python tools/attention_reference.py && ./tests/compare_attention   # 9 个用例
 | **多步训练后的参数轨迹**（`compare_llm` 第 4 段） | 每步 `exp`/`log` 的 1 ULP 差异随步数累积：实测 3 轮后 `L0.attn.b_k` 差 3.7e-13（该参数本身约 1e-11，抵消把相对误差放大）、`out.W` 差 5.6e-17 | 结构错误是 1e-2 级，1e-13 可安全区分；比对程序对该段用 1e-12 容差 |
 | RNN 的 step cache 存副本 | Python 的 `_StepCacheMixin` 存的是引用（`self.x = x`） | C 侧存副本，调用方原地改写输入缓冲时不会污染缓存（有意差异） |
 | **任意 top_p / 随机采样的 token 不能跨语言逐位比较** | C 用 splitmix64，Python 用 `random.MT19937`；即使 logits 逐位相同，`_sample` 消耗的随机数也不同 | 确定性部分（logits、`perplexity`、`top_p` 只含 argmax 时的 token）已逐位对拍；随机采样只在 C 侧自测（同 seed 可复现、cached 与重算一致） |
+| **带罚分/min_p 的随机采样 token 仍不能跨语言比较** | 同上：罚分与 min_p 只改 logits，最后的采样仍消耗不同 RNG | 新增对拍只取 `top_k=1`（argmax 与 RNG 无关）的完整生成序列，以及 `llm_min_p_candidates` 的候选数；这两类都逐位相同。随机路径由 `test_llm_cache` 的 `generate_ex` vs `cached_ex` 覆盖 |
+| ALiBi 斜率在**任意头数**下可能差 1 ULP | `slope_h = pow(2, -8*(h+1)/H)`；`H` 不是 2 的幂时指数是无理数，MinGW 与 UCRT 的 `pow` 可能不同 | 对拍用例 `H = 2/4`，斜率恰为 2 的整数次幂，二进制精确，容差 0；其它 `H` 下偏置只进 softmax，误差量级 ~1e-16 |
 | 困惑度的 `loss > 700` 保护分支不可达 | `llm_evaluate` 与 Python 的 `evaluate` 一样把单位置概率夹在 `1e-12`，平均 loss 上界 `-log(1e-12) = 27.631021` | 纯防御代码（与 Python 的 `perplexity()` 完全对应），公开 API 无法触发；测试里不做行为断言并注明原因 |
 | nucleus 采样的并列概率 | Python 用 `sorted(..., reverse=True)` 的稳定排序（并列时小下标在前）；C 用 O(V²) 的「未保留中概率严格更大」扫描 | 选出的 token 集合完全相同；`top_p < 1` 时多 O(V²) 扫描，`top_p >= 1` 根本进不到该分支（故默认路径逐位一致） |
 
@@ -357,17 +431,18 @@ C 侧的错误风格是 `fprintf(stderr, ...)` + `exit(1)`（Python 版抛异常
 |------|------|--------------|
 | `check_ids` | 序列长度 1..`max_len`，每个 id 在 `[0, vocab_size)` | 越界会读坏缓冲 |
 | `llm_generate_p` / `llm_generate_cached` | `temperature > 0`、`top_p ∈ (0,1]`、**`top_k >= 0`** | `top_k < 0` 原来等价于"不过滤"，调用方以为自己在做 top-k |
+| `llm_generate_ex` / `llm_generate_cached_ex` | 除上面三条外：`min_p ∈ [0,1)`、`repetition_penalty > 0`、`presence/frequency` 有限、`no_repeat_ngram_size >= 0 且 != 1` | 非法值会让采样退化（如 `min_p >= 1` 全掩码、`rp <= 0` 除零/翻符号）或让 ngram 规则失去意义；与 Python `_check_min_p` / `_check_penalty_args` 的报错条件一一对应 |
 | `llm_loss_and_backward` / `llm_evaluate` | 前向后的 logits 必须全部有限 | 权重混进 NaN/Inf 时，loss 会被夹成 `-log(1e-12)=27.63`，训练照跑、梯度全 NaN，最难查 |
 | `softmax_row_inplace` | 整行 `-inf` 时直接返回全 0 | `exp(-inf - -inf)` 是 NaN。C 没有 `pad_mask`，正常路径进不到；与 Python 的 `_softmax_row` 保持同一语义 |
 
 注意这与"默认路径逐位一致"不冲突：上面每条都只在非法输入或原本会出 NaN 的分支上触发，
-合法输入的浮点运算顺序一位没动（11 个 `test_*.exe`、`compare_attention` 98 项、
-`compare_llm` 六段修复后仍全部 0.000e+00）。
+合法输入的浮点运算顺序一位没动（11 个 `test_*.exe`、`compare_attention` 146 项全部
+0.000e+00、`compare_llm` 八段的判定与数值修复前一致，第 4 段仍是 ≤3.7e-13 / 容差 1e-12）。
 
-### 四个注意力扩展与"默认路径不变"
+### 五个注意力扩展与"默认路径不变"
 
-四条扩展都遵守同一条纪律：**不打开就不进新代码路径**，所以默认配置下的运算序列与旧版完全相同
-（`compare_llm` 六段的判定就是这条纪律的回归测试）。
+五条扩展都遵守同一条纪律：**不打开就不进新代码路径**，所以默认配置下的运算序列与旧版完全相同
+（`compare_llm` 八段的判定就是这条纪律的回归测试）。
 
 - **滑动窗口**（`mha_set_window`）：`window > 0` 时隐含因果——先无条件屏蔽未来，再把
   `j < t - window + 1` 也置 `-INFINITY`；`window <= 0` 时整个分支不进。掩码在 softmax 之前，
@@ -396,6 +471,13 @@ C 侧的错误风格是 `fprintf(stderr, ...)` + `exit(1)`（Python 版抛异常
   `dV` 用乘过 mask 的 `attn_drop`，`d_attn` 先乘 mask，而 softmax 雅可比的 `s_t` 与
   `attn[t][j]*(...)` 仍用干净 `attn`。跨语言验证走 `mha_set_attn_mask()` 注入，
   不依赖两边 RNG 同源（见第 8 节）。
+- **ALiBi**（`mha_set_alibi` / `tel_set_alibi` / `te_set_alibi`）：`m->alibi == 0` 时整段
+  跳过；打开后只在 softmax 之前给 `j <= t` 的分数加 `slope_h*(t-j)`（`slope_h` 按
+  `2^(-8*(h+1)/num_heads)` 现算），因果/窗口掩码仍在其后。反向无需改动：偏置对分数的导数
+  在 softmax 雅可比里抵消，`d_scores` 用含偏置的 `attn` 计算即可。`mha_forward_step`
+  只对已见位置（天然 `j <= pos`）加同一偏置，所以增量与整段一致。`test_attention` 第 2c 节
+  验证闭式解、关闭退化、增量一致与 TEL/TE 透传；`compare_attention` 的 4 个 ALiBi 用例
+  覆盖 RoPE/window 组合，全部 0.000e+00。
 - **nucleus 采样**：`llm_generate` 只是一行委托 `llm_generate_p(..., 1.0, ...)`；`top_p >= 1.0`
   时那段代码**整块跳过**（不多抽一次随机数、不做额外运算），这才是"默认逐位一致"的原因，
   而不是"数值上恰好相等"。
@@ -431,5 +513,6 @@ GCC 默认 `-ffp-contract=fast`，在支持 FMA 的机器上 `s += W*x` 可能�
 - 跨语言等价性比对已覆盖归一化 / 卷积 / LLM / MHA+TEL（含 window/RoPE/GQA/MQA）；RNN 仍缺
   `rnn_reference.py` + `compare_rnn.c` 这一组前向/梯度对拍。
 - 未做 SIMD / OpenMP（本机 gcc 支持 `-fopenmp`），大矩阵还有数倍空间。
-- 增量 KV cache 已落地（第 7 节），但只在 `CausalLM` 的贪心/top_k/top_p 路径上验证；
+- 增量 KV cache 已落地（第 7 节），并在贪心、top_k/top_p、min_p 与各项罚分
+  （`llm_generate_cached_ex` vs `llm_generate_ex`，含窗口滑动）上逐位验证；
   beam search 与 `llm_fit` 不走 cache，暂无计划。
