@@ -380,6 +380,7 @@ W_q/W_k 清零、W_v/W_o 设为单位阵，经 `te_set_alibi` 透传后断言注
 | **任意 top_p / 随机采样的 token 不能跨语言逐位比较** | C 用 splitmix64，Python 用 `random.MT19937`；即使 logits 逐位相同，`_sample` 消耗的随机数也不同 | 确定性部分（logits、`perplexity`、`top_p` 只含 argmax 时的 token）已逐位对拍；随机采样只在 C 侧自测（同 seed 可复现、cached 与重算一致） |
 | **带罚分/min_p 的随机采样 token 仍不能跨语言比较** | 同上：罚分与 min_p 只改 logits，最后的采样仍消耗不同 RNG | 新增对拍只取 `top_k=1`（argmax 与 RNG 无关）的完整生成序列，以及 `llm_min_p_candidates` 的候选数；这两类都逐位相同。随机路径由 `test_llm_cache` 的 `generate_ex` vs `cached_ex` 覆盖 |
 | ALiBi 斜率在**任意头数**下可能差 1 ULP | `slope_h = pow(2, -8*(h+1)/H)`；`H` 不是 2 的幂时指数是无理数，MinGW 与 UCRT 的 `pow` 可能不同 | 对拍用例 `H = 2/4`，斜率恰为 2 的整数次幂，二进制精确，容差 0；其它 `H` 下偏置只进 softmax，误差量级 ~1e-16 |
+| C 的 `CausalLM` 构造不暴露 `alibi` 开关 | 本任务只要求 `MultiHeadAttention` / TEL / TE 层实现；`llm_create` 签名保持不变，避免动到既有调用点与参数块布局 | 需要 ALiBi 语言模型时调用 `te_set_alibi(m->enc, 1)`（逐层透传已实现）；单模块/单层数值由 `compare_attention` 的 4 个 ALiBi 用例覆盖，CausalLM 级别的 ALiBi 未单独跨语言对拍 |
 | 困惑度的 `loss > 700` 保护分支不可达 | `llm_evaluate` 与 Python 的 `evaluate` 一样把单位置概率夹在 `1e-12`，平均 loss 上界 `-log(1e-12) = 27.631021` | 纯防御代码（与 Python 的 `perplexity()` 完全对应），公开 API 无法触发；测试里不做行为断言并注明原因 |
 | nucleus 采样的并列概率 | Python 用 `sorted(..., reverse=True)` 的稳定排序（并列时小下标在前）；C 用 O(V²) 的「未保留中概率严格更大」扫描 | 选出的 token 集合完全相同；`top_p < 1` 时多 O(V²) 扫描，`top_p >= 1` 根本进不到该分支（故默认路径逐位一致） |
 
