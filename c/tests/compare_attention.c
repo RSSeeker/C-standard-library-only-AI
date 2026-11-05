@@ -106,6 +106,7 @@ static void run_mha(const JsonValue *c)
     const double rope_base = json_num(need(cfg, "rope_base", "config"), 10000.0);
     const double dropout = json_num(need(cfg, "dropout", "config"), 0.0);
     const int training = opt_int(cfg, "training");
+    const int alibi = opt_int(cfg, "alibi");
     const int dk = d / h;
     const int kv_dim = kv * dk;
 
@@ -121,6 +122,7 @@ static void run_mha(const JsonValue *c)
     mha_set_causal(m, causal);
     mha_set_window(m, window);
     if (rope) mha_set_rope(m, 1, rope_base);
+    if (alibi) mha_set_alibi(m, 1);
 
     /* 注意力权重 dropout：training 由参考数据显式给出；mask 有就注入，
      * 这样跨语言比较用的是同一份 mask，与两边 RNG 是否同源无关。 */
@@ -224,6 +226,7 @@ static void run_tel(const JsonValue *c)
     const int max_seq = need_int(cfg, "max_seq", "config");
     const int causal = need_int(cfg, "causal", "config");
     const double dropout = json_num(need(cfg, "dropout", "config"), 0.0);
+    const int alibi = opt_int(cfg, "alibi");
     const int dk = d / h;
     const int kv_dim = h * dk;   /* TEL 的 MHA 目前固定 num_kv_heads == num_heads */
 
@@ -232,6 +235,7 @@ static void run_tel(const JsonValue *c)
 
     TransformerEncoderLayer *l = tel_create(d, h, ff, max_seq, dropout, 12345);
     tel_set_causal(l, causal);
+    if (alibi) tel_set_alibi(l, 1);
     tel_set_train(l, 0);
 
     const JsonValue *p = need(c, "params", "case");

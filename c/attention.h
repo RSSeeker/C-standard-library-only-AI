@@ -116,6 +116,7 @@ typedef struct {
     int rope;               /* 1 = 对 q/k 施加旋转位置编码（RoPE，GPT-NeoX 版式）；0 = 关闭 */
     double rope_base;       /* RoPE 频率基数（默认 10000.0，与 Python 的 rope_base 一致） */
     double *rope_freq;      /* (d_k/2) 预计算频率 1/(base^(2i/d_k))；仅 rope 打开时使用 */
+    int alibi;              /* 1 = 在 softmax 前叠加 ALiBi 距离偏置 slope_h*(t-j)；0 = 关闭（默认） */
 
     /* ---------- 增量推理（KV cache，单 token 前向）----------
      * 只用于生成，不参与反向：cache 存每个 KV 头在窗口内的 K/V 与已写入位置。
@@ -194,6 +195,12 @@ void mha_set_window(MultiHeadAttention *m, int window);
  * 注意：RoPE 只是把绝对位置信息混进 q/k，因此打开时通常应关闭 PositionalEncoding
  * （CausalLM 侧见 llm_set_rope）。 */
 void mha_set_rope(MultiHeadAttention *m, int enable, double base);
+/* ALiBi（Attention with Linear Biases），对应 Python 的 MultiHeadAttention(alibi=True)：
+ * enable != 0：在分数乘完 scale、做因果/窗口掩码**之前**，对第 head 个头的每个可见位置
+ *   (t, j)（j <= t）叠加 slope_h * (t - j)，其中 slope_h = 2^(-8*(h+1)/num_heads)。
+ *   偏置是常数，反向不需要改（softmax 的雅可比会自动处理）。
+ * enable == 0：关闭（默认），代码路径与开启前逐位相同。必须在 mha_forward 之前调用。 */
+void mha_set_alibi(MultiHeadAttention *m, int on);
 /* 训练/推理模式（默认 0 = 推理）。只有 training=1 且 dropout_p>0 时才对注意力权重做
  * inverted dropout；training=0 时整段 dropout 代码不进，数值与旧版逐位相同。
  * 与 Python 的 mha.train() / mha.eval() 对应；tel_set_train 会转发给 self_attn。 */
@@ -302,6 +309,8 @@ TransformerEncoderLayer *tel_create(int d_model, int num_heads, int d_ff,
 void tel_free(TransformerEncoderLayer *l);
 /* 因果掩码开关（转发给 self_attn），默认关闭 */
 void tel_set_causal(TransformerEncoderLayer *l, int causal);
+/* ALiBi 开关（转发给 self_attn），默认关闭 */
+void tel_set_alibi(TransformerEncoderLayer *l, int on);
 void tel_zero_grad(TransformerEncoderLayer *l);
 void tel_forward(TransformerEncoderLayer *l, const Tensor *x, Tensor *out);
 /* 单 token 增量前向（eval 语义，不走 dropout）：x_t → out_t，长度都是 d_model。
@@ -335,6 +344,8 @@ TransformerEncoder *te_create(int d_model, int num_heads, int d_ff, int num_laye
 void te_free(TransformerEncoder *e);
 /* 因果掩码开关（转发给每一层），默认关闭 */
 void te_set_causal(TransformerEncoder *e, int causal);
+/* ALiBi 开关（转发给每一层），默认关闭 */
+void te_set_alibi(TransformerEncoder *e, int on);
 void te_zero_grad(TransformerEncoder *e);
 void te_forward(TransformerEncoder *e, const Tensor *x, Tensor *out);
 /* 单 token 增量前向：清空全部层的 KV cache / 逐层单步前向（x_t、out_t 长度都是 d_model） */

@@ -50,12 +50,12 @@ def make_x(T, d, scale):
             for t in range(T)]
 
 
-def mha_case(name, d, h, kv, T, causal, window, rope, seed):
+def mha_case(name, d, h, kv, T, causal, window, rope, seed, alibi=False):
     random.seed(seed)
     m = AI.MultiHeadAttention(d, h, dropout=0.0, causal=bool(causal),
                               rope=bool(rope), rope_base=10000.0,
                               window=(window if window else None),
-                              num_kv_heads=kv)
+                              num_kv_heads=kv, alibi=bool(alibi))
     m.eval()   # dropout 关闭；本组用例 p=0，数值与 train 相同
     x = make_x(T, d, 0.125)
     dout = make_x(T, d, 0.25)
@@ -80,7 +80,8 @@ def mha_case(name, d, h, kv, T, causal, window, rope, seed):
         "config": {"d_model": d, "num_heads": h, "num_kv_heads": kv,
                    "max_seq": max(T, 6), "causal": int(bool(causal)),
                    "window": int(window), "rope": int(bool(rope)),
-                   "rope_base": 10000.0, "dropout": 0.0},
+                   "rope_base": 10000.0, "dropout": 0.0,
+                   "alibi": int(bool(alibi))},
         "params": params,
         "x": flat(x),
         "dout": flat(dout),
@@ -187,9 +188,10 @@ def mha_dropout_case(name, d, h, kv, T, p, training, seed, causal=1):
     return case
 
 
-def tel_case(name, d, h, ff, T, seed):
+def tel_case(name, d, h, ff, T, seed, alibi=False):
     random.seed(seed)
-    layer = AI.TransformerEncoderLayer(d, h, ff, dropout=0.0, causal=True)
+    layer = AI.TransformerEncoderLayer(d, h, ff, dropout=0.0, causal=True,
+                                       alibi=bool(alibi))
     layer.eval()
     x = make_x(T, d, 0.125)
     dout = make_x(T, d, 0.25)
@@ -219,7 +221,8 @@ def tel_case(name, d, h, ff, T, seed):
         "name": name,
         "kind": "tel",
         "config": {"d_model": d, "num_heads": h, "d_ff": ff,
-                   "max_seq": max(T, 6), "causal": 1, "dropout": 0.0},
+                   "max_seq": max(T, 6), "causal": 1, "dropout": 0.0,
+                   "alibi": int(bool(alibi))},
         "params": params,
         "x": flat(x),
         "dout": flat(dout),
@@ -247,6 +250,15 @@ def main():
         mha_case("mha_combo", d=8, h=4, kv=2, T=6, causal=0, window=2,
                  rope=1, seed=1006),
         tel_case("tel_causal", d=8, h=2, ff=16, T=4, seed=1007),
+        # ALiBi：slope_h = 2^(-8*(h+1)/num_heads)，h=2/4 时是 2 的整数次幂，
+        # 两种语言都能精确表示；out / dx / 8 组梯度 / forward_step 都要求逐位相同。
+        mha_case("mha_alibi", d=8, h=2, kv=2, T=4, causal=1, window=0,
+                 rope=0, seed=1009, alibi=1),
+        mha_case("mha_alibi_win", d=8, h=4, kv=2, T=6, causal=0, window=2,
+                 rope=0, seed=1010, alibi=1),
+        mha_case("mha_alibi_rope", d=8, h=2, kv=2, T=5, causal=1, window=0,
+                 rope=1, seed=1011, alibi=1),
+        tel_case("tel_alibi", d=8, h=2, ff=16, T=4, seed=1012, alibi=1),
         # 注意力权重 dropout：同一 seed/权重下，training=1 + p=0.5（注入固定 mask）
         # 与 p=0 对照。C 侧对前者调 mha_set_training(1) + mha_set_attn_mask()，
         # 对后者保持默认；两者除 dropout 外完全同源，差异只可能来自 dropout 实现。

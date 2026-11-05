@@ -524,6 +524,23 @@ void mha_set_rope(MultiHeadAttention *m, int enable, double base)
     }
 }
 
+/* ALiBi 的第 head 个头斜率：slope_h = 2^(-8*(h+1)/num_heads)，与 Python 的
+ * alibi_slopes 公式逐字一致。num_heads 为 2/4/8 时指数是负整数，pow 的结果是
+ * 精确的二进制小数（1/4、1/16…），因此跨语言零容差对拍不会因 libm 差异假失败。 */
+static double alibi_slope(int head, int num_heads)
+{
+    return pow(2.0, -8.0 * (double)(head + 1) / (double)num_heads);
+}
+
+void mha_set_alibi(MultiHeadAttention *m, int on)
+{
+    if (!m) {
+        fprintf(stderr, "mha_set_alibi: m 为 NULL\n");
+        exit(1);
+    }
+    m->alibi = on ? 1 : 0;
+}
+
 void mha_set_training(MultiHeadAttention *m, int on)
 {
     if (!m) {
@@ -668,6 +685,11 @@ void mha_forward_step(MultiHeadAttention *m, const double *x_t, double *out_t)
         double *sc = m->step_scores;
         for (int j = 0; j <= pos; j++)
             sc[j] = dot_neumaier(qh, kc + (size_t)j * dk, dk) * scale;
+        /* ALiBi：已见的 j 都满足 j <= pos，直接叠加 slope*(pos-j)。 */
+        if (m->alibi) {
+            const double slope = alibi_slope(head, m->num_heads);
+            for (int j = 0; j <= pos; j++) sc[j] += slope * (double)(pos - j);
+        }
         if (m->window > 0) {
             int lo = pos - m->window + 1;
             if (lo < 0) lo = 0;
@@ -766,6 +788,17 @@ void mha_forward(MultiHeadAttention *m, const Tensor *x, Tensor *out)
         /* scores = q_h @ k_h^T * scale，随后逐行 softmax（就地） */
         mm_nt(qh, dk, kh, dk, attn, T, T, dk, T);
         for (int i = 0; i < T * T; i++) attn[i] *= scale;
+
+        /* ALiBi：softmax 前叠加斜率 × 相对距离（仅 j <= t），随后才是掩码。
+         * 偏置对分数是常数平移之外的逐位置项，反向无需改动 —— d_scores 由 softmax
+         * 之后的 attn 算，雅可比本身已含偏置的影响。 */
+        if (m->alibi) {
+            const double slope = alibi_slope(head, m->num_heads);
+            for (int t = 0; t < T; t++) {
+                double *row = attn + (size_t)t * T;
+                for (int j = 0; j <= t; j++) row[j] += slope * (double)(t - j);
+            }
+        }
 
         /* 因果掩码：位置 t 只能看到 0..t，其余置 -INFINITY。
          * 滑动窗口（window > 0）隐含因果：先无条件屏蔽未来，再把 t-window+1 之前的一并屏蔽
@@ -1183,6 +1216,15 @@ void tel_set_causal(TransformerEncoderLayer *l, int causal)
     mha_set_causal(l->self_attn, causal);
 }
 
+void tel_set_alibi(TransformerEncoderLayer *l, int on)
+{
+    if (!l) {
+        fprintf(stderr, "tel_set_alibi: l 为 NULL\n");
+        exit(1);
+    }
+    mha_set_alibi(l->self_attn, on);
+}
+
 void tel_zero_grad(TransformerEncoderLayer *l)
 {
     /* 对应 Python 的 zero_grad：清 LayerNorm 梯度 + 子模块梯度 */
@@ -1428,6 +1470,15 @@ void te_set_causal(TransformerEncoder *e, int causal)
         exit(1);
     }
     for (int i = 0; i < e->num_layers; i++) tel_set_causal(e->layers[i], causal);
+}
+
+void te_set_alibi(TransformerEncoder *e, int on)
+{
+    if (!e) {
+        fprintf(stderr, "te_set_alibi: e 为 NULL\n");
+        exit(1);
+    }
+    for (int i = 0; i < e->num_layers; i++) tel_set_alibi(e->layers[i], on);
 }
 
 /* 把 (max_seq_len, d_model) 的乒乓缓冲按当前 T 取视图 */

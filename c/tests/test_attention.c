@@ -7,6 +7,8 @@
  *      —— 历史上的「整体转置」bug 就是靠这个查出来的
  *   2b. 注意力权重 dropout：training=0 恒等、注入 mask 的语义（丢弃位置为 0、
  *      保留位置 = 干净权重×1/(1-p)）、固定 mask 下 grad_W_v 的相对误差
+ *   2c. ALiBi：attn = softmax(slope*(t-j)) 的闭式解、关闭后退化为均匀权重、
+ *      forward_step 与整段一致、tel_set_alibi / te_set_alibi 透传
  *   3. FeedForward 数值梯度 + 形状
  *   4. Sequential：前向串联顺序、反向逆序、参数量/清零/递归释放
  *   5. ResidualBlock：dx = dout + 子层输入梯度（有限差分验证）
@@ -438,6 +440,108 @@ static void test_attn_dropout(void)
     tensor_free(o0); tensor_free(o1); tensor_free(d0); tensor_free(d1);
     mha_free(m);
     mha_free(ref);
+}
+
+/* --------------------- 2c. ALiBi --------------------- */
+
+/* 闭式解验证：把 W_q / W_k 全部置 0，则缩放后的注意力分数恒为 0，
+ * softmax 前的唯一偏置就是 ALiBi 的 slope_h*(t-j)（j <= t）。
+ * 于是 attn[t][j] 必须等于 softmax_j(slope*(t-j))，可以直接手算对比。 */
+static void test_alibi(void)
+{
+    const int d = 2, heads = 1, T = 3, max_seq = 4;
+    MultiHeadAttention *m = mha_create(d, heads, max_seq, 0.0);
+    printf("\n=== 2c. ALiBi 距离偏置（闭式解 / 开关 / 增量一致 / 透传）===\n");
+
+    printf("  默认 alibi=%d %s\n", m->alibi, m->alibi == 0 ? "[OK]" : "[错误]");
+    if (m->alibi != 0) g_fail++;
+
+    double Wq[4] = { 0, 0, 0, 0 }, Wk[4] = { 0, 0, 0, 0 };
+    double Wv[4] = { 1, 0, 0, 1 }, Wo[4] = { 1, 0, 0, 1 };
+    double bq[2] = { 0, 0 }, bk[2] = { 0, 0 }, bv[2] = { 0, 0 }, bo[2] = { 0, 0 };
+    mha_set_params(m, Wq, bq, Wk, bk, Wv, bv, Wo, bo);
+    mha_set_causal(m, 1);
+    mha_set_alibi(m, 1);
+
+    int shape[2] = { T, d };
+    Tensor *x = tensor_new(2, shape);
+    Tensor *out = tensor_new(2, shape);
+    for (int i = 0; i < x->size; i++) x->data[i] = 0.125;
+
+    mha_forward(m, x, out);
+    const double slope = pow(2.0, -8.0 / (double)heads);
+    double worst = 0.0;
+    for (int t = 0; t < T; t++) {
+        double p[8], s = 0.0;
+        for (int j = 0; j <= t; j++) {
+            p[j] = exp(slope * (double)(t - j));
+            s += p[j];
+        }
+        for (int j = 0; j <= t; j++) {
+            double df = fabs(m->attn[t * T + j] - p[j] / s);
+            if (df > worst) worst = df;
+        }
+        /* 因果掩码之外必须严格为 0（softmax 后 exp(-inf) = 0） */
+        for (int j = t + 1; j < T; j++) {
+            if (m->attn[t * T + j] != 0.0) worst = 1e9;
+        }
+    }
+    check("attn = softmax(slope*(t-j))", worst, 1e-14);
+
+    /* 关闭 ALiBi：分数全 0，因果 softmax 退化为均匀 1/(t+1) */
+    mha_set_alibi(m, 0);
+    mha_forward(m, x, out);
+    worst = 0.0;
+    for (int t = 0; t < T; t++) {
+        for (int j = 0; j <= t; j++) {
+            double df = fabs(m->attn[t * T + j] - 1.0 / (double)(t + 1));
+            if (df > worst) worst = df;
+        }
+    }
+    check("alibi=0 退化为均匀权重", worst, 1e-15);
+
+    /* 重新开启：增量前向逐 token 应与整段前向一致 */
+    mha_set_alibi(m, 1);
+    mha_forward(m, x, out);
+    mha_cache_reset(m);
+    double *step = xmalloc((size_t)d * sizeof(double));
+    worst = 0.0;
+    for (int t = 0; t < T; t++) {
+        mha_forward_step(m, x->data + (size_t)t * d, step);
+        for (int j = 0; j < d; j++) {
+            double df = fabs(step[j] - out->data[(size_t)t * d + j]);
+            if (df > worst) worst = df;
+        }
+    }
+    check("forward_step 与整段一致", worst, 1e-14);
+    free(step);
+
+    /* TEL / TE 透传 */
+    TransformerEncoderLayer *l = tel_create(4, 2, 8, 6, 0.0, 7);
+    tel_set_alibi(l, 1);
+    int pass = (l->self_attn->alibi == 1);
+    printf("  tel_set_alibi 透传             %s\n", pass ? "[OK]" : "[错误]");
+    if (!pass) g_fail++;
+    tel_set_alibi(l, 0);
+    if (l->self_attn->alibi != 0) {
+        g_fail++;
+        printf("  tel_set_alibi(0) 透传          [错误]\n");
+    }
+    tel_free(l);
+
+    TransformerEncoder *e = te_create(4, 2, 8, 3, 6, 0.0, 9);
+    te_set_alibi(e, 1);
+    pass = 1;
+    for (int i = 0; i < e->num_layers; i++) {
+        if (e->layers[i]->self_attn->alibi != 1) pass = 0;
+    }
+    printf("  te_set_alibi 逐层透传          %s\n", pass ? "[OK]" : "[错误]");
+    if (!pass) g_fail++;
+    te_free(e);
+
+    tensor_free(x);
+    tensor_free(out);
+    mha_free(m);
 }
 
 /* ------------------------------ 3. FeedForward ------------------------------ */
@@ -1113,6 +1217,7 @@ int main(void)
 
     test_mha();
     test_attn_dropout();
+    test_alibi();
     test_ff();
     test_containers();
     test_transformer();
