@@ -334,7 +334,9 @@ int llm_generate_cached_ex(/* 同参数 */);
 `min_p` 取值下的候选集合大小（11/5/4/3/3/1/1/1），全部 `[OK] (逐位相同)`。
 `llm_apply_generation_penalties()` 与 `llm_min_p_candidates()` 也作为公开诊断函数导出，
 `test_llm` 第 [9] 节直接用它们测正/负 logit 两分支、presence 只扣一次、frequency 按次数、
-ngram 禁后继、min_p 候选数（含整行 `-inf` 的边界）。
+ngram 禁后继、min_p 候选数（含整行 `-inf` 的边界）。第 [11] 节则把编码器第一层的
+W_q/W_k 清零、W_v/W_o 设为单位阵，经 `te_set_alibi` 透传后断言注意力权重严格等于
+`softmax(slope*(t-j))`（关闭时退化为 `1/(t+1)`），把 TEL/TE 的透传也纳入 C 侧单测。
 
 ---
 

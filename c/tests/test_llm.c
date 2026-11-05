@@ -13,6 +13,7 @@
  *   9. 生成罚分 / min_p：repetition 的正负 logit 两分支、presence 扣一次、
  *      frequency 按次数扣、no_repeat_ngram 禁后继、min_p 的候选数
  *  10. 旧生成 API 与 llm_generate_ex 全默认参数逐 token 一致（min_p=0 不变）
+ *  11. ALiBi：TE -> TEL -> MHA 透传后权重等于 softmax(slope*(t-j)) 的闭式解
  *
  * 非法输入走 exit(1)，不在这里测（与其它 test_*.c 的约定一致：那是进程级行为）。
  * 全部通过返回 0；任何一项超差返回 1。
@@ -437,6 +438,84 @@ int main(int argc, char **argv)
         check_true("llm_generate_p == ex(默认)", same);
 
         llm_free(g);
+    }
+
+    /* ------------------ 11. ALiBi 闭式解（TE -> TEL -> MHA 透传） ------------------ */
+    printf("\n[11] ALiBi：注意力权重等于 softmax(slope*(t-j))\n");
+    {
+        const int dv = 4;   /* d_model；单头，slope = 2^-8 */
+        const int T = 3;
+        CausalLM *a = llm_create(vocab, dv, 1, 8, 1, 8, 0.0, 61);
+        llm_set_train(a, 0);
+        MultiHeadAttention *att = a->enc->layers[0]->self_attn;
+
+        /* 让分数只由 ALiBi 决定：W_q/W_k 全 0，W_v/W_o 单位阵，所有 bias 0。
+         * 这样 q=k=0，scores[t][j] 恒为 0，叠加的偏置就是唯一变量。 */
+        for (int i = 0; i < dv * dv; i++) {
+            att->W_q[i] = 0.0;
+            att->W_k[i] = 0.0;
+        }
+        for (int i = 0; i < dv; i++) {
+            for (int j = 0; j < dv; j++) {
+                att->W_v[i * dv + j] = (i == j) ? 1.0 : 0.0;
+                att->W_o[i * dv + j] = (i == j) ? 1.0 : 0.0;
+            }
+            att->b_q[i] = att->b_k[i] = att->b_v[i] = att->b_o[i] = 0.0;
+        }
+
+        int ids[3] = { 1, 2, 3 };
+        int dims[2] = { T, vocab };
+        Tensor *lo = tensor_new(2, dims);
+
+        /* 关闭：因果 softmax 退化为均匀 1/(t+1) */
+        llm_forward(a, ids, T, lo);
+        double worst = 0.0;
+        for (int t = 0; t < T; t++) {
+            for (int j = 0; j <= t; j++) {
+                double df = fabs(att->attn[t * T + j] - 1.0 / (double)(t + 1));
+                if (df > worst) worst = df;
+            }
+            for (int j = t + 1; j < T; j++) {
+                if (att->attn[t * T + j] != 0.0) worst = 1e9;
+            }
+        }
+        check("alibi=0 均匀权重", worst, 0.0);
+
+        /* 打开（经 TE 逐层透传到 MHA）：softmax(slope*(t-j))，单头 slope=2^-8 */
+        te_set_alibi(a->enc, 1);
+        llm_forward(a, ids, T, lo);
+        const double slope = pow(2.0, -8.0);
+        worst = 0.0;
+        for (int t = 0; t < T; t++) {
+            double p[8], s = 0.0;
+            for (int j = 0; j <= t; j++) {
+                p[j] = exp(slope * (double)(t - j));
+                s += p[j];
+            }
+            for (int j = 0; j <= t; j++) {
+                double df = fabs(att->attn[t * T + j] - p[j] / s);
+                if (df > worst) worst = df;
+            }
+            for (int j = t + 1; j < T; j++) {
+                if (att->attn[t * T + j] != 0.0) worst = 1e9;
+            }
+        }
+        check("attn = softmax(slope*(t-j))", worst, 1e-14);
+
+        /* 再次关闭：权重回到均匀，证明开关幂等 */
+        te_set_alibi(a->enc, 0);
+        llm_forward(a, ids, T, lo);
+        worst = 0.0;
+        for (int t = 0; t < T; t++) {
+            for (int j = 0; j <= t; j++) {
+                double df = fabs(att->attn[t * T + j] - 1.0 / (double)(t + 1));
+                if (df > worst) worst = df;
+            }
+        }
+        check("te_set_alibi(0) 恢复均匀权重", worst, 0.0);
+
+        tensor_free(lo);
+        llm_free(a);
     }
 
     printf("\n%s\n", g_fail ? "存在失败项" : "全部通过");
