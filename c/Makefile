@@ -57,6 +57,8 @@ check: compare_python
 	$(MAKE) tests/compare_norm && ./tests/compare_norm norm_reference.json
 	python tools/adamw_reference.py adamw_reference.json
 	$(MAKE) tests/compare_adamw && ./tests/compare_adamw adamw_reference.json
+	python tools/lion_reference.py lion_reference.json
+	$(MAKE) tests/compare_lion && ./tests/compare_lion lion_reference.json
 	python tools/conv_reference.py conv_reference.json
 	$(MAKE) tests/compare_conv && ./tests/compare_conv conv_reference.json
 	python tools/llm_reference.py llm_reference.json
@@ -66,6 +68,7 @@ clean:
 	rm -f $(BINS) $(BINS:=.exe) $(addprefix tests/,$(TESTS)) \
 	      $(addsuffix .exe,$(addprefix tests/,$(TESTS))) *.o *.obj \
 	      reference.txt c_model.json c_forward.txt py_model.json py_forward.txt self_model.json \
-	      norm_reference.json conv_reference.json llm_reference.json adamw_reference.json
+	      norm_reference.json conv_reference.json llm_reference.json \
+	      adamw_reference.json lion_reference.json
 
 .PHONY: all test check clean

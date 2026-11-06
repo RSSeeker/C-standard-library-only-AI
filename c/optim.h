@@ -82,4 +82,34 @@ const double *adamw_v_w(const AdamW *self, int k);
 const double *adamw_m_b(const AdamW *self, int k);
 const double *adamw_v_b(const AdamW *self, int k);
 
+/* =============================== Lion ==============================
+ * Python: c = b1*m + (1-b1)*g
+ *         upd = sign(c) + wd*w          （wd 乘的是"更新前"的参数）
+ *         w -= lr * upd
+ *         m = b2*m + (1-b2)*g
+ * 与 AdamW 的差别：没有二阶矩、没有偏差修正、衰减不做乘法而是加进更新量。
+ * sign(c) 在 c==0 时取 0（Python 的三分支写法，不是 copysign）。
+ * 状态：每层 m_w（fan_out×fan_in）、m_b（fan_out），全零初始。
+ */
+typedef struct Lion Lion;
+
+/* 校验：beta1/beta2 必须在 [0,1]，weight_decay >= 0（与 Python 一致）。 */
+Lion *lion_create(const OptLayer *layers, int n_layers,
+                  double lr, double beta1, double beta2,
+                  double weight_decay, const char **err);
+int  lion_step(Lion *self, const char **err);
+void lion_free(Lion *self);
+
+int    lion_step_count(const Lion *self);
+int    lion_num_layers(const Lion *self);
+double lion_lr(const Lion *self);
+void   lion_set_lr(Lion *self, double lr);
+double lion_weight_decay(const Lion *self);
+double lion_beta1(const Lion *self);
+double lion_beta2(const Lion *self);
+
+/* 只读状态（对拍用），越界返回 NULL。m_w 长度 fan_out*fan_in，m_b 长度 fan_out。 */
+const double *lion_m_w(const Lion *self, int k);
+const double *lion_m_b(const Lion *self, int k);
+
 #endif /* AI_OPTIM_H */

@@ -239,3 +239,171 @@ const double *adamw_v_b(const AdamW *self, int k)
     if (!self || k < 0 || k >= self->n_layers) return NULL;
     return self->v_b[k];
 }
+
+/* =============================== Lion ============================== */
+
+struct Lion {
+    int n_layers;
+    OptLayer *layers;
+
+    double lr;
+    double beta1;
+    double beta2;
+    double weight_decay;
+    int step_count;
+
+    /* 只有一阶矩：m_w 长度 fan_out*fan_in，m_b 长度 fan_out */
+    double **m_w;
+    double **m_b;
+};
+
+Lion *lion_create(const OptLayer *layers, int n_layers,
+                  double lr, double beta1, double beta2,
+                  double weight_decay, const char **err)
+{
+    if (err) *err = NULL;
+
+    const char *bad = check_layers(layers, n_layers, "Lion");
+    /* 校验顺序与文案照抄 Python（beta1 -> beta2 -> weight_decay） */
+    if (!bad && (beta1 < 0.0 || beta1 > 1.0)) bad = "Lion: beta1 必须在 [0,1]";
+    if (!bad && (beta2 < 0.0 || beta2 > 1.0)) bad = "Lion: beta2 必须在 [0,1]";
+    if (!bad && weight_decay < 0.0) bad = "Lion: weight_decay 必须 >= 0";
+    if (bad) {
+        if (err) *err = bad;
+        return NULL;
+    }
+
+    Lion *self = xcalloc(1, sizeof(Lion));
+    self->n_layers = n_layers;
+    self->layers = xmalloc((size_t)n_layers * sizeof(OptLayer));
+    memcpy(self->layers, layers, (size_t)n_layers * sizeof(OptLayer));
+
+    self->lr = lr;
+    self->beta1 = beta1;
+    self->beta2 = beta2;
+    self->weight_decay = weight_decay;
+    self->step_count = 0;
+
+    self->m_w = xcalloc((size_t)n_layers, sizeof(double *));
+    self->m_b = xcalloc((size_t)n_layers, sizeof(double *));
+    for (int k = 0; k < n_layers; k++) {
+        const size_t nw = (size_t)layers[k].fan_out * (size_t)layers[k].fan_in;
+        const size_t nb = (size_t)layers[k].fan_out;
+        self->m_w[k] = xcalloc(nw, sizeof(double));
+        self->m_b[k] = xcalloc(nb, sizeof(double));
+    }
+    return self;
+}
+
+void lion_free(Lion *self)
+{
+    if (!self) return;
+    for (int k = 0; k < self->n_layers; k++) {
+        free(self->m_w[k]);
+        free(self->m_b[k]);
+    }
+    free(self->m_w);
+    free(self->m_b);
+    free(self->layers);
+    free(self);
+}
+
+/* Python 的 sign 是三分支表达式：c>0 -> 1.0，c<0 -> -1.0，c==0 -> 0.0。
+ * 注意不能写成 copysign(1.0, c)（c==0 时 copysign 给 +1），也不能写成 (c>0)-(c<0) 之后再乘，
+ * 这里保持与 Python 完全相同的分支结构。 */
+static double lion_sign(double c)
+{
+    if (c > 0.0) return 1.0;
+    if (c < 0.0) return -1.0;
+    return 0.0;
+}
+
+int lion_step(Lion *self, const char **err)
+{
+    if (err) *err = NULL;
+    if (!self) {
+        if (err) *err = "Lion: step 收到 NULL 优化器";
+        return -1;
+    }
+
+    self->step_count += 1;
+    const double b1 = self->beta1, b2 = self->beta2;
+    const double lr = self->lr, wd = self->weight_decay;
+    const double o1 = 1.0 - b1;
+    const double o2 = 1.0 - b2;
+
+    for (int k = 0; k < self->n_layers; k++) {
+        OptLayer *l = &self->layers[k];
+        double *m_w = self->m_w[k], *m_b = self->m_b[k];
+        const int fo = l->fan_out, fi = l->fan_in;
+
+        for (int j = 0; j < fo; j++) {
+            /* ---- 偏置：c 用旧动量与当前梯度，upd 里的 wd 项用旧参数 ---- */
+            double g = l->gb[j];
+            double c = b1 * m_b[j] + o1 * g;
+            double upd = lion_sign(c) + wd * l->b[j];
+            l->b[j] -= lr * upd;
+            m_b[j] = b2 * m_b[j] + o2 * g;
+
+            /* ---- 权重第 j 行 ---- */
+            const double *gwj = l->gw + (size_t)j * (size_t)fi;
+            double *Wj = l->w + (size_t)j * (size_t)fi;
+            double *mwj = m_w + (size_t)j * (size_t)fi;
+            for (int i = 0; i < fi; i++) {
+                g = gwj[i];
+                c = b1 * mwj[i] + o1 * g;
+                upd = lion_sign(c) + wd * Wj[i];
+                Wj[i] -= lr * upd;
+                mwj[i] = b2 * mwj[i] + o2 * g;
+            }
+        }
+    }
+    return 0;
+}
+
+int lion_step_count(const Lion *self)
+{
+    return self ? self->step_count : 0;
+}
+
+int lion_num_layers(const Lion *self)
+{
+    return self ? self->n_layers : 0;
+}
+
+double lion_lr(const Lion *self)
+{
+    return self ? self->lr : 0.0;
+}
+
+void lion_set_lr(Lion *self, double lr)
+{
+    if (self) self->lr = lr;
+}
+
+double lion_weight_decay(const Lion *self)
+{
+    return self ? self->weight_decay : 0.0;
+}
+
+double lion_beta1(const Lion *self)
+{
+    return self ? self->beta1 : 0.0;
+}
+
+double lion_beta2(const Lion *self)
+{
+    return self ? self->beta2 : 0.0;
+}
+
+const double *lion_m_w(const Lion *self, int k)
+{
+    if (!self || k < 0 || k >= self->n_layers) return NULL;
+    return self->m_w[k];
+}
+
+const double *lion_m_b(const Lion *self, int k)
+{
+    if (!self || k < 0 || k >= self->n_layers) return NULL;
+    return self->m_b[k];
+}
