@@ -112,4 +112,41 @@ double lion_beta2(const Lion *self);
 const double *lion_m_w(const Lion *self, int k);
 const double *lion_m_b(const Lion *self, int k);
 
+/* ============================= Adafactor =============================
+ * Python (AI.py:17921)：行/列二阶矩的因子化，显存 O(m+n)
+ *   decay = 1 - t**-0.8（t 从 1 起，负数截到 0）；om = 1 - decay
+ *   R[j] = decay*R[j] + om*(行内 sum g^2 / fan_in)
+ *   C[i] = decay*C[i] + om*(列内 sum g^2 / fan_out)
+ *   mean_R = sum(R) / fan_out（Python 内置 sum -> C 用 sum_neumaier）
+ *   v = R[j]*C[i]/mean_R
+ *   lr_t = lr * max(eps2, sqrt(全部 g^2 之和 / (fan_out*fan_in)))
+ *   w = w - lr_t*g/sqrt(v+eps) - lr*wd*w      （单表达式，wd 用更新前的 w）
+ *   V_b[j] = decay*V_b[j] + om*g_b^2
+ *   b = b - lr_t*g_b/sqrt(V_b[j]+eps) - lr*wd*b
+ * 没有一阶矩；beta2 只做校验、不参与计算（与 Python 一致，注释里已写明）。
+ * 状态：每层 R[fan_out]、C[fan_in]、V_b[fan_out]。
+ */
+typedef struct Adafactor Adafactor;
+
+/* 校验：eps>0、eps2>0、beta2 ∈ [0,1)、weight_decay >= 0（与 Python 同序同义）。 */
+Adafactor *adafactor_create(const OptLayer *layers, int n_layers,
+                            double lr, double eps, double eps2, double beta2,
+                            double weight_decay, const char **err);
+int  adafactor_step(Adafactor *self, const char **err);
+void adafactor_free(Adafactor *self);
+
+int    adafactor_step_count(const Adafactor *self);
+int    adafactor_num_layers(const Adafactor *self);
+double adafactor_lr(const Adafactor *self);
+void   adafactor_set_lr(Adafactor *self, double lr);
+double adafactor_eps(const Adafactor *self);
+double adafactor_eps2(const Adafactor *self);
+double adafactor_beta2(const Adafactor *self);
+double adafactor_weight_decay(const Adafactor *self);
+
+/* 只读状态（对拍用），越界返回 NULL。 */
+const double *adafactor_row(const Adafactor *self, int k);    /* 长度 fan_out */
+const double *adafactor_col(const Adafactor *self, int k);    /* 长度 fan_in */
+const double *adafactor_v_b(const Adafactor *self, int k);    /* 长度 fan_out */
+
 #endif /* AI_OPTIM_H */

@@ -9,6 +9,8 @@
  */
 #include "optim.h"
 
+#include "numeric.h"
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -406,4 +408,204 @@ const double *lion_m_b(const Lion *self, int k)
 {
     if (!self || k < 0 || k >= self->n_layers) return NULL;
     return self->m_b[k];
+}
+
+/* ============================= Adafactor ============================= */
+
+struct Adafactor {
+    int n_layers;
+    OptLayer *layers;
+
+    double lr;
+    double eps;
+    double eps2;
+    double beta2;       /* 只保存/校验，step 里不用（Python 也一样：没有一阶矩） */
+    double weight_decay;
+    int step_count;
+
+    /* R 每层长度 fan_out，C 每层长度 fan_in，V_b 每层长度 fan_out */
+    double **R;
+    double **C;
+    double **V_b;
+};
+
+Adafactor *adafactor_create(const OptLayer *layers, int n_layers,
+                            double lr, double eps, double eps2, double beta2,
+                            double weight_decay, const char **err)
+{
+    if (err) *err = NULL;
+
+    const char *bad = check_layers(layers, n_layers, "Adafactor");
+    /* 校验顺序与文案照抄 Python：eps/eps2 -> beta2 -> weight_decay */
+    if (!bad && (eps <= 0.0 || eps2 <= 0.0)) bad = "Adafactor: eps / eps2 必须 > 0";
+    if (!bad && !(beta2 >= 0.0 && beta2 < 1.0)) bad = "Adafactor: beta2 必须在 [0,1)";
+    if (!bad && weight_decay < 0.0) bad = "Adafactor: weight_decay 必须 >= 0";
+    if (bad) {
+        if (err) *err = bad;
+        return NULL;
+    }
+
+    Adafactor *self = xcalloc(1, sizeof(Adafactor));
+    self->n_layers = n_layers;
+    self->layers = xmalloc((size_t)n_layers * sizeof(OptLayer));
+    memcpy(self->layers, layers, (size_t)n_layers * sizeof(OptLayer));
+
+    self->lr = lr;
+    self->eps = eps;
+    self->eps2 = eps2;
+    self->beta2 = beta2;
+    self->weight_decay = weight_decay;
+    self->step_count = 0;
+
+    self->R = xcalloc((size_t)n_layers, sizeof(double *));
+    self->C = xcalloc((size_t)n_layers, sizeof(double *));
+    self->V_b = xcalloc((size_t)n_layers, sizeof(double *));
+    for (int k = 0; k < n_layers; k++) {
+        self->R[k] = xcalloc((size_t)layers[k].fan_out, sizeof(double));
+        self->C[k] = xcalloc((size_t)layers[k].fan_in, sizeof(double));
+        self->V_b[k] = xcalloc((size_t)layers[k].fan_out, sizeof(double));
+    }
+    return self;
+}
+
+void adafactor_free(Adafactor *self)
+{
+    if (!self) return;
+    for (int k = 0; k < self->n_layers; k++) {
+        free(self->R[k]);
+        free(self->C[k]);
+        free(self->V_b[k]);
+    }
+    free(self->R);
+    free(self->C);
+    free(self->V_b);
+    free(self->layers);
+    free(self);
+}
+
+int adafactor_step(Adafactor *self, const char **err)
+{
+    if (err) *err = NULL;
+    if (!self) {
+        if (err) *err = "Adafactor: step 收到 NULL 优化器";
+        return -1;
+    }
+
+    self->step_count += 1;
+    const int t = self->step_count;
+    /* Python: decay = 1.0 - (t ** -0.8) */
+    double decay = 1.0 - pow((double)t, -0.8);
+    if (decay < 0.0) decay = 0.0;
+    const double lr = self->lr, eps = self->eps, eps2 = self->eps2;
+    const double wd = self->weight_decay;
+
+    for (int k = 0; k < self->n_layers; k++) {
+        OptLayer *l = &self->layers[k];
+        double *R = self->R[k], *C = self->C[k], *Vb = self->V_b[k];
+        const int fo = l->fan_out, fi = l->fan_in;
+        const double om = 1.0 - decay;
+
+        /* 1) 行均值：acc 与 sq 在同一次内循环里朴素累加（与 Python 一致） */
+        double sq = 0.0;
+        for (int j = 0; j < fo; j++) {
+            const double *gwj = l->gw + (size_t)j * (size_t)fi;
+            double acc = 0.0;
+            for (int i = 0; i < fi; i++) {
+                const double g = gwj[i];
+                acc += g * g;
+                sq += g * g;
+            }
+            R[j] = decay * R[j] + om * (acc / (double)fi);
+        }
+
+        /* 2) 列均值（跨行同一个 i 累加） */
+        for (int i = 0; i < fi; i++) {
+            double acc = 0.0;
+            for (int j = 0; j < fo; j++) {
+                const double g = l->gw[(size_t)j * (size_t)fi + (size_t)i];
+                acc += g * g;
+            }
+            C[i] = decay * C[i] + om * (acc / (double)fo);
+        }
+
+        /* 3) mean_R = sum(R)/fo —— Python 用内置 sum()，C 侧必须走 Neumaier */
+        double mean_R = sum_neumaier(R, fo) / (double)fo;
+        if (mean_R <= 0.0) mean_R = 1.0;
+
+        /* 4) 相对步长：lr_t = lr * max(eps2, sqrt(mean(g^2))) */
+        const double lr_t = lr * fmax(eps2, sqrt(sq / ((double)fo * (double)fi)));
+
+        /* 5) 更新：权重用单表达式（wd 乘的是更新前的 Wj[i]），偏置先更 Vb 再更 B */
+        for (int j = 0; j < fo; j++) {
+            const double *gwj = l->gw + (size_t)j * (size_t)fi;
+            double *Wj = l->w + (size_t)j * (size_t)fi;
+            for (int i = 0; i < fi; i++) {
+                const double v = R[j] * C[i] / mean_R;
+                Wj[i] = (Wj[i] - lr_t * gwj[i] / sqrt(v + eps)
+                         - lr * wd * Wj[i]);
+            }
+            const double g = l->gb[j];
+            Vb[j] = decay * Vb[j] + om * g * g;
+            l->b[j] = l->b[j] - lr_t * g / sqrt(Vb[j] + eps) - lr * wd * l->b[j];
+        }
+    }
+    return 0;
+}
+
+int adafactor_step_count(const Adafactor *self)
+{
+    return self ? self->step_count : 0;
+}
+
+int adafactor_num_layers(const Adafactor *self)
+{
+    return self ? self->n_layers : 0;
+}
+
+double adafactor_lr(const Adafactor *self)
+{
+    return self ? self->lr : 0.0;
+}
+
+void adafactor_set_lr(Adafactor *self, double lr)
+{
+    if (self) self->lr = lr;
+}
+
+double adafactor_eps(const Adafactor *self)
+{
+    return self ? self->eps : 0.0;
+}
+
+double adafactor_eps2(const Adafactor *self)
+{
+    return self ? self->eps2 : 0.0;
+}
+
+double adafactor_beta2(const Adafactor *self)
+{
+    return self ? self->beta2 : 0.0;
+}
+
+double adafactor_weight_decay(const Adafactor *self)
+{
+    return self ? self->weight_decay : 0.0;
+}
+
+const double *adafactor_row(const Adafactor *self, int k)
+{
+    if (!self || k < 0 || k >= self->n_layers) return NULL;
+    return self->R[k];
+}
+
+const double *adafactor_col(const Adafactor *self, int k)
+{
+    if (!self || k < 0 || k >= self->n_layers) return NULL;
+    return self->C[k];
+}
+
+const double *adafactor_v_b(const Adafactor *self, int k)
+{
+    if (!self || k < 0 || k >= self->n_layers) return NULL;
+    return self->V_b[k];
 }
