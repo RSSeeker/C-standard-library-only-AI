@@ -169,6 +169,51 @@ const double *layernorm_grad_beta(const LayerNorm *self);
 
 Module *layernorm_as_module(LayerNorm *self);
 
+/* ============================== RMSNorm ==============================
+ * Python: y[j] = gamma[j] * x[j] * r，r = 1/sqrt(mean(xi^2) + eps)
+ *         （不减均值、没有 beta；Llama/Qwen 系常用）
+ * backward（逐字照抄 AI.py）：
+ *   grad_gamma[j] = dout[j] * x[j] * r
+ *   g = sum(dout[i] * gamma[i] * x[i])
+ *   r3 = r * r * r
+ *   dx[j] = gamma[j] * dout[j] * r - g * x[j] * r3 / d
+ *
+ * 与 LayerNorm 的两处语义差异（Python 原样，必须照抄，别"顺手改成累加"）：
+ *   1. grad_gamma 是**覆盖赋值**，不是对 batch 累加；因此 rmsnorm_zero_grad()
+ *      只是给调用方一个统一的接口，对下一次 backward 的结果没有影响。
+ *   2. Python 的 m_gamma / v_gamma 建了但从未使用，C 版不保留这两个字段。
+ * 前向/反向都用 numeric.h 的 dot_neumaier（Python 里是 sum(xi*xi) 与
+ * sum(dout[i]*gamma[i]*x[i]) 两个生成器求和）。热路径零分配。
+ */
+typedef struct {
+    int d;                     /* num_features */
+    double eps;
+
+    double *gamma;             /* d，初值 1 */
+    double *grad_gamma;        /* d，每次 backward 覆盖（见上） */
+    double *x_cache;           /* d，最近一次 forward 的输入（Python: self.x） */
+    double *tmp;               /* d，反向临时缓冲：dout[i]*gamma[i]*x[i] */
+
+    double inv_rms;            /* 最近一次前向的 r */
+    int ready;                 /* 是否已 forward（backward 的前置条件） */
+} RMSNorm;
+
+RMSNorm *rmsnorm_create(int num_features, double eps);
+void rmsnorm_free(RMSNorm *self);
+void rmsnorm_zero_grad(RMSNorm *self);
+void rmsnorm_forward(RMSNorm *self, const Tensor *x, Tensor *out);   /* (D,) -> (D,) */
+void rmsnorm_backward(RMSNorm *self, const Tensor *dout, Tensor *dx);
+int  rmsnorm_param_count(RMSNorm *self);                              /* 只有 gamma：d */
+
+/* 灌入 gamma（跨语言等价性验证用），长度 d */
+void rmsnorm_set_params(RMSNorm *self, const double *gamma);
+
+const double *rmsnorm_gamma(const RMSNorm *self);
+const double *rmsnorm_grad_gamma(const RMSNorm *self);
+double rmsnorm_inv_rms(const RMSNorm *self);
+
+Module *rmsnorm_as_module(RMSNorm *self);
+
 /* ========================= Module 适配层说明 =========================
  * xxx_as_module() 会 malloc 一个 Module 包装（self 指向原对象），用于
  * module_forward / module_backward / module_zero_grad / module_param_count。

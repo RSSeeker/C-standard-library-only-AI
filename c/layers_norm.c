@@ -717,3 +717,170 @@ Module *layernorm_as_module(LayerNorm *self)
 {
     return wrap_module(&LAYERNORM_VT, self);
 }
+
+/* ============================== RMSNorm ==============================
+ * Python:
+ *   mean_sq = sum(xi * xi) / d；inv_rms = 1/sqrt(mean_sq + eps)
+ *   out[j] = gamma[j] * x[j] * r
+ *   backward: grad_gamma[j] = dout[j] * x[j] * r（覆盖赋值，不累加）
+ *             g = sum(dout[i] * gamma[i] * x[i])；r3 = r*r*r
+ *             dx[j] = gamma[j]*dout[j]*r - g*x[j]*r3/d
+ */
+
+RMSNorm *rmsnorm_create(int num_features, double eps)
+{
+    if (num_features <= 0) {
+        fprintf(stderr, "rmsnorm_create: num_features 必须为正, 实得 %d\n", num_features);
+        exit(1);
+    }
+    RMSNorm *self = xcalloc(1, sizeof(RMSNorm));
+    const int d = num_features;
+    self->d = d;
+    self->eps = eps;
+
+    self->gamma = xmalloc((size_t)d * sizeof(double));
+    self->grad_gamma = xcalloc((size_t)d, sizeof(double));
+    self->x_cache = xcalloc((size_t)d, sizeof(double));
+    self->tmp = xcalloc((size_t)d, sizeof(double));
+    for (int j = 0; j < d; j++) self->gamma[j] = 1.0;
+    self->inv_rms = 0.0;
+    self->ready = 0;
+    return self;
+}
+
+void rmsnorm_free(RMSNorm *self)
+{
+    if (!self) return;
+    free(self->gamma);
+    free(self->grad_gamma);
+    free(self->x_cache);
+    free(self->tmp);
+    free(self);
+}
+
+void rmsnorm_zero_grad(RMSNorm *self)
+{
+    if (!self) return;
+    /* 注意：Python 的 grad_gamma 每次 backward 都覆盖赋值，
+     * 清零只是为了让调用方有统一接口，并不会让下次反向"从头累加"。 */
+    memset(self->grad_gamma, 0, (size_t)self->d * sizeof(double));
+}
+
+void rmsnorm_set_params(RMSNorm *self, const double *gamma)
+{
+    if (!gamma) {
+        fprintf(stderr, "rmsnorm_set_params: gamma 不能为 NULL\n");
+        exit(1);
+    }
+    memcpy(self->gamma, gamma, (size_t)self->d * sizeof(double));
+}
+
+const double *rmsnorm_gamma(const RMSNorm *self)
+{
+    return self ? self->gamma : NULL;
+}
+
+const double *rmsnorm_grad_gamma(const RMSNorm *self)
+{
+    return self ? self->grad_gamma : NULL;
+}
+
+double rmsnorm_inv_rms(const RMSNorm *self)
+{
+    return self ? self->inv_rms : 0.0;
+}
+
+void rmsnorm_forward(RMSNorm *self, const Tensor *x, Tensor *out)
+{
+    const int d = self->d;
+    int want[1] = { d };
+    tensor_check_shape(x, 1, want, "rmsnorm_forward(x)");
+    tensor_check_shape(out, 1, want, "rmsnorm_forward(out)");
+
+    memcpy(self->x_cache, x->data, (size_t)d * sizeof(double)); /* Python: self.x = x */
+    const double mean_sq = dot_neumaier(x->data, x->data, d) / (double)d; /* sum(xi*xi)/d */
+    const double r = 1.0 / sqrt(mean_sq + self->eps);
+    for (int j = 0; j < d; j++) out->data[j] = self->gamma[j] * x->data[j] * r;
+
+    self->inv_rms = r;
+    self->ready = 1;
+}
+
+void rmsnorm_backward(RMSNorm *self, const Tensor *dout, Tensor *dx)
+{
+    const int d = self->d;
+    if (!self->ready) {
+        fprintf(stderr, "rmsnorm_backward: 请先调用 rmsnorm_forward (反向依赖其缓存的 x/inv_rms)\n");
+        exit(1);
+    }
+    int want[1] = { d };
+    tensor_check_shape(dout, 1, want, "rmsnorm_backward(dout)");
+    tensor_check_shape(dx, 1, want, "rmsnorm_backward(dx)");
+
+    const double r = self->inv_rms;
+    const double *x = self->x_cache;
+    /* Python: grad_gamma = [dout[j] * x[j] * r ...]（覆盖赋值，不是 +=） */
+    for (int j = 0; j < d; j++) self->grad_gamma[j] = dout->data[j] * x[j] * r;
+
+    /* Python: g = sum(dout[i] * gamma[i] * x[i])，生成器求和 -> Neumaier */
+    for (int i = 0; i < d; i++) self->tmp[i] = dout->data[i] * self->gamma[i] * x[i];
+    const double g = sum_neumaier(self->tmp, d);
+
+    const double r3 = r * r * r;
+    const double dd = (double)d;
+    for (int j = 0; j < d; j++)
+        dx->data[j] = self->gamma[j] * dout->data[j] * r - g * x[j] * r3 / dd;
+}
+
+int rmsnorm_param_count(RMSNorm *self)
+{
+    return self ? self->d : 0; /* 只有 gamma */
+}
+
+/* ---------- RMSNorm 的 vtable ---------- */
+
+static void rmsnorm_vt_forward(Module *m, const Tensor *x, Tensor *out)
+{
+    rmsnorm_forward((RMSNorm *)m->self, x, out);
+}
+
+static void rmsnorm_vt_backward(Module *m, const Tensor *dout, Tensor *dx)
+{
+    rmsnorm_backward((RMSNorm *)m->self, dout, dx);
+}
+
+static void rmsnorm_vt_zero_grad(Module *m)
+{
+    rmsnorm_zero_grad((RMSNorm *)m->self);
+}
+
+static void rmsnorm_vt_free(Module *m)
+{
+    rmsnorm_free((RMSNorm *)m->self);
+}
+
+static int rmsnorm_vt_param_count(Module *m)
+{
+    return rmsnorm_param_count((RMSNorm *)m->self);
+}
+
+static void rmsnorm_vt_to_string(Module *m, char *buf, size_t n)
+{
+    const RMSNorm *rn = (const RMSNorm *)m->self;
+    snprintf(buf, n, "RMSNorm(%d, eps=%g)", rn->d, rn->eps);
+}
+
+static const ModuleVT RMSNORM_VT = {
+    "RMSNorm",
+    rmsnorm_vt_forward,
+    rmsnorm_vt_backward,
+    rmsnorm_vt_zero_grad,
+    rmsnorm_vt_free,
+    rmsnorm_vt_param_count,
+    rmsnorm_vt_to_string
+};
+
+Module *rmsnorm_as_module(RMSNorm *self)
+{
+    return wrap_module(&RMSNORM_VT, self);
+}
