@@ -1,0 +1,346 @@
+{
+  "meta": {
+    "generated_by": "tools/sched_extra_reference.py",
+    "python": "3.14.6",
+    "ai_py_dir": "D:\\vscode\\Python-standard-library-only-AI-main",
+    "comment": "WarmupLR / ReduceLROnPlateau 由 AI.py 真实类驱动；两者只用四则运算，故所有用例 tol=0 且要求逐位相同"
+  },
+  "warmup_cases": [
+    {
+      "name": "warmup5_start0",
+      "note": "start_factor=0：第 k 轮 lr = initial*k/5，之后保持 initial",
+      "tol": 0.0,
+      "initial_lr": 1.0,
+      "warmup_epochs": 5,
+      "start_factor": 0.0,
+      "epochs": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "expect_lr": [
+        0.2,
+        0.4,
+        0.6,
+        0.8,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "base_lr": null,
+      "expect_base_epochs": []
+    },
+    {
+      "name": "start0.5_warmup3",
+      "note": "start_factor=0.5 的线性插值（含 1/3 这类非精确分数）",
+      "tol": 0.0,
+      "initial_lr": 0.1,
+      "warmup_epochs": 3,
+      "start_factor": 0.5,
+      "epochs": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "expect_lr": [
+        0.06666666666666667,
+        0.08333333333333333,
+        0.1,
+        0.1,
+        0.1
+      ],
+      "base_lr": null,
+      "expect_base_epochs": []
+    },
+    {
+      "name": "warmup4_with_base",
+      "note": "warmup 后把绝对 epoch 交给 base_scheduler（lr = base_lr*0.5^epoch）",
+      "tol": 0.0,
+      "initial_lr": 2.0,
+      "warmup_epochs": 4,
+      "start_factor": 0.0,
+      "epochs": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        8
+      ],
+      "expect_lr": [
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        0.0625,
+        0.03125,
+        0.0078125
+      ],
+      "base_lr": 2.0,
+      "expect_base_epochs": [
+        5,
+        6,
+        8
+      ]
+    },
+    {
+      "name": "clamp_epoch_to_1",
+      "note": "epoch<=0 时按 1 处理（Python: max(int(epoch),1)）",
+      "tol": 0.0,
+      "initial_lr": 0.4,
+      "warmup_epochs": 2,
+      "start_factor": 0.25,
+      "epochs": [
+        0,
+        -3,
+        1,
+        2,
+        3
+      ],
+      "expect_lr": [
+        0.25,
+        0.25,
+        0.25,
+        0.4,
+        0.4
+      ],
+      "base_lr": null,
+      "expect_base_epochs": []
+    }
+  ],
+  "plateau_cases": [
+    {
+      "name": "min_basic",
+      "note": "patience=2：连续 3 次没改善就乘 factor",
+      "tol": 0.0,
+      "initial_lr": 1.0,
+      "factor": 0.5,
+      "patience": 2,
+      "min_lr": 0.0,
+      "mode": "min",
+      "threshold": 0.0001,
+      "max_reductions": -1,
+      "metrics": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        0.9,
+        0.9,
+        0.9
+      ],
+      "nan_at": [],
+      "expect_lr": [
+        1.0,
+        1.0,
+        1.0,
+        0.5,
+        0.5,
+        0.5,
+        0.5,
+        0.5
+      ],
+      "expect_has_best": 1,
+      "expect_best": 0.9,
+      "expect_num_bad": 2,
+      "expect_reductions": 1
+    },
+    {
+      "name": "max_mode",
+      "note": "mode=max：指标变大才叫改善",
+      "tol": 0.0,
+      "initial_lr": 1.0,
+      "factor": 0.5,
+      "patience": 1,
+      "min_lr": 0.0,
+      "mode": "max",
+      "threshold": 0.0001,
+      "max_reductions": -1,
+      "metrics": [
+        0.5,
+        0.6,
+        0.6,
+        0.6,
+        0.7,
+        0.7,
+        0.7,
+        0.7
+      ],
+      "nan_at": [],
+      "expect_lr": [
+        1.0,
+        1.0,
+        1.0,
+        0.5,
+        0.5,
+        0.5,
+        0.25,
+        0.25
+      ],
+      "expect_has_best": 1,
+      "expect_best": 0.7,
+      "expect_num_bad": 1,
+      "expect_reductions": 2
+    },
+    {
+      "name": "max_reductions_2",
+      "note": "max_reductions=2：降两次后即使继续停滞也不再降",
+      "tol": 0.0,
+      "initial_lr": 1.0,
+      "factor": 0.5,
+      "patience": 0,
+      "min_lr": 0.0,
+      "mode": "min",
+      "threshold": 0.0001,
+      "max_reductions": 2,
+      "metrics": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "nan_at": [],
+      "expect_lr": [
+        1.0,
+        0.5,
+        0.25,
+        0.25,
+        0.25,
+        0.25,
+        0.25,
+        0.25,
+        0.25,
+        0.25,
+        0.25,
+        0.25
+      ],
+      "expect_has_best": 1,
+      "expect_best": 1.0,
+      "expect_num_bad": 9,
+      "expect_reductions": 2
+    },
+    {
+      "name": "min_lr_floor",
+      "note": "min_lr=0.3：lr 不会低于下限",
+      "tol": 0.0,
+      "initial_lr": 1.0,
+      "factor": 0.5,
+      "patience": 0,
+      "min_lr": 0.3,
+      "mode": "min",
+      "threshold": 0.0001,
+      "max_reductions": -1,
+      "metrics": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "nan_at": [],
+      "expect_lr": [
+        1.0,
+        0.5,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3,
+        0.3
+      ],
+      "expect_has_best": 1,
+      "expect_best": 1.0,
+      "expect_num_bad": 0,
+      "expect_reductions": 9
+    },
+    {
+      "name": "threshold_gate",
+      "note": "threshold=0.1：改善幅度不到 0.1 不算改善",
+      "tol": 0.0,
+      "initial_lr": 1.0,
+      "factor": 0.5,
+      "patience": 1,
+      "min_lr": 0.0,
+      "mode": "min",
+      "threshold": 0.1,
+      "max_reductions": -1,
+      "metrics": [
+        1.0,
+        0.95,
+        0.92,
+        0.9,
+        0.85,
+        0.85
+      ],
+      "nan_at": [],
+      "expect_lr": [
+        1.0,
+        1.0,
+        0.5,
+        0.5,
+        0.5,
+        0.5
+      ],
+      "expect_has_best": 1,
+      "expect_best": 0.85,
+      "expect_num_bad": 1,
+      "expect_reductions": 1
+    },
+    {
+      "name": "nan_ignored",
+      "note": "NaN 指标直接返回当前 lr，不改 best/num_bad（NaN 记为 nan_at 下标）",
+      "tol": 0.0,
+      "initial_lr": 1.0,
+      "factor": 0.5,
+      "patience": 1,
+      "min_lr": 0.0,
+      "mode": "min",
+      "threshold": 0.0001,
+      "max_reductions": -1,
+      "metrics": [
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "nan_at": [
+        1
+      ],
+      "expect_lr": [
+        1.0,
+        1.0,
+        1.0,
+        0.5,
+        0.5
+      ],
+      "expect_has_best": 1,
+      "expect_best": 1.0,
+      "expect_num_bad": 1,
+      "expect_reductions": 1
+    }
+  ]
+}
