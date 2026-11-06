@@ -26,6 +26,7 @@ set(C_ENGINE_SOURCES
     c/model_io.c
     c/model_high.c
     c/text.c
+    c/optim.c
     c/sched.c
 )
 

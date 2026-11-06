@@ -1,0 +1,241 @@
+/*
+ * optim.c —— AdamW / Lion / Adafactor 的 C17 实现
+ *
+ * 逐行对照 AI.py（行号见 optim.h），三处最容易写错的地方：
+ *   1. AdamW 的 `B[j] *= decay` 与 `B[j] -= lr*(m/c1)/(sqrt(v/c2)+eps)` 是两条语句，
+ *      必须分开写；写成一条复合赋值会少一次舍入。
+ *   2. 偏差修正里的 (m/c1) 与 (v/c2) 都是"先除后 sqrt/除"，不能改写成 m*sqrt(c2)/...
+ *   3. 每层先更新偏置、再更新权重，与 Python 的循环嵌套顺序一致（互不依赖，但保持一致）。
+ */
+#include "optim.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ============================== 内存 ============================== */
+
+static void *xmalloc(size_t n)
+{
+    void *p = malloc(n ? n : 1);
+    if (!p) {
+        fprintf(stderr, "optim: out of memory (%zu bytes)\n", n);
+        exit(1);
+    }
+    return p;
+}
+
+static void *xcalloc(size_t count, size_t size)
+{
+    void *p = calloc(count ? count : 1, size ? size : 1);
+    if (!p) {
+        fprintf(stderr, "optim: out of memory (%zu x %zu bytes)\n", count, size);
+        exit(1);
+    }
+    return p;
+}
+
+/* 形状/指针校验：C 侧多出来的一层保护（Python 在 AttributeError/形状错时会崩，
+ * 这里返回错误串，让调用方拿到 const char **err 而不是段错误） */
+static const char *check_layers(const OptLayer *layers, int n_layers, const char *who)
+{
+    static char msg[160];
+    if (!layers || n_layers < 1) {
+        snprintf(msg, sizeof msg, "%s: layers 不能为空且 n_layers 必须 >= 1", who);
+        return msg;
+    }
+    for (int k = 0; k < n_layers; k++) {
+        const OptLayer *l = &layers[k];
+        if (l->fan_out < 1 || l->fan_in < 1) {
+            snprintf(msg, sizeof msg, "%s: 第 %d 层 fan_out/fan_in 必须 >= 1", who, k);
+            return msg;
+        }
+        if (!l->w || !l->b || !l->gw || !l->gb) {
+            snprintf(msg, sizeof msg, "%s: 第 %d 层的参数/梯度指针不能为 NULL", who, k);
+            return msg;
+        }
+    }
+    return NULL;
+}
+
+/* ============================== AdamW ============================== */
+
+struct AdamW {
+    int n_layers;
+    OptLayer *layers;
+
+    double lr;
+    double beta1;
+    double beta2;
+    double eps;
+    double weight_decay;
+    int step_count;
+
+    /* 每层一套状态：m_w/v_w 长度 fan_out*fan_in，m_b/v_b 长度 fan_out */
+    double **m_w;
+    double **v_w;
+    double **m_b;
+    double **v_b;
+};
+
+AdamW *adamw_create(const OptLayer *layers, int n_layers,
+                    double lr, double beta1, double beta2, double eps,
+                    double weight_decay, const char **err)
+{
+    if (err) *err = NULL;
+
+    const char *bad = check_layers(layers, n_layers, "AdamW");
+    /* 与 Python 一致：只校验 weight_decay，beta 的范围 Python 也没查 */
+    if (!bad && weight_decay < 0.0) bad = "AdamW: weight_decay 必须 >= 0";
+    if (bad) {
+        if (err) *err = bad;
+        return NULL;
+    }
+
+    AdamW *self = xcalloc(1, sizeof(AdamW));
+    self->n_layers = n_layers;
+    self->layers = xmalloc((size_t)n_layers * sizeof(OptLayer));
+    memcpy(self->layers, layers, (size_t)n_layers * sizeof(OptLayer));
+
+    self->lr = lr;
+    self->beta1 = beta1;
+    self->beta2 = beta2;
+    self->eps = eps;
+    self->weight_decay = weight_decay;
+    self->step_count = 0;
+
+    self->m_w = xcalloc((size_t)n_layers, sizeof(double *));
+    self->v_w = xcalloc((size_t)n_layers, sizeof(double *));
+    self->m_b = xcalloc((size_t)n_layers, sizeof(double *));
+    self->v_b = xcalloc((size_t)n_layers, sizeof(double *));
+    for (int k = 0; k < n_layers; k++) {
+        const size_t nw = (size_t)layers[k].fan_out * (size_t)layers[k].fan_in;
+        const size_t nb = (size_t)layers[k].fan_out;
+        self->m_w[k] = xcalloc(nw, sizeof(double));
+        self->v_w[k] = xcalloc(nw, sizeof(double));
+        self->m_b[k] = xcalloc(nb, sizeof(double));
+        self->v_b[k] = xcalloc(nb, sizeof(double));
+    }
+    return self;
+}
+
+void adamw_free(AdamW *self)
+{
+    if (!self) return;
+    for (int k = 0; k < self->n_layers; k++) {
+        free(self->m_w[k]);
+        free(self->v_w[k]);
+        free(self->m_b[k]);
+        free(self->v_b[k]);
+    }
+    free(self->m_w);
+    free(self->v_w);
+    free(self->m_b);
+    free(self->v_b);
+    free(self->layers);
+    free(self);
+}
+
+int adamw_step(AdamW *self, const char **err)
+{
+    if (err) *err = NULL;
+    if (!self) {
+        if (err) *err = "AdamW: step 收到 NULL 优化器";
+        return -1;
+    }
+
+    self->step_count += 1;
+    const double b1 = self->beta1, b2 = self->beta2;
+    const double lr = self->lr, eps = self->eps;
+    /* Python: decay = 1.0 - lr * weight_decay */
+    const double decay = 1.0 - lr * self->weight_decay;
+    /* Python: c1 = 1 - b1 ** step_count（** 落地为 libm pow） */
+    const double c1 = 1.0 - pow(b1, (double)self->step_count);
+    const double c2 = 1.0 - pow(b2, (double)self->step_count);
+    const double o1 = 1.0 - b1;
+    const double o2 = 1.0 - b2;
+
+    for (int k = 0; k < self->n_layers; k++) {
+        OptLayer *l = &self->layers[k];
+        double *m_w = self->m_w[k], *v_w = self->v_w[k];
+        double *m_b = self->m_b[k], *v_b = self->v_b[k];
+        const int fo = l->fan_out, fi = l->fan_in;
+
+        for (int j = 0; j < fo; j++) {
+            /* ---- 偏置：Python 里先更新 B[j]，再进 fan_in 内循环 ---- */
+            double g = l->gb[j];
+            double m = b1 * m_b[j] + o1 * g;
+            double v = b2 * v_b[j] + o2 * g * g;
+            m_b[j] = m;
+            v_b[j] = v;
+            l->b[j] *= decay;
+            l->b[j] -= lr * (m / c1) / (sqrt(v / c2) + eps);
+
+            /* ---- 权重第 j 行 ---- */
+            const double *gwj = l->gw + (size_t)j * (size_t)fi;
+            double *Wj = l->w + (size_t)j * (size_t)fi;
+            double *mwj = m_w + (size_t)j * (size_t)fi;
+            double *vwj = v_w + (size_t)j * (size_t)fi;
+            for (int i = 0; i < fi; i++) {
+                g = gwj[i];
+                m = b1 * mwj[i] + o1 * g;
+                v = b2 * vwj[i] + o2 * g * g;
+                mwj[i] = m;
+                vwj[i] = v;
+                Wj[i] *= decay;
+                Wj[i] -= lr * (m / c1) / (sqrt(v / c2) + eps);
+            }
+        }
+    }
+    return 0;
+}
+
+int adamw_step_count(const AdamW *self)
+{
+    return self ? self->step_count : 0;
+}
+
+int adamw_num_layers(const AdamW *self)
+{
+    return self ? self->n_layers : 0;
+}
+
+double adamw_lr(const AdamW *self)
+{
+    return self ? self->lr : 0.0;
+}
+
+void adamw_set_lr(AdamW *self, double lr)
+{
+    if (self) self->lr = lr;
+}
+
+double adamw_weight_decay(const AdamW *self)
+{
+    return self ? self->weight_decay : 0.0;
+}
+
+const double *adamw_m_w(const AdamW *self, int k)
+{
+    if (!self || k < 0 || k >= self->n_layers) return NULL;
+    return self->m_w[k];
+}
+
+const double *adamw_v_w(const AdamW *self, int k)
+{
+    if (!self || k < 0 || k >= self->n_layers) return NULL;
+    return self->v_w[k];
+}
+
+const double *adamw_m_b(const AdamW *self, int k)
+{
+    if (!self || k < 0 || k >= self->n_layers) return NULL;
+    return self->m_b[k];
+}
+
+const double *adamw_v_b(const AdamW *self, int k)
+{
+    if (!self || k < 0 || k >= self->n_layers) return NULL;
+    return self->v_b[k];
+}

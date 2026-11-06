@@ -2,7 +2,8 @@
 #
 # 如果你的环境没有 make，直接编译即可（Windows/MinGW 与 Linux/macOS 通用）：
 #   gcc -std=c17 -O2 -Wall -Wextra -o demo demo.c ai.c tensor.c layers_conv.c \
-#       layers_norm.c rnn.c attention.c llm.c containers.c json.c model_io.c text.c sched.c -lm
+#       layers_norm.c rnn.c attention.c llm.c containers.c json.c model_io.c text.c optim.c \
+#       sched.c -lm
 #
 # 常用目标：
 #   make            构建全部程序
@@ -54,6 +55,8 @@ check: compare_python
 	python tools/sched_interop.py
 	python tools/norm_reference.py norm_reference.json
 	$(MAKE) tests/compare_norm && ./tests/compare_norm norm_reference.json
+	python tools/adamw_reference.py adamw_reference.json
+	$(MAKE) tests/compare_adamw && ./tests/compare_adamw adamw_reference.json
 	python tools/conv_reference.py conv_reference.json
 	$(MAKE) tests/compare_conv && ./tests/compare_conv conv_reference.json
 	python tools/llm_reference.py llm_reference.json
@@ -63,6 +66,6 @@ clean:
 	rm -f $(BINS) $(BINS:=.exe) $(addprefix tests/,$(TESTS)) \
 	      $(addsuffix .exe,$(addprefix tests/,$(TESTS))) *.o *.obj \
 	      reference.txt c_model.json c_forward.txt py_model.json py_forward.txt self_model.json \
-	      norm_reference.json conv_reference.json llm_reference.json
+	      norm_reference.json conv_reference.json llm_reference.json adamw_reference.json
 
 .PHONY: all test check clean
