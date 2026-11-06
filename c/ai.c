@@ -8,6 +8,7 @@
  */
 #include "ai.h"
 #include "sched.h"
+#include "activations.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -120,6 +121,18 @@ double act_apply(Activation act, const double *z, double *out, int n)
         for (int i = 0; i < n; i++) out[i] /= s;
         return s;
     }
+    case ACT_SILU:
+        silu_vec(z, out, n);
+        return 0.0;
+    case ACT_MISH:
+        mish_vec(z, out, n);
+        return 0.0;
+    case ACT_ELU:
+        elu_vec(z, out, n);
+        return 0.0;
+    case ACT_SELU:
+        selu_vec(z, out, n);
+        return 0.0;
     }
     return 0.0;
 }
@@ -141,6 +154,18 @@ void act_deriv(Activation act, const double *z, const double *a, double *out, in
         /* 与 Python 版一致：恒为 1，仅在与 cross_entropy 搭配时正确
          * （CE 已直接给出 softmax+CE 的联合梯度） */
         for (int i = 0; i < n; i++) out[i] = 1.0;
+        break;
+    case ACT_SILU:
+        dsilu_vec(z, out, n);
+        break;
+    case ACT_MISH:
+        dmish_vec(z, out, n);
+        break;
+    case ACT_ELU:
+        delu_vec(z, out, n);
+        break;
+    case ACT_SELU:
+        dselu_vec(z, out, n);
         break;
     }
 }

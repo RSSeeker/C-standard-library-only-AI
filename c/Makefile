@@ -65,6 +65,8 @@ check: compare_python
 	$(MAKE) tests/compare_sched_extra && ./tests/compare_sched_extra sched_extra_reference.json
 	python tools/rmsnorm_reference.py rmsnorm_reference.json
 	$(MAKE) tests/compare_rmsnorm && ./tests/compare_rmsnorm rmsnorm_reference.json
+	python tools/activations_reference.py activations_reference.json
+	$(MAKE) tests/compare_activations && ./tests/compare_activations activations_reference.json
 	python tools/conv_reference.py conv_reference.json
 	$(MAKE) tests/compare_conv && ./tests/compare_conv conv_reference.json
 	python tools/llm_reference.py llm_reference.json
@@ -76,6 +78,6 @@ clean:
 	      reference.txt c_model.json c_forward.txt py_model.json py_forward.txt self_model.json \
 	      norm_reference.json conv_reference.json llm_reference.json \
 	      adamw_reference.json lion_reference.json adafactor_reference.json \
-	      sched_extra_reference.json rmsnorm_reference.json
+	      sched_extra_reference.json rmsnorm_reference.json activations_reference.json
 
 .PHONY: all test check clean

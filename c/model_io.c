@@ -15,6 +15,10 @@ const char *act_name_of(Activation a)
     case ACT_RELU:       return "relu";
     case ACT_SOFTMAX:    return "softmax";
     case ACT_LINEAR:     return "linear";
+    case ACT_SILU:       return "silu";
+    case ACT_MISH:       return "mish";
+    case ACT_ELU:        return "elu";
+    case ACT_SELU:       return "selu";
     }
     return "linear";
 }
@@ -26,6 +30,10 @@ int act_from_name(const char *name, Activation *out)
     if (strcmp(name, "relu") == 0)       { *out = ACT_RELU;       return 1; }
     if (strcmp(name, "softmax") == 0)    { *out = ACT_SOFTMAX;    return 1; }
     if (strcmp(name, "linear") == 0)     { *out = ACT_LINEAR;     return 1; }
+    if (strcmp(name, "silu") == 0)       { *out = ACT_SILU;       return 1; }
+    if (strcmp(name, "mish") == 0)       { *out = ACT_MISH;       return 1; }
+    if (strcmp(name, "elu") == 0)        { *out = ACT_ELU;        return 1; }
+    if (strcmp(name, "selu") == 0)       { *out = ACT_SELU;       return 1; }
     return 0;
 }
 

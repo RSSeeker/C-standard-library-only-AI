@@ -155,6 +155,30 @@ python tools/llm_reference.py && ./tests/compare_llm      # 6 段，见下
 python tools/attention_reference.py && ./tests/compare_attention  # 13 个用例，见第 8 节
 ```
 
+A 档纯标量模块（优化器 / 调度器 / 归一化 / 激活）的对拍工具：
+
+```
+python tools/adamw_reference.py       && ./tests/compare_adamw         # 4 用例 48 数组
+python tools/lion_reference.py        && ./tests/compare_lion          # 4 用例 32 数组
+python tools/adafactor_reference.py   && ./tests/compare_adafactor      # 5 用例 50 数组
+python tools/sched_extra_reference.py && ./tests/compare_sched_extra    # 104 项
+python tools/rmsnorm_reference.py     && ./tests/compare_rmsnorm        # 36 数组 153 值
+python tools/activations_reference.py && ./tests/compare_activations    # 27 数组
+```
+
+- **Lion / Adafactor / WarmupLR / ReduceLROnPlateau / RMSNorm：全部逐位相同**
+  （最大差异 0.000e+00）。Lion 只有乘法与符号判断；Adafactor 只用 `pow(t,-0.8)`（t≤20 在
+  本机与 Python 逐位一致）与 `sqrt`；调度器与 RMSNorm 只用到四则运算和 `sqrt`。
+- **AdamW：48 个数组中 44 个逐位相同**，最大差异 5.551e-17。差异只出现在真实超参
+  （β1=0.9, β2=0.999）跑 10 步的用例里：`pow(0.9,k)` / `pow(0.999,k)` 从 k=4 / k=6 起
+  msvcrt 与 UCRT 差 1 ULP，偏差修正项随之差 1 ULP。该用例在 JSON 里标 `tol=1e-12` 并带
+  `note`；二进制精确超参（β1=0.5, β2=0.75）的 12 步用例与真实超参的 3 步用例都逐位相同。
+- **激活：silu 全部逐位**（3 个用例 122 个点全同）；elu/selu/delu/dselu 在随机与大幅值
+  用例上逐位，但在 `z=-1e-8` 处因 `exp(z)-1` 相消把 1 ULP 放大成 ~1e-16 绝对误差；
+  softplus/mish/dmish 因 `log1p`/`tanh` 有 3–15% 的输入差 1 ULP（最大绝对差 2.220e-16）。
+  这些用例在参考 JSON 里按 (用例, 函数) 标 `tol=1e-12`（绝对）并附 `func_notes` 说明，
+  `compare_activations` 会把容差和逐位比例一起打印出来，不存在静默放宽容差。
+
 覆盖：BatchNorm1d（训练 forward/反向 dx/grad_gamma/grad_beta/running 统计量/mean/var/inv_std/x_hat、
 推理 forward）、LayerNorm（forward/反向/参数梯度/中间量）、Dropout（灌入 Python 的 mask 后逐位比对）、
 Conv2d（两种配置的 forward/grad_w/grad_b/dx）、MaxPool2d（两种配置）、Flatten。

@@ -30,7 +30,13 @@ typedef enum {
     ACT_LEAKY_RELU = 0,
     ACT_RELU       = 1,
     ACT_SOFTMAX    = 2,
-    ACT_LINEAR     = 3
+    ACT_LINEAR     = 3,
+    /* 以下四个与 AI.py 的标量实现逐位对齐，见 activations.{h,c}。
+     * 追加在末尾：既有存档里的 0..3 编号不变。 */
+    ACT_SILU       = 4,
+    ACT_MISH       = 5,
+    ACT_ELU        = 6,
+    ACT_SELU       = 7
 } Activation;
 
 /* ---------- 损失函数 ---------- */
