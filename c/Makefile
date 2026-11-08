@@ -79,6 +79,8 @@ check: compare_python
 	$(MAKE) tests/compare_augment && ./tests/compare_augment augment_reference.json
 	python tools/ffn_reference.py ffn_reference.json
 	$(MAKE) tests/compare_ffn && ./tests/compare_ffn ffn_reference.json
+	python tools/adapt_reference.py adapt_reference.json
+	$(MAKE) tests/compare_adapt && ./tests/compare_adapt adapt_reference.json
 
 clean:
 	rm -f $(BINS) $(BINS:=.exe) $(addprefix tests/,$(TESTS)) \
@@ -87,6 +89,6 @@ clean:
 	      norm_reference.json conv_reference.json llm_reference.json \
 	      adamw_reference.json lion_reference.json adafactor_reference.json \
 	      sched_extra_reference.json rmsnorm_reference.json activations_reference.json \
-	      loss_reference.json metrics_reference.json augment_reference.json ffn_reference.json
+	      loss_reference.json metrics_reference.json augment_reference.json ffn_reference.json adapt_reference.json
 
 .PHONY: all test check clean
