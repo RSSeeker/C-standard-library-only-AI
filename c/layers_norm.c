@@ -884,3 +884,733 @@ Module *rmsnorm_as_module(RMSNorm *self)
 {
     return wrap_module(&RMSNORM_VT, self);
 }
+
+/* ======================= W11 归一化家族：BatchNorm2d / GroupNorm / DropPath =======================
+ * 移植自 AI.py：
+ *   BatchNorm2d (AI.py:13161) -> bn2d_*
+ *   GroupNorm   (AI.py:13332) -> gn_*
+ *   InstanceNorm(AI.py:13441) -> inorm_create（groups == channels 的特例）
+ *   DropPath    (AI.py:12766) -> droppath_*
+ *
+ * 逐位一致的关键是照抄 Python 的求和方式：
+ *   - Python 里 `sum(列表)` 走 CPython 的 Neumaier 补偿求和 -> sum_neumaier；
+ *   - Python 里显式的 `s += x` 循环（GroupNorm 的 mean / var / s1 / s2、
+ *     grad_gamma、grad_beta）-> C 里也必须是朴素 +=，不能换成补偿求和。
+ * 混用会让最后几位变掉，对拍立刻暴露（容差 0）。
+ */
+
+/* ---------------------------------------------------------------- 公共小助手 */
+
+static void norm_ext_need3(const Tensor *t, int c, int h, int w, const char *who)
+{
+    int want[3] = { c, h, w };
+    tensor_check_shape(t, 3, want, who);
+}
+
+static double *norm_ext_grow(double *buf, int *cap, int need)
+{
+    if (need <= *cap) return buf;
+    double *n = xmalloc((size_t)need * sizeof(double));
+    if (buf) {
+        memcpy(n, buf, (size_t)(*cap) * sizeof(double));
+        free(buf);
+    }
+    *cap = need;
+    return n;
+}
+
+/* ================================ BatchNorm2d ================================ */
+
+BatchNorm2d *bn2d_create(int num_features, double eps, double momentum)
+{
+    if (num_features < 1) {
+        fprintf(stderr, "bn2d_create: num_features 必须是正整数，收到 %d\n", num_features);
+        exit(1);
+    }
+    if (!(eps > 0.0)) {
+        fprintf(stderr, "bn2d_create: eps 必须 > 0，收到 %g\n", eps);
+        exit(1);
+    }
+    if (!(momentum >= 0.0 && momentum <= 1.0)) {
+        fprintf(stderr, "bn2d_create: momentum 必须在 [0,1] 内，收到 %g\n", momentum);
+        exit(1);
+    }
+    BatchNorm2d *self = xcalloc(1, sizeof(BatchNorm2d));
+    const int c = num_features;
+    self->c = c;
+    self->eps = eps;
+    self->momentum = momentum;
+    self->training = 1;
+
+    self->gamma = xmalloc((size_t)c * sizeof(double));
+    self->beta = xmalloc((size_t)c * sizeof(double));
+    self->running_mean = xmalloc((size_t)c * sizeof(double));
+    self->running_var = xmalloc((size_t)c * sizeof(double));
+    self->grad_gamma = xcalloc((size_t)c, sizeof(double));
+    self->grad_beta = xcalloc((size_t)c, sizeof(double));
+    self->mean = xcalloc((size_t)c, sizeof(double));
+    self->inv = xcalloc((size_t)c, sizeof(double));
+    for (int i = 0; i < c; i++) {
+        self->gamma[i] = 1.0;
+        self->beta[i] = 0.0;
+        self->running_mean[i] = 0.0;
+        self->running_var[i] = 1.0;
+    }
+    return self;
+}
+
+void bn2d_free(BatchNorm2d *self)
+{
+    if (!self) return;
+    free(self->gamma);
+    free(self->beta);
+    free(self->running_mean);
+    free(self->running_var);
+    free(self->grad_gamma);
+    free(self->grad_beta);
+    free(self->mean);
+    free(self->inv);
+    free(self->x_hat);
+    free(self->scratch);
+    free(self->scratch2);
+    free(self);
+}
+
+void bn2d_zero_grad(BatchNorm2d *self)
+{
+    if (!self) return;
+    memset(self->grad_gamma, 0, (size_t)self->c * sizeof(double));
+    memset(self->grad_beta, 0, (size_t)self->c * sizeof(double));
+}
+
+void bn2d_set_training(BatchNorm2d *self, int training)
+{
+    if (self) self->training = training ? 1 : 0;
+}
+
+void bn2d_set_params(BatchNorm2d *self, const double *gamma, const double *beta)
+{
+    if (!self) return;
+    if (!gamma || !beta) {
+        fprintf(stderr, "bn2d_set_params: gamma / beta 不能为 NULL\n");
+        exit(1);
+    }
+    memcpy(self->gamma, gamma, (size_t)self->c * sizeof(double));
+    memcpy(self->beta, beta, (size_t)self->c * sizeof(double));
+}
+
+void bn2d_set_running(BatchNorm2d *self, const double *mean, const double *var)
+{
+    if (!self) return;
+    if (!mean || !var) {
+        fprintf(stderr, "bn2d_set_running: mean / var 不能为 NULL\n");
+        exit(1);
+    }
+    memcpy(self->running_mean, mean, (size_t)self->c * sizeof(double));
+    memcpy(self->running_var, var, (size_t)self->c * sizeof(double));
+}
+
+const double *bn2d_running_mean(const BatchNorm2d *self) { return self ? self->running_mean : NULL; }
+const double *bn2d_running_var(const BatchNorm2d *self)  { return self ? self->running_var : NULL; }
+const double *bn2d_grad_gamma(const BatchNorm2d *self)   { return self ? self->grad_gamma : NULL; }
+const double *bn2d_grad_beta(const BatchNorm2d *self)    { return self ? self->grad_beta : NULL; }
+int bn2d_cache_mode(const BatchNorm2d *self)             { return self ? self->cache_mode : 0; }
+
+void bn2d_forward(BatchNorm2d *self, const Tensor *x, Tensor *out)
+{
+    if (!self || !x || !out) return;
+    if (x->ndim != 3) {
+        fprintf(stderr, "bn2d_forward: 输入必须是 (C,H,W)，实际 ndim = %d\n", x->ndim);
+        exit(1);
+    }
+    const int C = x->shape[0], H = x->shape[1], W = x->shape[2];
+    if (C != self->c) {
+        fprintf(stderr, "bn2d_forward: 通道数 %d 与本层 %d 不一致\n", C, self->c);
+        exit(1);
+    }
+    if (H < 1 || W < 1) {
+        fprintf(stderr, "bn2d_forward: 输入不能为空（H=%d, W=%d）\n", H, W);
+        exit(1);
+    }
+    norm_ext_need3(out, C, H, W, "bn2d_forward(out)");
+
+    const int m = H * W;
+    self->in_c = C;
+    self->in_h = H;
+    self->in_w = W;
+    self->x_hat = norm_ext_grow(self->x_hat, &self->x_hat_cap, C * m);
+    self->scratch = norm_ext_grow(self->scratch, &self->scratch_cap, m);
+    self->scratch2 = norm_ext_grow(self->scratch2, &self->scratch2_cap, m);
+
+    self->cache_mode = self->training ? 1 : 0;
+    for (int c = 0; c < C; c++) {
+        const double *flat = x->data + (size_t)c * (size_t)m;
+        double mean, var;
+        if (self->cache_mode) {
+            mean = sum_neumaier(flat, m) / (double)m;
+            for (int i = 0; i < m; i++) {
+                const double d = flat[i] - mean;
+                self->scratch[i] = d * d;
+            }
+            var = sum_neumaier(self->scratch, m) / (double)m;
+            /* Python：先用有偏 var 归一化，running 里存无偏估计 */
+            self->running_mean[c] = (1.0 - self->momentum) * self->running_mean[c]
+                                    + self->momentum * mean;
+            const double unb = (m > 1) ? var * (double)m / (double)(m - 1) : var;
+            self->running_var[c] = (1.0 - self->momentum) * self->running_var[c]
+                                   + self->momentum * unb;
+        } else {
+            mean = self->running_mean[c];
+            var = self->running_var[c];
+        }
+        const double inv = 1.0 / sqrt(var + self->eps);
+        self->mean[c] = mean;
+        self->inv[c] = inv;
+
+        double *xh = self->x_hat + (size_t)c * (size_t)m;
+        for (int i = 0; i < m; i++) xh[i] = (flat[i] - mean) * inv;
+        double *o = out->data + (size_t)c * (size_t)m;
+        for (int i = 0; i < m; i++) o[i] = self->gamma[c] * xh[i] + self->beta[c];
+    }
+    self->ready = 1;
+}
+
+void bn2d_backward(BatchNorm2d *self, const Tensor *dout, Tensor *dx)
+{
+    if (!self || !dout || !dx) return;
+    if (!self->ready) {
+        fprintf(stderr, "bn2d_backward: 必须先调用 bn2d_forward()\n");
+        exit(1);
+    }
+    const int C = self->in_c, H = self->in_h, W = self->in_w;
+    norm_ext_need3(dout, C, H, W, "bn2d_backward(dout)");
+    norm_ext_need3(dx, C, H, W, "bn2d_backward(dx)");
+
+    const int m = H * W;
+    const double dm = (double)m;
+    for (int c = 0; c < C; c++) {
+        const double *d = dout->data + (size_t)c * (size_t)m;
+        const double *xh = self->x_hat + (size_t)c * (size_t)m;
+
+        /* grad_gamma = sum(d * x_hat)，grad_beta = sum(d)：都是 CPython sum() */
+        for (int i = 0; i < m; i++) self->scratch[i] = d[i] * xh[i];
+        self->grad_gamma[c] += sum_neumaier(self->scratch, m);
+        self->grad_beta[c] += sum_neumaier(d, m);
+
+        /* dxh = d * gamma[c] */
+        double *dxh = self->scratch;
+        const double g = self->gamma[c];
+        for (int i = 0; i < m; i++) dxh[i] = d[i] * g;
+
+        double *o = dx->data + (size_t)c * (size_t)m;
+        if (!self->cache_mode) {
+            /* 推理：mean/var 与样本无关，dx = inv * dxh（没有 m 项） */
+            const double inv = self->inv[c];
+            for (int i = 0; i < m; i++) o[i] = inv * dxh[i];
+        } else {
+            const double s1 = sum_neumaier(dxh, m);
+            for (int i = 0; i < m; i++) self->scratch2[i] = dxh[i] * xh[i];
+            const double s2 = sum_neumaier(self->scratch2, m);
+            const double inv = self->inv[c];
+            for (int i = 0; i < m; i++) {
+                o[i] = inv * (dm * dxh[i] - s1 - xh[i] * s2) / dm;
+            }
+        }
+    }
+}
+
+int bn2d_param_count(BatchNorm2d *self)
+{
+    return self ? 2 * self->c : 0;   /* gamma + beta */
+}
+
+static void bn2d_vt_forward(Module *m, const Tensor *x, Tensor *out)
+{
+    bn2d_forward((BatchNorm2d *)m->self, x, out);
+}
+
+static void bn2d_vt_backward(Module *m, const Tensor *dout, Tensor *dx)
+{
+    bn2d_backward((BatchNorm2d *)m->self, dout, dx);
+}
+
+static void bn2d_vt_zero_grad(Module *m)
+{
+    bn2d_zero_grad((BatchNorm2d *)m->self);
+}
+
+static void bn2d_vt_free(Module *m)
+{
+    bn2d_free((BatchNorm2d *)m->self);
+}
+
+static int bn2d_vt_param_count(Module *m)
+{
+    return bn2d_param_count((BatchNorm2d *)m->self);
+}
+
+static void bn2d_vt_to_string(Module *m, char *buf, size_t n)
+{
+    const BatchNorm2d *b = (const BatchNorm2d *)m->self;
+    snprintf(buf, n, "BatchNorm2d(%d, eps=%g, momentum=%g)", b->c, b->eps, b->momentum);
+}
+
+static const ModuleVT BN2D_VT = {
+    "BatchNorm2d",
+    bn2d_vt_forward,
+    bn2d_vt_backward,
+    bn2d_vt_zero_grad,
+    bn2d_vt_free,
+    bn2d_vt_param_count,
+    bn2d_vt_to_string
+};
+
+Module *bn2d_as_module(BatchNorm2d *self)
+{
+    return wrap_module(&BN2D_VT, self);
+}
+
+/* ================================= GroupNorm ================================= */
+
+static GroupNorm *gn_create_impl(int num_groups, int num_channels, double eps, int instance)
+{
+    if (num_groups < 1) {
+        fprintf(stderr, "gn_create: num_groups 必须是正整数，收到 %d\n", num_groups);
+        exit(1);
+    }
+    if (num_channels < 1) {
+        fprintf(stderr, "gn_create: num_channels 必须是正整数，收到 %d\n", num_channels);
+        exit(1);
+    }
+    if (num_channels % num_groups != 0) {
+        fprintf(stderr, "gn_create: num_channels=%d 必须能被 num_groups=%d 整除\n",
+                num_channels, num_groups);
+        exit(1);
+    }
+    if (!(eps > 0.0)) {
+        fprintf(stderr, "gn_create: eps 必须 > 0，收到 %g\n", eps);
+        exit(1);
+    }
+    GroupNorm *self = xcalloc(1, sizeof(GroupNorm));
+    self->groups = num_groups;
+    self->channels = num_channels;
+    self->eps = eps;
+    self->instance = instance;
+
+    const int c = num_channels;
+    self->gamma = xmalloc((size_t)c * sizeof(double));
+    self->beta = xmalloc((size_t)c * sizeof(double));
+    self->grad_gamma = xcalloc((size_t)c, sizeof(double));
+    self->grad_beta = xcalloc((size_t)c, sizeof(double));
+    self->mean = xcalloc((size_t)num_groups, sizeof(double));
+    self->inv = xcalloc((size_t)num_groups, sizeof(double));
+    for (int i = 0; i < c; i++) {
+        self->gamma[i] = 1.0;
+        self->beta[i] = 0.0;
+    }
+    return self;
+}
+
+GroupNorm *gn_create(int num_groups, int num_channels, double eps)
+{
+    return gn_create_impl(num_groups, num_channels, eps, 0);
+}
+
+GroupNorm *inorm_create(int num_channels, double eps)
+{
+    return gn_create_impl(num_channels, num_channels, eps, 1);
+}
+
+void gn_free(GroupNorm *self)
+{
+    if (!self) return;
+    free(self->gamma);
+    free(self->beta);
+    free(self->grad_gamma);
+    free(self->grad_beta);
+    free(self->mean);
+    free(self->inv);
+    free(self->x_hat);
+    free(self);
+}
+
+void gn_zero_grad(GroupNorm *self)
+{
+    if (!self) return;
+    memset(self->grad_gamma, 0, (size_t)self->channels * sizeof(double));
+    memset(self->grad_beta, 0, (size_t)self->channels * sizeof(double));
+}
+
+void gn_set_params(GroupNorm *self, const double *gamma, const double *beta)
+{
+    if (!self) return;
+    if (!gamma || !beta) {
+        fprintf(stderr, "gn_set_params: gamma / beta 不能为 NULL\n");
+        exit(1);
+    }
+    memcpy(self->gamma, gamma, (size_t)self->channels * sizeof(double));
+    memcpy(self->beta, beta, (size_t)self->channels * sizeof(double));
+}
+
+const double *gn_grad_gamma(const GroupNorm *self) { return self ? self->grad_gamma : NULL; }
+const double *gn_grad_beta(const GroupNorm *self)  { return self ? self->grad_beta : NULL; }
+
+void gn_forward(GroupNorm *self, const Tensor *x, Tensor *out)
+{
+    if (!self || !x || !out) return;
+    if (x->ndim != 3) {
+        fprintf(stderr, "gn_forward: 输入必须是 (C,H,W)，实际 ndim = %d\n", x->ndim);
+        exit(1);
+    }
+    const int C = x->shape[0], H = x->shape[1], W = x->shape[2];
+    if (C != self->channels) {
+        fprintf(stderr, "gn_forward: 通道数 %d 与本层 %d 不一致\n", C, self->channels);
+        exit(1);
+    }
+    if (H < 1 || W < 1) {
+        fprintf(stderr, "gn_forward: 输入不能为空（H=%d, W=%d）\n", H, W);
+        exit(1);
+    }
+    norm_ext_need3(out, C, H, W, "gn_forward(out)");
+
+    self->in_c = C;
+    self->in_h = H;
+    self->in_w = W;
+    self->x_hat = norm_ext_grow(self->x_hat, &self->x_hat_cap, C * H * W);
+
+    const int per = self->channels / self->groups;
+    const double n = (double)(per * H * W);
+
+    for (int g = 0; g < self->groups; g++) {
+        const int c0 = g * per;
+        /* mean：逐行 sum(row)（Neumaier）再朴素累加到 mean，最后 /= n */
+        double mean = 0.0;
+        for (int c = c0; c < c0 + per; c++) {
+            for (int h = 0; h < H; h++) {
+                mean += sum_neumaier(x->data + ((size_t)c * H + h) * W, W);
+            }
+        }
+        mean /= n;
+        /* var：显式朴素 += d*d（Python 就是这么写的） */
+        double var = 0.0;
+        for (int c = c0; c < c0 + per; c++) {
+            for (int h = 0; h < H; h++) {
+                const double *row = x->data + ((size_t)c * H + h) * W;
+                for (int w = 0; w < W; w++) {
+                    const double d = row[w] - mean;
+                    var += d * d;
+                }
+            }
+        }
+        var /= n;
+        const double inv = 1.0 / sqrt(var + self->eps);
+        self->mean[g] = mean;
+        self->inv[g] = inv;
+
+        for (int c = c0; c < c0 + per; c++) {
+            for (int h = 0; h < H; h++) {
+                const double *row = x->data + ((size_t)c * H + h) * W;
+                double *xh_row = self->x_hat + ((size_t)c * H + h) * W;
+                double *o_row = out->data + ((size_t)c * H + h) * W;
+                for (int w = 0; w < W; w++) {
+                    xh_row[w] = (row[w] - mean) * inv;
+                    o_row[w] = self->gamma[c] * xh_row[w] + self->beta[c];
+                }
+            }
+        }
+    }
+    self->ready = 1;
+}
+
+void gn_backward(GroupNorm *self, const Tensor *dout, Tensor *dx)
+{
+    if (!self || !dout || !dx) return;
+    if (!self->ready) {
+        fprintf(stderr, "gn_backward: 必须先调用 gn_forward()\n");
+        exit(1);
+    }
+    const int C = self->in_c, H = self->in_h, W = self->in_w;
+    norm_ext_need3(dout, C, H, W, "gn_backward(dout)");
+    norm_ext_need3(dx, C, H, W, "gn_backward(dx)");
+
+    const int per = self->channels / self->groups;
+    const double n = (double)(per * H * W);
+
+    /* grad_beta[c] = Σ_h sum(dout[c][h])（逐行 Neumaier，跨行朴素累加）
+     * grad_gamma[c] = Σ_{h,w} dout*x_hat（显式朴素累加） */
+    for (int c = 0; c < C; c++) {
+        double s = 0.0;
+        for (int h = 0; h < H; h++) {
+            s += sum_neumaier(dout->data + ((size_t)c * H + h) * W, W);
+        }
+        self->grad_beta[c] += s;
+
+        double t = 0.0;
+        for (int h = 0; h < H; h++) {
+            const double *d_row = dout->data + ((size_t)c * H + h) * W;
+            const double *xh_row = self->x_hat + ((size_t)c * H + h) * W;
+            for (int w = 0; w < W; w++) t += d_row[w] * xh_row[w];
+        }
+        self->grad_gamma[c] += t;
+    }
+
+    for (int g = 0; g < self->groups; g++) {
+        const int c0 = g * per;
+        const double mean = self->mean[g];       /* 与 Python 一样不用，保留可读性 */
+        const double inv = self->inv[g];
+        (void)mean;
+
+        double s1 = 0.0;   /* sum(dx_hat) */
+        double s2 = 0.0;   /* sum(dx_hat * x_hat) */
+        for (int c = c0; c < c0 + per; c++) {
+            const double gam = self->gamma[c];
+            for (int h = 0; h < H; h++) {
+                const double *d_row = dout->data + ((size_t)c * H + h) * W;
+                const double *xh_row = self->x_hat + ((size_t)c * H + h) * W;
+                for (int w = 0; w < W; w++) {
+                    const double d = d_row[w] * gam;
+                    s1 += d;
+                    s2 += d * xh_row[w];
+                }
+            }
+        }
+        for (int c = c0; c < c0 + per; c++) {
+            const double gam = self->gamma[c];
+            for (int h = 0; h < H; h++) {
+                const double *d_row = dout->data + ((size_t)c * H + h) * W;
+                const double *xh_row = self->x_hat + ((size_t)c * H + h) * W;
+                double *o_row = dx->data + ((size_t)c * H + h) * W;
+                for (int w = 0; w < W; w++) {
+                    const double d = d_row[w] * gam;
+                    o_row[w] = inv * (n * d - s1 - xh_row[w] * s2) / n;
+                }
+            }
+        }
+    }
+}
+
+int gn_param_count(GroupNorm *self)
+{
+    return self ? 2 * self->channels : 0;   /* gamma + beta */
+}
+
+static void gn_vt_forward(Module *m, const Tensor *x, Tensor *out)
+{
+    gn_forward((GroupNorm *)m->self, x, out);
+}
+
+static void gn_vt_backward(Module *m, const Tensor *dout, Tensor *dx)
+{
+    gn_backward((GroupNorm *)m->self, dout, dx);
+}
+
+static void gn_vt_zero_grad(Module *m)
+{
+    gn_zero_grad((GroupNorm *)m->self);
+}
+
+static void gn_vt_free(Module *m)
+{
+    gn_free((GroupNorm *)m->self);
+}
+
+static int gn_vt_param_count(Module *m)
+{
+    return gn_param_count((GroupNorm *)m->self);
+}
+
+static void gn_vt_to_string(Module *m, char *buf, size_t n)
+{
+    const GroupNorm *g = (const GroupNorm *)m->self;
+    if (g->instance) {
+        snprintf(buf, n, "InstanceNorm(%d, eps=%g)", g->channels, g->eps);
+    } else {
+        snprintf(buf, n, "GroupNorm(%d, %d, eps=%g)", g->groups, g->channels, g->eps);
+    }
+}
+
+static const ModuleVT GN_VT = {
+    "GroupNorm",
+    gn_vt_forward,
+    gn_vt_backward,
+    gn_vt_zero_grad,
+    gn_vt_free,
+    gn_vt_param_count,
+    gn_vt_to_string
+};
+
+static const ModuleVT INORM_VT = {
+    "InstanceNorm",
+    gn_vt_forward,
+    gn_vt_backward,
+    gn_vt_zero_grad,
+    gn_vt_free,
+    gn_vt_param_count,
+    gn_vt_to_string
+};
+
+Module *gn_as_module(GroupNorm *self)
+{
+    return wrap_module(&GN_VT, self);
+}
+
+Module *inorm_as_module(GroupNorm *self)
+{
+    return wrap_module(&INORM_VT, self);
+}
+
+/* ================================== DropPath ================================== */
+
+DropPath *droppath_create(double p, int scale_by_keep)
+{
+    if (!(p >= 0.0 && p < 1.0)) {
+        fprintf(stderr, "droppath_create: p 必须在 [0,1) 内，收到 %g\n", p);
+        exit(1);
+    }
+    DropPath *self = xcalloc(1, sizeof(DropPath));
+    self->p = p;
+    self->scale_by_keep = scale_by_keep ? 1 : 0;
+    self->training = 1;
+    self->factor = 1.0;
+    self->rng = 0x9E3779B97F4A7C15ULL;
+    return self;
+}
+
+void droppath_free(DropPath *self)
+{
+    free(self);
+}
+
+void droppath_zero_grad(DropPath *self)
+{
+    (void)self;   /* 无参数：空实现，仅为统一接口 */
+}
+
+void droppath_set_training(DropPath *self, int training)
+{
+    if (self) self->training = training ? 1 : 0;
+}
+
+void droppath_set_seed(DropPath *self, unsigned long long seed)
+{
+    if (!self) return;
+    self->rng = seed ? seed : 0x9E3779B97F4A7C15ULL;
+}
+
+void droppath_set_keep(DropPath *self, int keep)
+{
+    if (!self) return;
+    self->has_pending = 1;
+    self->pending_keep = keep ? 1 : 0;
+}
+
+double droppath_factor(const DropPath *self)
+{
+    return self ? self->factor : 1.0;
+}
+
+static int droppath_draw_keep(DropPath *self)
+{
+    /* xorshift64*：与 Dropout 一致；跨语言不追求与 Python 的 MT 逐位一致，
+     * 等价性验证一律走 droppath_set_keep()。 */
+    unsigned long long s = self->rng;
+    s ^= s >> 12;
+    s ^= s << 25;
+    s ^= s >> 27;
+    self->rng = s;
+    const unsigned long long r = s * 2685821657736338717ULL;
+    const double u = (double)(r >> 11) * (1.0 / 9007199254740992.0);
+    return (u >= self->p) ? 1 : 0;
+}
+
+void droppath_forward(DropPath *self, const Tensor *x, Tensor *out)
+{
+    if (!self || !x || !out) return;
+    if (x->size != out->size) {
+        fprintf(stderr, "droppath_forward: 输入 %d 个元素与输出 %d 个不一致\n", x->size, out->size);
+        exit(1);
+    }
+    if (!self->training || self->p == 0.0) {
+        self->factor = 1.0;
+        memcpy(out->data, x->data, (size_t)x->size * sizeof(double));
+        return;
+    }
+    int keep;
+    if (self->has_pending) {
+        keep = self->pending_keep;
+        self->has_pending = 0;
+    } else {
+        keep = droppath_draw_keep(self);
+    }
+    if (!keep) {
+        self->factor = 0.0;
+    } else {
+        self->factor = self->scale_by_keep ? 1.0 / (1.0 - self->p) : 1.0;
+    }
+    const double k = self->factor;
+    for (int i = 0; i < x->size; i++) out->data[i] = x->data[i] * k;
+}
+
+void droppath_backward(DropPath *self, const Tensor *dout, Tensor *dx)
+{
+    if (!self || !dout || !dx) return;
+    if (dout->size != dx->size) {
+        fprintf(stderr, "droppath_backward: dout %d 个元素与 dx %d 个不一致\n",
+                dout->size, dx->size);
+        exit(1);
+    }
+    const double k = self->factor;
+    for (int i = 0; i < dout->size; i++) dx->data[i] = dout->data[i] * k;
+}
+
+int droppath_param_count(DropPath *self)
+{
+    (void)self;
+    return 0;
+}
+
+static void droppath_vt_forward(Module *m, const Tensor *x, Tensor *out)
+{
+    droppath_forward((DropPath *)m->self, x, out);
+}
+
+static void droppath_vt_backward(Module *m, const Tensor *dout, Tensor *dx)
+{
+    droppath_backward((DropPath *)m->self, dout, dx);
+}
+
+static void droppath_vt_zero_grad(Module *m)
+{
+    droppath_zero_grad((DropPath *)m->self);
+}
+
+static void droppath_vt_free(Module *m)
+{
+    droppath_free((DropPath *)m->self);
+}
+
+static int droppath_vt_param_count(Module *m)
+{
+    return droppath_param_count((DropPath *)m->self);
+}
+
+static void droppath_vt_to_string(Module *m, char *buf, size_t n)
+{
+    const DropPath *d = (const DropPath *)m->self;
+    snprintf(buf, n, "DropPath(p=%g%s)", d->p, d->scale_by_keep ? "" : ", scale_by_keep=False");
+}
+
+static const ModuleVT DROPPATH_VT = {
+    "DropPath",
+    droppath_vt_forward,
+    droppath_vt_backward,
+    droppath_vt_zero_grad,
+    droppath_vt_free,
+    droppath_vt_param_count,
+    droppath_vt_to_string
+};
+
+Module *droppath_as_module(DropPath *self)
+{
+    return wrap_module(&DROPPATH_VT, self);
+}

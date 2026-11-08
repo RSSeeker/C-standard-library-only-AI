@@ -1,6 +1,7 @@
 /*
  * compare_norm.c —— 读取 tools/norm_reference.py 导出的参考数据，
- * 用 C 实现重算 BatchNorm1d / LayerNorm / Dropout 并逐项比对。
+ * 用 C 实现重算 BatchNorm1d / LayerNorm / Dropout / BatchNorm2d /
+ * GroupNorm / InstanceNorm / DropPath 并逐项比对。
  *
  * 用法: compare_norm [norm_reference.json]
  * 退出码: 0 = 全部在容差内（默认要求逐位相同），1 = 存在超差项
@@ -43,6 +44,19 @@ static void arr2_vals(const JsonValue *v, double *dst, int rows, int cols)
         const JsonValue *row = json_at(v, i);
         for (int j = 0; j < cols; j++)
             dst[i * cols + j] = json_num(json_at(row, j), 0.0);
+    }
+}
+
+/* ---------- 三维数组（C,H,W）展平 ---------- */
+static void arr3_vals(const JsonValue *v, double *dst, int c, int h, int w)
+{
+    for (int ci = 0; ci < c; ci++) {
+        const JsonValue *ch = json_at(v, ci);
+        for (int hi = 0; hi < h; hi++) {
+            const JsonValue *row = json_at(ch, hi);
+            for (int wi = 0; wi < w; wi++)
+                dst[(ci * h + hi) * w + wi] = json_num(json_at(row, wi), 0.0);
+        }
     }
 }
 
@@ -262,6 +276,267 @@ int main(int argc, char **argv)
         free(mask); free(want);
         tensor_free(x); tensor_free(out); tensor_free(dout); tensor_free(dx);
         dropout_free(dp);
+    }
+
+/* ===================== BatchNorm2d 训练路径 ===================== */
+    {
+        const JsonValue *dj = json_get(root, "bn2");
+        if (!dj) {
+            fprintf(stderr, "参考数据缺少 bn2（请重新运行 tools/norm_reference.py）\n");
+            return 2;
+        }
+        const int C = (int)json_num(need(dj, "c", "bn2"), 0.0);
+        const int H = (int)json_num(need(dj, "h", "bn2"), 0.0);
+        const int W = (int)json_num(need(dj, "w", "bn2"), 0.0);
+        const double eps = json_num(need(dj, "eps", "bn2"), 0.0);
+        const double mom = json_num(need(dj, "momentum", "bn2"), 0.0);
+        const int n = C * H * W;
+
+        BatchNorm2d *bn = bn2d_create(C, eps, mom);
+        double *gamma = malloc((size_t)C * sizeof(double));
+        double *beta = malloc((size_t)C * sizeof(double));
+        double *rm = malloc((size_t)C * sizeof(double));
+        double *rv = malloc((size_t)C * sizeof(double));
+        arr_vals(need(dj, "gamma", "bn2"), gamma, C);
+        arr_vals(need(dj, "beta", "bn2"), beta, C);
+        arr_vals(need(dj, "running_mean", "bn2"), rm, C);
+        arr_vals(need(dj, "running_var", "bn2"), rv, C);
+        bn2d_set_params(bn, gamma, beta);
+        bn2d_set_running(bn, rm, rv);
+
+        int xs[3] = { C, H, W };
+        Tensor *x = tensor_new(3, xs), *out = tensor_new(3, xs);
+        Tensor *dout = tensor_new(3, xs), *dx = tensor_new(3, xs);
+        arr3_vals(need(dj, "x", "bn2"), x->data, C, H, W);
+        arr3_vals(need(dj, "dout", "bn2"), dout->data, C, H, W);
+
+        printf("\nBatchNorm2d 训练路径 (C=%d, H=%d, W=%d)\n", C, H, W);
+        bn2d_forward(bn, x, out);
+
+        double *want = malloc((size_t)n * sizeof(double));
+        arr3_vals(need(dj, "out", "bn2"), want, C, H, W);
+        report("forward", out->data, want, n);
+
+        bn2d_backward(bn, dout, dx);
+        arr3_vals(need(dj, "dx", "bn2"), want, C, H, W);
+        report("backward dx（训练）", dx->data, want, n);
+
+        arr_vals(need(dj, "grad_gamma", "bn2"), want, C);
+        report("grad_gamma", bn2d_grad_gamma(bn), want, C);
+        arr_vals(need(dj, "grad_beta", "bn2"), want, C);
+        report("grad_beta", bn2d_grad_beta(bn), want, C);
+
+        arr_vals(need(dj, "running_mean_after", "bn2"), want, C);
+        report("running_mean 更新后", bn2d_running_mean(bn), want, C);
+        arr_vals(need(dj, "running_var_after", "bn2"), want, C);
+        report("running_var 更新后", bn2d_running_var(bn), want, C);
+
+        free(want); free(gamma); free(beta); free(rm); free(rv);
+        tensor_free(x); tensor_free(out); tensor_free(dout); tensor_free(dx);
+        bn2d_free(bn);
+    }
+
+    /* ===================== BatchNorm2d 推理路径 ===================== */
+    {
+        const JsonValue *dj = json_get(root, "bn2_infer");
+        if (!dj) {
+            fprintf(stderr, "参考数据缺少 bn2_infer\n");
+            return 2;
+        }
+        const int C = (int)json_num(need(dj, "c", "bn2_infer"), 0.0);
+        const int H = (int)json_num(need(dj, "h", "bn2_infer"), 0.0);
+        const int W = (int)json_num(need(dj, "w", "bn2_infer"), 0.0);
+        const double eps = json_num(need(dj, "eps", "bn2_infer"), 0.0);
+        const int n = C * H * W;
+
+        BatchNorm2d *bn = bn2d_create(C, eps, 0.1);
+        double *gamma = malloc((size_t)C * sizeof(double));
+        double *beta = malloc((size_t)C * sizeof(double));
+        double *rm = malloc((size_t)C * sizeof(double));
+        double *rv = malloc((size_t)C * sizeof(double));
+        arr_vals(need(dj, "gamma", "bn2_infer"), gamma, C);
+        arr_vals(need(dj, "beta", "bn2_infer"), beta, C);
+        arr_vals(need(dj, "running_mean", "bn2_infer"), rm, C);
+        arr_vals(need(dj, "running_var", "bn2_infer"), rv, C);
+        bn2d_set_params(bn, gamma, beta);
+        bn2d_set_running(bn, rm, rv);
+        bn2d_set_training(bn, 0);            /* eval() */
+
+        int xs[3] = { C, H, W };
+        Tensor *x = tensor_new(3, xs), *out = tensor_new(3, xs);
+        Tensor *dout = tensor_new(3, xs), *dx = tensor_new(3, xs);
+        arr3_vals(need(dj, "x", "bn2_infer"), x->data, C, H, W);
+        arr3_vals(need(dj, "dout", "bn2_infer"), dout->data, C, H, W);
+
+        printf("\nBatchNorm2d 推理路径 (C=%d, H=%d, W=%d)\n", C, H, W);
+        bn2d_forward(bn, x, out);
+        double *want = malloc((size_t)n * sizeof(double));
+        arr3_vals(need(dj, "out", "bn2_infer"), want, C, H, W);
+        report("forward（用 running 统计量）", out->data, want, n);
+
+        bn2d_backward(bn, dout, dx);
+        arr3_vals(need(dj, "dx", "bn2_infer"), want, C, H, W);
+        report("backward dx（推理，无 m 项）", dx->data, want, n);
+
+        arr_vals(need(dj, "grad_gamma", "bn2_infer"), want, C);
+        report("grad_gamma（推理）", bn2d_grad_gamma(bn), want, C);
+        arr_vals(need(dj, "grad_beta", "bn2_infer"), want, C);
+        report("grad_beta（推理）", bn2d_grad_beta(bn), want, C);
+
+        /* 推理路径不该动 running 统计量 */
+        int untouched = 1;
+        for (int i = 0; i < C; i++)
+            if (bn2d_running_mean(bn)[i] != rm[i] || bn2d_running_var(bn)[i] != rv[i])
+                untouched = 0;
+        printf("  %-34s %s\n", "推理不更新 running 统计量", untouched ? "[OK]" : "[失败]");
+        if (!untouched) g_fail++;
+
+        free(want); free(gamma); free(beta); free(rm); free(rv);
+        tensor_free(x); tensor_free(out); tensor_free(dout); tensor_free(dx);
+        bn2d_free(bn);
+    }
+
+    /* ===================== GroupNorm ===================== */
+    {
+        const JsonValue *dj = json_get(root, "gn");
+        if (!dj) {
+            fprintf(stderr, "参考数据缺少 gn\n");
+            return 2;
+        }
+        const int G = (int)json_num(need(dj, "groups", "gn"), 0.0);
+        const int C = (int)json_num(need(dj, "channels", "gn"), 0.0);
+        const int H = (int)json_num(need(dj, "h", "gn"), 0.0);
+        const int W = (int)json_num(need(dj, "w", "gn"), 0.0);
+        const double eps = json_num(need(dj, "eps", "gn"), 0.0);
+        const int n = C * H * W;
+
+        GroupNorm *gn = gn_create(G, C, eps);
+        double *gamma = malloc((size_t)C * sizeof(double));
+        double *beta = malloc((size_t)C * sizeof(double));
+        arr_vals(need(dj, "gamma", "gn"), gamma, C);
+        arr_vals(need(dj, "beta", "gn"), beta, C);
+        gn_set_params(gn, gamma, beta);
+
+        int xs[3] = { C, H, W };
+        Tensor *x = tensor_new(3, xs), *out = tensor_new(3, xs);
+        Tensor *dout = tensor_new(3, xs), *dx = tensor_new(3, xs);
+        arr3_vals(need(dj, "x", "gn"), x->data, C, H, W);
+        arr3_vals(need(dj, "dout", "gn"), dout->data, C, H, W);
+
+        printf("\nGroupNorm (groups=%d, C=%d, H=%d, W=%d)\n", G, C, H, W);
+        gn_forward(gn, x, out);
+        double *want = malloc((size_t)n * sizeof(double));
+        arr3_vals(need(dj, "out", "gn"), want, C, H, W);
+        report("forward", out->data, want, n);
+
+        gn_backward(gn, dout, dx);
+        arr3_vals(need(dj, "dx", "gn"), want, C, H, W);
+        report("backward dx", dx->data, want, n);
+        arr_vals(need(dj, "grad_gamma", "gn"), want, C);
+        report("grad_gamma", gn_grad_gamma(gn), want, C);
+        arr_vals(need(dj, "grad_beta", "gn"), want, C);
+        report("grad_beta", gn_grad_beta(gn), want, C);
+
+        free(want); free(gamma); free(beta);
+        tensor_free(x); tensor_free(out); tensor_free(dout); tensor_free(dx);
+        gn_free(gn);
+    }
+
+    /* ===================== InstanceNorm ===================== */
+    {
+        const JsonValue *dj = json_get(root, "inorm");
+        if (!dj) {
+            fprintf(stderr, "参考数据缺少 inorm\n");
+            return 2;
+        }
+        const int C = (int)json_num(need(dj, "channels", "inorm"), 0.0);
+        const int H = (int)json_num(need(dj, "h", "inorm"), 0.0);
+        const int W = (int)json_num(need(dj, "w", "inorm"), 0.0);
+        const double eps = json_num(need(dj, "eps", "inorm"), 0.0);
+        const int n = C * H * W;
+
+        GroupNorm *in = inorm_create(C, eps);   /* groups == channels */
+        double *gamma = malloc((size_t)C * sizeof(double));
+        double *beta = malloc((size_t)C * sizeof(double));
+        arr_vals(need(dj, "gamma", "inorm"), gamma, C);
+        arr_vals(need(dj, "beta", "inorm"), beta, C);
+        gn_set_params(in, gamma, beta);
+
+        int xs[3] = { C, H, W };
+        Tensor *x = tensor_new(3, xs), *out = tensor_new(3, xs);
+        Tensor *dout = tensor_new(3, xs), *dx = tensor_new(3, xs);
+        arr3_vals(need(dj, "x", "inorm"), x->data, C, H, W);
+        arr3_vals(need(dj, "dout", "inorm"), dout->data, C, H, W);
+
+        printf("\nInstanceNorm (C=%d, H=%d, W=%d)\n", C, H, W);
+        gn_forward(in, x, out);
+        double *want = malloc((size_t)n * sizeof(double));
+        arr3_vals(need(dj, "out", "inorm"), want, C, H, W);
+        report("forward", out->data, want, n);
+
+        gn_backward(in, dout, dx);
+        arr3_vals(need(dj, "dx", "inorm"), want, C, H, W);
+        report("backward dx", dx->data, want, n);
+        arr_vals(need(dj, "grad_gamma", "inorm"), want, C);
+        report("grad_gamma", gn_grad_gamma(in), want, C);
+        arr_vals(need(dj, "grad_beta", "inorm"), want, C);
+        report("grad_beta", gn_grad_beta(in), want, C);
+
+        free(want); free(gamma); free(beta);
+        tensor_free(x); tensor_free(out); tensor_free(dout); tensor_free(dx);
+        gn_free(in);
+    }
+
+    /* ===================== DropPath（丢弃 / 保留 / 推理） ===================== */
+    {
+        const JsonValue *dj = json_get(root, "droppath");
+        if (!dj) {
+            fprintf(stderr, "参考数据缺少 droppath\n");
+            return 2;
+        }
+        const double p = json_num(need(dj, "p", "droppath"), 0.0);
+        const int scale = (int)json_num(need(dj, "scale_by_keep", "droppath"), 1.0);
+        const int n = (int)json_array_len(need(dj, "x", "droppath"));
+        const char *who = "droppath";
+        const JsonValue *cases[3] = {
+            need(dj, "drop", who), need(dj, "keep", who), need(dj, "eval", who)
+        };
+        const char *names[3] = { "丢弃分支 (keep=0)", "保留分支 (keep=1)", "推理 (eval)" };
+
+        int xs[1] = { n };
+        Tensor *x = tensor_new(1, xs), *out = tensor_new(1, xs);
+        Tensor *dout = tensor_new(1, xs), *dx = tensor_new(1, xs);
+        arr_vals(need(dj, "x", who), x->data, n);
+        arr_vals(need(dj, "dout", who), dout->data, n);
+        double *want = malloc((size_t)n * sizeof(double));
+
+        printf("\nDropPath (p=%g, n=%d，注入 Python 的决定)\n", p, n);
+        for (int k = 0; k < 3; k++) {
+            const JsonValue *cj = cases[k];
+            DropPath *dp = droppath_create(p, scale);
+            if (k == 2) {
+                droppath_set_training(dp, 0);
+            } else {
+                droppath_set_keep(dp, (int)json_num(need(cj, "keep", who), 0.0));
+            }
+            droppath_forward(dp, x, out);
+            arr_vals(need(cj, "out", who), want, n);
+            report(names[k], out->data, want, n);
+
+            double f_got = droppath_factor(dp);
+            double f_want = json_num(need(cj, "factor", who), 0.0);
+            printf("  %-34s %.17g vs %.17g %s\n", "factor", f_got, f_want,
+                   (f_got == f_want) ? "[OK]" : "[失败]");
+            if (f_got != f_want) g_fail++;
+
+            droppath_backward(dp, dout, dx);
+            arr_vals(need(cj, "dx", who), want, n);
+            report("backward dx", dx->data, want, n);
+            droppath_free(dp);
+        }
+
+        free(want);
+        tensor_free(x); tensor_free(out); tensor_free(dout); tensor_free(dx);
     }
 
     json_free(root);

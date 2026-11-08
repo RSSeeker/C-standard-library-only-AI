@@ -82,6 +82,28 @@ static Tensor view2(int r, int c, double *data)
 
 /* L = Σ_i Σ_j w_j * out_ij，与 Python 测试里 sum(wi*o for row in out for wi,o in zip(w,row))
  * 同序同算法（Neumaier），使差分本身不引入额外误差 */
+/* 三维视图（C,H,W），用于 BatchNorm2d / GroupNorm / InstanceNorm */
+static Tensor view3(int c, int h, int w, double *data)
+{
+    Tensor t = { .ndim = 3, .shape = { c, h, w, 1 }, .size = c * h * w,
+                 .data = data, .owns_data = 0 };
+    return t;
+}
+
+/* 扁平内积 sum(a[i]*b[i])，用 Neumaier 补偿求和（与 Python 的 sum() 同口径） */
+static double dot_flat(const double *a, const double *b, int n)
+{
+    double s = 0.0, c = 0.0;
+    for (int i = 0; i < n; i++) {
+        const double x = a[i] * b[i];
+        const double t = s + x;
+        if (fabs(s) >= fabs(x)) c += (s - t) + x;
+        else                    c += (x - t) + s;
+        s = t;
+    }
+    return s + c;
+}
+
 static double bn_loss(const Tensor *out, const double *w, int d)
 {
     const int n = out->shape[0];
@@ -582,6 +604,379 @@ static void test_module_vtables(void)
     module_free(mdp);
 }
 
+/* ==================== 8. BatchNorm2d：dx / gamma / beta 的数值梯度 ==================== */
+
+static void test_bn2d_numeric(void)
+{
+    const int C = 2, H = 2, W = 3;
+    const int m = H * W, n = C * m;
+    double xd[12], dd[12], gamma[2], beta[2];
+    for (int i = 0; i < n; i++) { xd[i] = frand(); dd[i] = frand(); }
+    for (int c = 0; c < C; c++) { gamma[c] = 0.7 + 0.3 * c; beta[c] = -0.2 + 0.1 * c; }
+
+    BatchNorm2d *bn = bn2d_create(C, 1e-5, 0.2);
+    bn2d_set_params(bn, gamma, beta);
+
+    double xs[12], ds[12];
+    memcpy(xs, xd, sizeof(xs));
+    memcpy(ds, dd, sizeof(ds));
+    Tensor x = view3(C, H, W, xs), out = view3(C, H, W, xd);
+    Tensor dout = view3(C, H, W, ds), dx = view3(C, H, W, xs);
+    double *ox = malloc((size_t)n * sizeof(double));
+    double *dxx = malloc((size_t)n * sizeof(double));
+    Tensor o = view3(C, H, W, ox), dxt = view3(C, H, W, dxx);
+
+    bn2d_forward(bn, &x, &o);
+    bn2d_backward(bn, &dout, &dxt);
+
+    /* dx 的中心差分 */
+    const double eps = 1e-6;
+    double worst = 0.0;
+    for (int i = 0; i < n; i++) {
+        const double orig = xs[i];
+        xs[i] = orig + eps;
+        bn2d_forward(bn, &x, &o);
+        const double lp = dot_flat(ds, ox, n);
+        xs[i] = orig - eps;
+        bn2d_forward(bn, &x, &o);
+        const double lm = dot_flat(ds, ox, n);
+        xs[i] = orig;
+        const double num = (lp - lm) / (2.0 * eps);
+        const double d = fabs(num - dxx[i]);
+        if (d > worst) worst = d;
+    }
+    check("BatchNorm2d 训练 dx 数值梯度", worst, 1e-5);
+
+    /* gamma / beta 的中心差分（重新 forward 一次让缓存回到原值） */
+    bn2d_forward(bn, &x, &o);
+    double worst_g = 0.0, worst_b = 0.0;
+    for (int c = 0; c < C; c++) {
+        const double og = gamma[c];
+        gamma[c] = og + eps;
+        bn2d_set_params(bn, gamma, beta);
+        bn2d_forward(bn, &x, &o);
+        const double lp = dot_flat(ds, ox, n);
+        gamma[c] = og - eps;
+        bn2d_set_params(bn, gamma, beta);
+        bn2d_forward(bn, &x, &o);
+        const double lm = dot_flat(ds, ox, n);
+        gamma[c] = og;
+        bn2d_set_params(bn, gamma, beta);
+        const double num = (lp - lm) / (2.0 * eps);
+        double d = fabs(num - bn2d_grad_gamma(bn)[c]);
+        if (d > worst_g) worst_g = d;
+
+        const double ob = beta[c];
+        beta[c] = ob + eps;
+        bn2d_set_params(bn, gamma, beta);
+        bn2d_forward(bn, &x, &o);
+        const double lp2 = dot_flat(ds, ox, n);
+        beta[c] = ob - eps;
+        bn2d_set_params(bn, gamma, beta);
+        bn2d_forward(bn, &x, &o);
+        const double lm2 = dot_flat(ds, ox, n);
+        beta[c] = ob;
+        bn2d_set_params(bn, gamma, beta);
+        const double num2 = (lp2 - lm2) / (2.0 * eps);
+        double d2 = fabs(num2 - bn2d_grad_beta(bn)[c]);
+        if (d2 > worst_b) worst_b = d2;
+    }
+    check("BatchNorm2d 训练 grad_gamma 数值梯度", worst_g, 1e-5);
+    check("BatchNorm2d 训练 grad_beta 数值梯度", worst_b, 1e-5);
+
+    free(ox); free(dxx); (void)out; (void)dx; (void)m;
+    bn2d_free(bn);
+}
+
+/* ==================== 9. BatchNorm2d：推理路径、running 统计量、单元素通道 ==================== */
+
+static void test_bn2d_eval_and_running(void)
+{
+    const int C = 2, H = 3, W = 2;
+    const int m = H * W, n = C * m;
+    double xs[12], ds[12], gamma[2] = { 1.3, 0.6 }, beta[2] = { 0.1, -0.4 };
+    double rm0[2] = { 0.5, -0.25 }, rv0[2] = { 2.0, 0.8 };
+    for (int i = 0; i < n; i++) { xs[i] = frand(); ds[i] = frand(); }
+
+    /* 推理路径：dx = inv * dout * gamma，且不动 running 统计量 */
+    BatchNorm2d *bn = bn2d_create(C, 1e-5, 0.1);
+    bn2d_set_params(bn, gamma, beta);
+    bn2d_set_running(bn, rm0, rv0);
+    bn2d_set_training(bn, 0);
+
+    double ox[12], dxx[12];
+    Tensor x = view3(C, H, W, xs), dout = view3(C, H, W, ds);
+    Tensor o = view3(C, H, W, ox), dxt = view3(C, H, W, dxx);
+    bn2d_forward(bn, &x, &o);
+    bn2d_backward(bn, &dout, &dxt);
+
+    double worst = 0.0;
+    for (int c = 0; c < C; c++) {
+        const double inv = 1.0 / sqrt(rv0[c] + 1e-5);
+        for (int i = 0; i < m; i++) {
+            const double want = inv * ds[c * m + i] * gamma[c];
+            const double d = fabs(dxx[c * m + i] - want);
+            if (d > worst) worst = d;
+        }
+    }
+    check("BatchNorm2d 推理 dx = inv*d*gamma", worst, 1e-15);
+
+    int untouched = 1;
+    for (int c = 0; c < C; c++)
+        if (bn2d_running_mean(bn)[c] != rm0[c] || bn2d_running_var(bn)[c] != rv0[c])
+            untouched = 0;
+    check_true("BatchNorm2d 推理不更新 running 统计量", untouched);
+    bn2d_free(bn);
+
+    /* momentum = 1：running 直接被写成当前统计量（mean、无偏 var） */
+    BatchNorm2d *b1 = bn2d_create(C, 1e-5, 1.0);
+    bn2d_set_params(b1, gamma, beta);
+    bn2d_set_running(b1, rm0, rv0);
+    bn2d_forward(b1, &x, &o);
+    double worst_rm = 0.0, worst_rv = 0.0;
+    for (int c = 0; c < C; c++) {
+        double mean = 0.0;
+        for (int i = 0; i < m; i++) mean += xs[c * m + i];
+        mean /= (double)m;
+        double var = 0.0;
+        for (int i = 0; i < m; i++) { const double d = xs[c * m + i] - mean; var += d * d; }
+        var /= (double)m;
+        const double unb = var * (double)m / (double)(m - 1);
+        double d1 = fabs(bn2d_running_mean(b1)[c] - mean);
+        double d2 = fabs(bn2d_running_var(b1)[c] - unb);
+        if (d1 > worst_rm) worst_rm = d1;
+        if (d2 > worst_rv) worst_rv = d2;
+    }
+    check("momentum=1 running_mean = batch mean", worst_rm, 1e-15);
+    check("momentum=1 running_var = 无偏 batch var", worst_rv, 1e-15);
+    bn2d_free(b1);
+
+    /* momentum = 0：running 完全不变 */
+    BatchNorm2d *b0 = bn2d_create(C, 1e-5, 0.0);
+    bn2d_set_params(b0, gamma, beta);
+    bn2d_set_running(b0, rm0, rv0);
+    bn2d_forward(b0, &x, &o);
+    int unchanged = 1;
+    for (int c = 0; c < C; c++)
+        if (bn2d_running_mean(b0)[c] != rm0[c] || bn2d_running_var(b0)[c] != rv0[c])
+            unchanged = 0;
+    check_true("momentum=0 running 统计量不变", unchanged);
+    bn2d_free(b0);
+
+    /* H = W = 1：m_size = 1，无偏方差退化为有偏（不能除 0 出 inf/nan） */
+    double x1[2] = { 0.75, -1.25 }, o1[2];
+    Tensor xs1 = view3(C, 1, 1, x1), os1 = view3(C, 1, 1, o1);
+    BatchNorm2d *bs = bn2d_create(C, 1e-5, 0.5);
+    bn2d_set_params(bs, gamma, beta);
+    bn2d_set_running(bs, rm0, rv0);
+    bn2d_forward(bs, &xs1, &os1);
+    int finite = 1;
+    for (int c = 0; c < C; c++)
+        if (!isfinite(bn2d_running_var(bs)[c])) finite = 0;
+    check_true("m_size=1 时 running_var 仍是有限值", finite);
+    bn2d_free(bs);
+}
+
+/* ==================== 10. GroupNorm / InstanceNorm：数值梯度 ==================== */
+
+static void test_gn_numeric(void)
+{
+    const int G = 2, C = 4, H = 2, W = 2;
+    const int n = C * H * W;
+    double xs[16], ds[16], gamma[4], beta[4];
+    for (int i = 0; i < n; i++) { xs[i] = frand(); ds[i] = frand(); }
+    for (int c = 0; c < C; c++) { gamma[c] = 0.5 + 0.2 * c; beta[c] = 0.15 - 0.05 * c; }
+
+    GroupNorm *gn = gn_create(G, C, 1e-5);
+    gn_set_params(gn, gamma, beta);
+
+    double ox[16], dxx[16];
+    Tensor x = view3(C, H, W, xs), dout = view3(C, H, W, ds);
+    Tensor o = view3(C, H, W, ox), dxt = view3(C, H, W, dxx);
+    gn_forward(gn, &x, &o);
+    gn_backward(gn, &dout, &dxt);
+
+    const double eps = 1e-6;
+    double worst = 0.0;
+    for (int i = 0; i < n; i++) {
+        const double orig = xs[i];
+        xs[i] = orig + eps;
+        gn_forward(gn, &x, &o);
+        const double lp = dot_flat(ds, ox, n);
+        xs[i] = orig - eps;
+        gn_forward(gn, &x, &o);
+        const double lm = dot_flat(ds, ox, n);
+        xs[i] = orig;
+        const double num = (lp - lm) / (2.0 * eps);
+        const double d = fabs(num - dxx[i]);
+        if (d > worst) worst = d;
+    }
+    check("GroupNorm dx 数值梯度", worst, 1e-5);
+
+    gn_forward(gn, &x, &o);
+    double worst_g = 0.0, worst_b = 0.0;
+    for (int c = 0; c < C; c++) {
+        const double og = gamma[c];
+        gamma[c] = og + eps;
+        gn_set_params(gn, gamma, beta);
+        gn_forward(gn, &x, &o);
+        const double lp = dot_flat(ds, ox, n);
+        gamma[c] = og - eps;
+        gn_set_params(gn, gamma, beta);
+        gn_forward(gn, &x, &o);
+        const double lm = dot_flat(ds, ox, n);
+        gamma[c] = og;
+        gn_set_params(gn, gamma, beta);
+        double d = fabs((lp - lm) / (2.0 * eps) - gn_grad_gamma(gn)[c]);
+        if (d > worst_g) worst_g = d;
+
+        const double ob = beta[c];
+        beta[c] = ob + eps;
+        gn_set_params(gn, gamma, beta);
+        gn_forward(gn, &x, &o);
+        const double lp2 = dot_flat(ds, ox, n);
+        beta[c] = ob - eps;
+        gn_set_params(gn, gamma, beta);
+        gn_forward(gn, &x, &o);
+        const double lm2 = dot_flat(ds, ox, n);
+        beta[c] = ob;
+        gn_set_params(gn, gamma, beta);
+        double d2 = fabs((lp2 - lm2) / (2.0 * eps) - gn_grad_beta(gn)[c]);
+        if (d2 > worst_b) worst_b = d2;
+    }
+    check("GroupNorm grad_gamma 数值梯度", worst_g, 1e-5);
+    check("GroupNorm grad_beta 数值梯度", worst_b, 1e-5);
+    gn_free(gn);
+
+    /* InstanceNorm：每组一个通道，等价于逐通道标准化 */
+    GroupNorm *in = inorm_create(C, 1e-5);
+    gn_set_params(in, gamma, beta);
+    gn_forward(in, &x, &o);
+    double worst_i = 0.0;
+    for (int c = 0; c < C; c++) {
+        double mean = 0.0;
+        for (int i = 0; i < H * W; i++) mean += xs[c * H * W + i];
+        mean /= (double)(H * W);
+        double var = 0.0;
+        for (int i = 0; i < H * W; i++) {
+            const double d = xs[c * H * W + i] - mean;
+            var += d * d;
+        }
+        var /= (double)(H * W);
+        const double inv = 1.0 / sqrt(var + 1e-5);
+        for (int i = 0; i < H * W; i++) {
+            const double want = gamma[c] * (xs[c * H * W + i] - mean) * inv + beta[c];
+            const double d = fabs(ox[c * H * W + i] - want);
+            if (d > worst_i) worst_i = d;
+        }
+    }
+    check("InstanceNorm 逐通道标准化闭式", worst_i, 1e-15);
+    gn_free(in);
+}
+
+/* ==================== 11. DropPath：factor 规则与反向 ==================== */
+
+static void test_droppath(void)
+{
+    const int n = 5;
+    double xd[5], dd[5], ox[5], dxx[5];
+    for (int i = 0; i < n; i++) { xd[i] = frand(); dd[i] = frand(); }
+    Tensor x = view1(n, xd), o = view1(n, ox), dout = view1(n, dd), dxt = view1(n, dxx);
+
+    /* 丢弃：输出全 0（含 -0.0），反向全 0 */
+    DropPath *dp = droppath_create(0.25, 1);
+    droppath_set_keep(dp, 0);
+    droppath_forward(dp, &x, &o);
+    check("DropPath 丢弃 factor = 0", droppath_factor(dp), 1e-15);
+    int allz = 1;
+    for (int i = 0; i < n; i++) if (ox[i] != 0.0) allz = 0;
+    check_true("DropPath 丢弃时输出全 0", allz);
+    droppath_backward(dp, &dout, &dxt);
+    check_true("DropPath 丢弃时反向全 0", all_zero(dxx, n));
+
+    /* 保留：factor = 1/(1-p)，反向 = factor*dout */
+    droppath_set_keep(dp, 1);
+    droppath_forward(dp, &x, &o);
+    check("DropPath 保留 factor = 1/(1-p)", droppath_factor(dp) - 1.0 / 0.75, 1e-15);
+    double worst = 0.0;
+    for (int i = 0; i < n; i++) {
+        const double d = fabs(ox[i] - xd[i] / 0.75);
+        if (d > worst) worst = d;
+    }
+    check("DropPath 保留 out = x/(1-p)", worst, 1e-15);
+    droppath_backward(dp, &dout, &dxt);
+    worst = 0.0;
+    for (int i = 0; i < n; i++) {
+        const double d = fabs(dxx[i] - dd[i] / 0.75);
+        if (d > worst) worst = d;
+    }
+    check("DropPath 保留 backward = dout/(1-p)", worst, 1e-15);
+
+    /* scale_by_keep = 0：保留时不放大 */
+    DropPath *ns = droppath_create(0.25, 0);
+    droppath_set_keep(ns, 1);
+    droppath_forward(ns, &x, &o);
+    check("scale_by_keep=0 时 factor = 1", droppath_factor(ns) - 1.0, 1e-15);
+    worst = 0.0;
+    for (int i = 0; i < n; i++) {
+        const double d = fabs(ox[i] - xd[i]);
+        if (d > worst) worst = d;
+    }
+    check("scale_by_keep=0 时 out = x", worst, 0.0);
+    droppath_free(ns);
+
+    /* eval 与 p = 0：恒等 */
+    droppath_set_training(dp, 0);
+    droppath_forward(dp, &x, &o);
+    check("DropPath eval factor = 1", droppath_factor(dp) - 1.0, 1e-15);
+    worst = 0.0;
+    for (int i = 0; i < n; i++) {
+        const double d = fabs(ox[i] - xd[i]);
+        if (d > worst) worst = d;
+    }
+    check("DropPath eval 时 out = x", worst, 0.0);
+    droppath_free(dp);
+
+    DropPath *p0 = droppath_create(0.0, 1);
+    droppath_forward(p0, &x, &o);
+    check("p=0 时 factor = 1", droppath_factor(p0) - 1.0, 1e-15);
+    droppath_free(p0);
+}
+
+/* ==================== 12. 新模块的构造期校验（不崩即可） ==================== */
+
+static void test_new_norm_vtables(void)
+{
+    BatchNorm2d *bn = bn2d_create(3, 1e-5, 0.1);
+    Module *m = bn2d_as_module(bn);
+    char buf[128];
+    m->vt->to_string(m, buf, sizeof(buf));
+    check_true("BatchNorm2d to_string 含模块名", strstr(buf, "BatchNorm2d") != NULL);
+    check_true("BatchNorm2d param_count = 2C", module_param_count(m) == 6);
+    module_free(m);
+
+    GroupNorm *gn = gn_create(2, 4, 1e-5);
+    Module *mg = gn_as_module(gn);
+    mg->vt->to_string(mg, buf, sizeof(buf));
+    check_true("GroupNorm to_string 含 groups", strstr(buf, "groups=2") != NULL ||
+                                              strstr(buf, "GroupNorm(2, 4") != NULL);
+    check_true("GroupNorm param_count = 2C", module_param_count(mg) == 8);
+    module_free(mg);
+
+    GroupNorm *in = inorm_create(3, 1e-5);
+    Module *mi = inorm_as_module(in);
+    mi->vt->to_string(mi, buf, sizeof(buf));
+    check_true("InstanceNorm to_string 含模块名", strstr(buf, "InstanceNorm") != NULL);
+    module_free(mi);
+
+    DropPath *dp = droppath_create(0.1, 1);
+    Module *md = droppath_as_module(dp);
+    md->vt->to_string(md, buf, sizeof(buf));
+    check_true("DropPath to_string 含 p", strstr(buf, "p=0.1") != NULL);
+    check_true("DropPath param_count = 0", module_param_count(md) == 0);
+    module_free(md);
+}
+
 int main(void)
 {
     printf("== Dropout / BatchNorm1d / LayerNorm C17 自测 ==\n");
@@ -594,6 +989,11 @@ int main(void)
     test_layernorm_stats();
     test_dropout();
     test_module_vtables();
+    test_bn2d_numeric();
+    test_bn2d_eval_and_running();
+    test_gn_numeric();
+    test_droppath();
+    test_new_norm_vtables();
 
     printf("\n%s（失败项 = %d）\n", g_failures == 0 ? "全部通过" : "*** 存在失败项 ***", g_failures);
     return g_failures == 0 ? 0 : 1;

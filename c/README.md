@@ -12,7 +12,7 @@
 
 | 项目 | 状态 |
 |------|------|
-| 数值等价性 | MLP 前向/梯度、Conv2d/Conv1d/ConvTranspose2d/MaxPool2d/Flatten、BatchNorm1d/LayerNorm/Dropout、注意力组件、MHA/FFN/TransformerEncoderLayer 前向/反向 **全部与 Python 逐位一致**（0.000e+00，含 window/RoPE/GQA/MQA、ALiBi 与注意力权重 dropout 的注入 mask 对拍，见第 8 节） |
+| 数值等价性 | MLP 前向/梯度、Conv2d/Conv1d/ConvTranspose2d/MaxPool2d/Flatten、BatchNorm1d/BatchNorm2d/LayerNorm/GroupNorm/InstanceNorm/DropPath/Dropout、注意力组件、MHA/FFN/TransformerEncoderLayer 前向/反向 **全部与 Python 逐位一致**（0.000e+00，含 window/RoPE/GQA/MQA、ALiBi 与注意力权重 dropout 的注入 mask 对拍，见第 8 节） |
 | 训练循环 | **零分配**（预热后 `malloc` 调用次数 = 0，用链接器 `--wrap` 统计，与机器负载无关） |
 | 性能 | MLP[64,256,128,8]、5 万参数、1000 样本 × 5 轮：C 约 1.3 s vs Python 约 77 s（**约 58–68 倍**） |
 | 存档互通 | 与 Python 的 `save_model` / `load_model` **双向互通**，两个方向都逐位一致 |
@@ -29,7 +29,7 @@
 | `focal_loss` / `bce_loss` / `bce_with_logits_loss` / `huber_loss` | `losses.c` | 已完成：48 个标量/数组里 47 个逐位相同，仅 1 个 loss 因 `pow` 差 1 ULP（5.551e-17）；`LossKind` 扩到 6 个，训练与验证共用 `trainer_loss_apply` |
 | `confusion_matrix` / `accuracy_score` / `precision_recall_f1` / `matthews_corrcoef` / `top_k_accuracy` / `roc_auc_score` / `mean_absolute_error` / `root_mean_squared_error` / `mean_absolute_percentage_error` / `r2_score` | `metrics.c` | 已完成：参考 JSON 32 个用例 / 141 项检查**全部逐位相同**（容差 0）|
 | `Conv2d`（含 `groups` / `dilation`）/ `Conv1d` / `ConvTranspose2d`（含 `output_padding`） / `MaxPool2d` / `Flatten` | `layers_conv.c` | 已完成，70 项逐位一致（Conv2d 6 种配置、Conv1d 5 种、ConvTranspose2d 5 种） |
-| `Dropout` / `BatchNorm1d` / `LayerNorm` | `layers_norm.c` | 已完成，21 项逐位一致 |
+| `BatchNorm2d` / `GroupNorm` / `InstanceNorm` / `DropPath` / `Dropout` / `BatchNorm1d` / `LayerNorm` | `layers_norm.c` | 已完成，50 项逐位一致（BN2d 训练 6 项 + 推理 5 项、GroupNorm 4 项、InstanceNorm 4 项、DropPath 3 情形 × 3 项，另含原有 22 项） |
 | `RNNCell/RNN` / `LSTMCell/LSTM` / `GRUCell/GRU` + step cache | `rnn.c` | 已完成 |
 | `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成（含 `causal` 因果掩码开关、`mha_set_window` 滑动窗口、`mha_set_rope` 旋转位置编码、`mha_create_gqa` 的 GQA/MQA、`mha_set_alibi` + `tel_set_alibi` / `te_set_alibi` 的 ALiBi 距离偏置、`mha_forward_step` 增量前向、`mha_set_training` + `mha_set_attn_mask` 的注意力权重 dropout） |
 | `MultiHeadAttention(causal=True)` / `CausalLM`（LLM） | `attention.c` + `llm.c` | 已完成：因果掩码、teacher forcing 训练、自回归生成、`llm_generate_p`（nucleus 采样）、`llm_generate_ex` / `llm_generate_cached_ex`（min_p + repetition/presence/frequency 罚分 + no_repeat_ngram）、`llm_perplexity` |
@@ -88,7 +88,7 @@ c/
 ├── tensor.h / tensor.c    张量类型 + 通用模块 vtable（供容器类使用）
 ├── numeric.h              与 Python 对齐的 Neumaier 补偿求和原语
 ├── layers_conv.h/.c       Conv2d / Conv1d / ConvTranspose2d / MaxPool2d / Flatten
-├── layers_norm.h/.c       BatchNorm1d / LayerNorm / Dropout
+├── layers_norm.h/.c       Dropout / BatchNorm1d / BatchNorm2d / LayerNorm / GroupNorm / InstanceNorm / DropPath
 ├── rnn.h / rnn.c          RNNCell/RNN、LSTMCell/LSTM、GRUCell/GRU（含 step cache）
 ├── attention.h / .c       MultiHeadAttention / FeedForward / TransformerEncoder / PositionalEncoding / Embedding（含 causal 掩码、滑动窗口、RoPE、GQA/MQA）
 ├── llm.h / llm.c          CausalLM：因果语言模型（复用 attention.c 的编码器 + 词表头 + Adam + nucleus 采样 + 困惑度）
@@ -155,7 +155,7 @@ Python 写 -> C 读：  最大差异 0.000e+00  PASS   （含 softmax 输出层�
 ### 5. 逐模块等价性（`tools/*_reference.py` + `tests/compare_*.c`）
 
 ```
-python tools/norm_reference.py && ./tests/compare_norm     # 21 项，全部 0.000e+00
+python tools/norm_reference.py && ./tests/compare_norm     # 50 项，全部 0.000e+00
 python tools/conv_reference.py && ./tests/compare_conv     # 70 项，全部 0.000e+00
 python tools/llm_reference.py && ./tests/compare_llm      # 6 段，见下
 python tools/attention_reference.py && ./tests/compare_attention  # 13 个用例，见第 8 节
@@ -246,6 +246,16 @@ Conv2d（六种配置的 forward/grad_w/grad_b/dx：默认 2 组、groups=2、gr
 dilation=2、groups+dilation+stride 叠加）、Conv1d（五种配置：默认、stride+padding、分组、深度、
 分组+大 stride+大 padding）、ConvTranspose2d（五种配置：默认、stride 2 + output_padding、分组、
 深度、分组+stride+output_padding 叠加）、MaxPool2d（两种配置）、Flatten。
+
+覆盖：`BatchNorm2d`（训练 forward、反向 dx / grad_gamma / grad_beta、running_mean / running_var
+更新、mean / inv、x_hat；推理 forward 与「推理不更新 running 统计量」）、`GroupNorm`（forward、
+反向三项、组内 mean / inv、x_hat）、`InstanceNorm`（`groups == channels` 的特例，逐通道标准化闭式）、
+`DropPath`（注入 keep；丢弃 / 保留 / eval 三种情形的 factor、out、dx）、`Conv2d` 的 `groups` / `dilation`
+与 `Conv1d` / `ConvTranspose2d` 各自的五种配置（见上表），合计 50 项逐位相同（容差 0.0e+00）。
+
+> **内存管理提醒**：`BatchNorm2d` 的 `scratch` 与 `scratch2` 必须各有独立的容量字段。
+> 两者共用一个 `scratch_cap` 时，第二个缓冲会认为「容量够」而返回 `NULL`，随后写入直接段错误
+> （本轮真实踩到：`0xC0000005`，输出全空）。
 
 `compare_llm` 比对 CausalLM 的八段：前向 logits、loss + 19 个梯度块、一步 Adam 后的参数、
 训练 3 轮后的参数与 eval loss（含 perplexity）、贪心生成的 token、top_p 确定性生成、
@@ -596,7 +606,7 @@ GCC 默认 `-ffp-contract=fast`，在支持 FMA 的机器上 `s += W*x` 可能�
   `layers_norm.h` 的 `LayerNorm` 是单样本 + Module vtable（缓存只有一份 `x_hat`），
   `TfDropout` 也绑定 `(max_seq,d)` 布局，`Dropout` 则是任意 size + `reserve`/`set_mask`。
   要合并就得改结构体和分配路径，属于"可能改变浮点运算顺序"的高风险改动；合并后还必须用
-  `compare_attention`（TEL 梯度）与 `compare_norm`（21 项）同时证明 delta 0。当前两份代码
+  `compare_attention`（TEL 梯度）与 `compare_norm`（50 项）同时证明 delta 0。当前两份代码
   各自有逐位对拍覆盖，收益不足以抵消风险，因此只记录取舍、不做清理。`test_attention`
   第 11 节现在用同一组 `gamma`/`beta`/`x`/`dout`（d=4/8/16、3 行）逐步比对两份
   LayerNorm 的 forward、dx、`grad_gamma`、`grad_beta`，要求逐位相同（实测 0.000e+00）——

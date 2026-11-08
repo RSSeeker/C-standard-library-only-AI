@@ -19,7 +19,8 @@ AI_PY_DIR = os.environ.get("AI_PY_DIR") or os.path.abspath(
 if not os.path.isfile(os.path.join(AI_PY_DIR, "AI.py")):
     sys.exit(f"找不到 Python 版 AI.py，请设置环境变量 AI_PY_DIR（当前: {AI_PY_DIR}）")
 sys.path.insert(0, AI_PY_DIR)
-from AI import BatchNorm1d, LayerNorm, Dropout      # noqa: E402
+from AI import (BatchNorm1d, BatchNorm2d, DropPath, Dropout, GroupNorm,  # noqa: E402
+                InstanceNorm, LayerNorm)
 
 
 def main():
@@ -112,6 +113,125 @@ def main():
         "p": p, "n": 12,
         "x": x_dp, "mask": mask, "out": out_dp,
         "dout": dout_dp, "dx": dx_dp,
+    }
+
+    # ---------------- BatchNorm2d：训练路径 ----------------
+    random.seed(20240703)
+    c2, h2, w2 = 2, 3, 2
+    rm2 = [0.02 * j for j in range(c2)]
+    rv2 = [1.0 + 0.2 * j for j in range(c2)]
+    bn2 = BatchNorm2d(c2, eps=1e-5, momentum=0.2)
+    bn2.gamma = [0.6 + 0.2 * j for j in range(c2)]
+    bn2.beta = [-0.15 + 0.1 * j for j in range(c2)]
+    bn2.running_mean = list(rm2)
+    bn2.running_var = list(rv2)
+    x_bn2 = [[[random.uniform(-1.0, 1.0) for _ in range(w2)] for _ in range(h2)]
+             for _ in range(c2)]
+    out_bn2 = bn2.forward([[[v for v in row] for row in ch] for ch in x_bn2])
+    dout_bn2 = [[[random.uniform(-1.0, 1.0) for _ in range(w2)] for _ in range(h2)]
+                for _ in range(c2)]
+    # 注意：BatchNorm2d.backward 返回 (dx, grad_gamma, grad_beta)
+    dx_bn2, gg_bn2, gb_bn2 = bn2.backward(
+        [[[v for v in row] for row in ch] for ch in dout_bn2])
+    data["bn2"] = {
+        "c": c2, "h": h2, "w": w2, "eps": bn2.eps, "momentum": bn2.momentum,
+        "gamma": bn2.gamma, "beta": bn2.beta,
+        "running_mean": rm2, "running_var": rv2,
+        "x": x_bn2, "out": out_bn2, "dout": dout_bn2, "dx": dx_bn2,
+        "grad_gamma": gg_bn2, "grad_beta": gb_bn2,
+        "running_mean_after": bn2.running_mean, "running_var_after": bn2.running_var,
+        "mean": [m for m, _ in bn2.stats], "inv": [v for _, v in bn2.stats],
+    }
+
+    # ---------------- BatchNorm2d：推理路径（用 running 统计量） ----------------
+    bn2i = BatchNorm2d(c2, eps=1e-5, momentum=0.2)
+    bn2i.gamma = list(bn2.gamma)
+    bn2i.beta = list(bn2.beta)
+    bn2i.running_mean = list(rm2)
+    bn2i.running_var = list(rv2)
+    bn2i.eval()
+    out_bn2i = bn2i.forward([[[v for v in row] for row in ch] for ch in x_bn2])
+    dx_bn2i, gg_bn2i, gb_bn2i = bn2i.backward(
+        [[[v for v in row] for row in ch] for ch in dout_bn2])
+    data["bn2_infer"] = {
+        "c": c2, "h": h2, "w": w2, "eps": bn2i.eps,
+        "gamma": bn2i.gamma, "beta": bn2i.beta,
+        "running_mean": rm2, "running_var": rv2,
+        "x": x_bn2, "out": out_bn2i, "dout": dout_bn2, "dx": dx_bn2i,
+        "grad_gamma": gg_bn2i, "grad_beta": gb_bn2i,
+        "mean": [m for m, _ in bn2i.stats], "inv": [v for _, v in bn2i.stats],
+    }
+
+    # ---------------- GroupNorm ----------------
+    random.seed(20240704)
+    gc, gh, gw = 4, 2, 3
+    gn = GroupNorm(2, gc, eps=1e-5)
+    gn.gamma = [0.7 + 0.1 * j for j in range(gc)]
+    gn.beta = [-0.2 + 0.05 * j for j in range(gc)]
+    x_gn = [[[random.uniform(-1.0, 1.0) for _ in range(gw)] for _ in range(gh)]
+            for _ in range(gc)]
+    out_gn = gn.forward([[[v for v in row] for row in ch] for ch in x_gn])
+    dout_gn = [[[random.uniform(-1.0, 1.0) for _ in range(gw)] for _ in range(gh)]
+               for _ in range(gc)]
+    # 注意：GroupNorm.backward 返回 (grad_gamma, grad_beta, dx)，与 BatchNorm2d 相反
+    gg_gn, gb_gn, dx_gn = gn.backward([[[v for v in row] for row in ch] for ch in dout_gn])
+    data["gn"] = {
+        "groups": 2, "channels": gc, "h": gh, "w": gw, "eps": gn.eps,
+        "gamma": gn.gamma, "beta": gn.beta,
+        "x": x_gn, "out": out_gn, "dout": dout_gn, "dx": dx_gn,
+        "grad_gamma": gg_gn, "grad_beta": gb_gn,
+        "mean": [m for m, _ in gn.stats], "inv": [v for _, v in gn.stats],
+    }
+
+    # ---------------- InstanceNorm（groups == channels 的特例） ----------------
+    random.seed(20240706)
+    ic, ih, iw = 3, 2, 2
+    inn = InstanceNorm(ic, eps=1e-5)
+    inn.gamma = [0.5 + 0.2 * j for j in range(ic)]
+    inn.beta = [0.1 - 0.05 * j for j in range(ic)]
+    x_in = [[[random.uniform(-1.0, 1.0) for _ in range(iw)] for _ in range(ih)]
+            for _ in range(ic)]
+    out_in = inn.forward([[[v for v in row] for row in ch] for ch in x_in])
+    dout_in = [[[random.uniform(-1.0, 1.0) for _ in range(iw)] for _ in range(ih)]
+               for _ in range(ic)]
+    gg_in, gb_in, dx_in = inn.backward(
+        [[[v for v in row] for row in ch] for ch in dout_in])
+    data["inorm"] = {
+        "groups": ic, "channels": ic, "h": ih, "w": iw, "eps": inn.eps,
+        "gamma": inn.gamma, "beta": inn.beta,
+        "x": x_in, "out": out_in, "dout": dout_in, "dx": dx_in,
+        "grad_gamma": gg_in, "grad_beta": gb_in,
+        "mean": [m for m, _ in inn.stats], "inv": [v for _, v in inn.stats],
+    }
+
+    # ---------------- DropPath（训练：丢弃 / 保留各一例，再一例推理） ----------------
+    random.seed(20240705)
+    p_dp = 0.3
+    x_dp2 = [random.uniform(-1.0, 1.0) for _ in range(6)]
+    dout_dp2 = [random.uniform(-1.0, 1.0) for _ in range(6)]
+    got = {}
+    seed = 1
+    while len(got) < 2 and seed <= 50:
+        dp2 = DropPath(p_dp, scale_by_keep=True)
+        random.seed(seed)
+        out_dp2 = dp2.forward(list(x_dp2))
+        keep = 0 if dp2.factor == 0.0 else 1
+        if keep not in got:
+            got[keep] = {
+                "keep": keep, "factor": dp2.factor, "out": list(out_dp2),
+                "dx": list(dp2.backward(list(dout_dp2))),
+            }
+        seed += 1
+    if len(got) != 2:
+        sys.exit("DropPath：50 个种子里没凑齐「丢弃 / 保留」两种情形")
+    dp_eval = DropPath(p_dp, scale_by_keep=True)
+    dp_eval.eval()
+    out_dp_eval = dp_eval.forward(list(x_dp2))
+    data["droppath"] = {
+        "p": p_dp, "scale_by_keep": 1, "x": x_dp2, "dout": dout_dp2,
+        "drop": got[0], "keep": got[1],
+        "eval": {"factor": dp_eval.factor, "out": list(out_dp_eval),
+                 "dx": list(dp_eval.backward(list(dout_dp2)))},
     }
 
     with open(out_path, "w", encoding="utf-8") as f:

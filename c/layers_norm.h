@@ -1,5 +1,6 @@
 /*
- * layers_norm.h —— Dropout / BatchNorm1d / LayerNorm 的 C17 移植
+ * layers_norm.h —— Dropout / BatchNorm1d / LayerNorm / RMSNorm /
+ *                  BatchNorm2d / GroupNorm / InstanceNorm / DropPath 的 C17 移植
  *
  * 对应 AI.py：
  *   Dropout      (AI.py:457)  -> Dropout
@@ -213,6 +214,133 @@ const double *rmsnorm_grad_gamma(const RMSNorm *self);
 double rmsnorm_inv_rms(const RMSNorm *self);
 
 Module *rmsnorm_as_module(RMSNorm *self);
+
+/* ============================ BatchNorm2d ============================
+ * Python: 统计量在 (H, W) 上算（m = H*W，与 batch 无关），训练时更新
+ *         running_mean / running_var（running_var 用无偏估计 var*m/(m-1)），
+ *         推理用 running 统计量；backward 两条路径都实现 —— 推理路径是
+ *         dx = inv * d（没有 m 项），训练路径才带
+ *         inv*(m*d - sum_d - x_hat*sum_d_xhat)/m。
+ * 缓存：x_hat 为行主序 [c][h][w]；scratch / scratch2 各 h*w，用于把
+ *       「平方离差 / d*x_hat / d*x_hat 乘积」先落成列表再走 sum_neumaier。
+ */
+typedef struct {
+    Module mod;
+    int c;                     /* num_features */
+    double eps;
+    double momentum;
+    int training;              /* 1 = 训练，0 = 推理（Module vtable 按其分派） */
+    int cache_mode;            /* 最近一次 forward 走的哪条：1 = 训练，0 = 推理 */
+
+    double *gamma;             /* c */
+    double *beta;              /* c */
+    double *running_mean;      /* c，初值 0 */
+    double *running_var;       /* c，初值 1 */
+    double *grad_gamma;        /* c，累加 */
+    double *grad_beta;         /* c，累加 */
+
+    double *x_hat;             /* c*h*w，forward 缓存 */
+    double *scratch;           /* h*w */
+    double *scratch2;          /* h*w */
+    int x_hat_cap;             /* x_hat 容量（元素数，按需扩容） */
+    int scratch_cap;           /* scratch 容量（元素数） */
+    int scratch2_cap;          /* scratch2 容量（元素数）—— 两个缓冲各记各的容量，
+                                * 否则第二个会拿到已经够用的 cap 而保持 NULL */
+
+    double *mean;              /* c，最近一次的每通道均值 */
+    double *inv;               /* c，1/sqrt(var+eps) */
+    int in_c, in_h, in_w;      /* 最近一次 forward 的输入形状 */
+    int ready;                 /* 是否已 forward（backward 前置条件） */
+} BatchNorm2d;
+
+BatchNorm2d *bn2d_create(int num_features, double eps, double momentum);
+void bn2d_free(BatchNorm2d *self);
+void bn2d_zero_grad(BatchNorm2d *self);
+void bn2d_forward(BatchNorm2d *self, const Tensor *x, Tensor *out);   /* (C,H,W) */
+void bn2d_backward(BatchNorm2d *self, const Tensor *dout, Tensor *dx);
+int  bn2d_param_count(BatchNorm2d *self);
+void bn2d_set_training(BatchNorm2d *self, int training);
+void bn2d_set_params(BatchNorm2d *self, const double *gamma, const double *beta);
+void bn2d_set_running(BatchNorm2d *self, const double *mean, const double *var);
+const double *bn2d_running_mean(const BatchNorm2d *self);
+const double *bn2d_running_var(const BatchNorm2d *self);
+const double *bn2d_grad_gamma(const BatchNorm2d *self);
+const double *bn2d_grad_beta(const BatchNorm2d *self);
+int  bn2d_cache_mode(const BatchNorm2d *self);
+Module *bn2d_as_module(BatchNorm2d *self);
+
+/* ============================= GroupNorm =============================
+ * Python: (C,H,W) -> 每组在 C/G*H*W 个元素上求均值方差（与 batch 无关）；
+ *         mean 是「逐行 sum(row) 再朴素累加」/ n，var 是显式 += d*d；
+ *         grad_beta 也是「逐行 sum(dout row) 再朴素累加」，
+ *         grad_gamma 是显式 += dout*x_hat，dx 用 s1/s2 两个朴素累加。
+ * InstanceNorm(num_channels) 就是 GroupNorm(num_channels, num_channels)。
+ */
+typedef struct {
+    Module mod;
+    int groups;
+    int channels;
+    double eps;
+    int instance;              /* 1 = InstanceNorm（只影响 to_string） */
+
+    double *gamma;             /* channels */
+    double *beta;              /* channels */
+    double *grad_gamma;        /* channels，累加 */
+    double *grad_beta;         /* channels，累加 */
+
+    double *x_hat;             /* channels*h*w，forward 缓存 */
+    int x_hat_cap;             /* x_hat 容量（元素数，按需扩容） */
+    double *mean;              /* groups */
+    double *inv;               /* groups */
+    int in_c, in_h, in_w;
+    int ready;
+} GroupNorm;
+
+GroupNorm *gn_create(int num_groups, int num_channels, double eps);
+/* InstanceNorm：groups == channels 的特例，模块名/描述与 GroupNorm 区分 */
+GroupNorm *inorm_create(int num_channels, double eps);
+void gn_free(GroupNorm *self);
+void gn_zero_grad(GroupNorm *self);
+void gn_forward(GroupNorm *self, const Tensor *x, Tensor *out);   /* (C,H,W) */
+void gn_backward(GroupNorm *self, const Tensor *dout, Tensor *dx);
+int  gn_param_count(GroupNorm *self);
+void gn_set_params(GroupNorm *self, const double *gamma, const double *beta);
+const double *gn_grad_gamma(const GroupNorm *self);
+const double *gn_grad_beta(const GroupNorm *self);
+Module *gn_as_module(GroupNorm *self);
+Module *inorm_as_module(GroupNorm *self);
+
+/* ============================== DropPath =============================
+ * Python: 训练时以概率 p 丢掉**整条分支**（整个张量），保留时放大
+ *         1/(1-p)（inverted，p == 0 或推理时恒等）；backward 乘同一个 factor。
+ * C 版的不同点：RNG 换成 xorshift64*，并提供 droppath_set_keep() 灌入
+ *         「保留 / 丢弃」决定做逐位比对（与 Dropout 的 set_mask 同一套路）。
+ */
+typedef struct {
+    Module mod;
+    double p;
+    int scale_by_keep;
+    int training;
+    double factor;             /* 最近一次 forward 的缩放因子（0 或 1/(1-p) 或 1） */
+    unsigned long long rng;
+
+    int has_pending;           /* 有灌入的决定，仅对下一次 forward 生效 */
+    int pending_keep;
+} DropPath;
+
+DropPath *droppath_create(double p, int scale_by_keep);
+void droppath_free(DropPath *self);
+void droppath_zero_grad(DropPath *self);
+void droppath_forward(DropPath *self, const Tensor *x, Tensor *out);   /* 任意形状，按扁平处理 */
+void droppath_backward(DropPath *self, const Tensor *dout, Tensor *dx);
+int  droppath_param_count(DropPath *self);
+void droppath_set_training(DropPath *self, int training);
+void droppath_set_seed(DropPath *self, unsigned long long seed);
+/* 灌入确定性决定：keep != 0 表示保留（factor = 1/(1-p) 或 1），
+ * keep == 0 表示整条丢弃（factor = 0）。只对下一次 forward 生效。 */
+void droppath_set_keep(DropPath *self, int keep);
+double droppath_factor(const DropPath *self);
+Module *droppath_as_module(DropPath *self);
 
 /* ========================= Module 适配层说明 =========================
  * xxx_as_module() 会 malloc 一个 Module 包装（self 指向原对象），用于
