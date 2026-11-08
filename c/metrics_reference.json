@@ -1,0 +1,925 @@
+{
+ "meta": {
+  "source": "AI.py",
+  "generated_by": "c/tools/metrics_reference.py",
+  "cases": 32,
+  "note": "分类指标为整数/精确值；回归指标的累加顺序与 AI.py 一致，容差 0"
+ },
+ "cases": [
+  {
+   "name": "cm_basic",
+   "func": "confusion_matrix",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1,
+    2,
+    2,
+    0
+   ],
+   "y_pred": [
+    0,
+    2,
+    1,
+    2,
+    0
+   ],
+   "num_classes": null,
+   "n": 3,
+   "matrix": [
+    [
+     2,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     1
+    ],
+    [
+     0,
+     1,
+     1
+    ]
+   ]
+  },
+  {
+   "name": "cm_padded",
+   "func": "confusion_matrix",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1
+   ],
+   "y_pred": [
+    0,
+    1
+   ],
+   "num_classes": 4,
+   "n": 4,
+   "matrix": [
+    [
+     1,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     1,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     0
+    ]
+   ]
+  },
+  {
+   "name": "cm_single_class",
+   "func": "confusion_matrix",
+   "tol": 0.0,
+   "y_true": [
+    1,
+    1,
+    1
+   ],
+   "y_pred": [
+    1,
+    1,
+    1
+   ],
+   "num_classes": null,
+   "n": 2,
+   "matrix": [
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     3
+    ]
+   ]
+  },
+  {
+   "name": "acc_basic",
+   "func": "accuracy_score",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1,
+    2,
+    2,
+    0
+   ],
+   "y_pred": [
+    0,
+    2,
+    1,
+    2,
+    0
+   ],
+   "value": 0.6
+  },
+  {
+   "name": "acc_perfect",
+   "func": "accuracy_score",
+   "tol": 0.0,
+   "y_true": [
+    1,
+    1,
+    0
+   ],
+   "y_pred": [
+    1,
+    1,
+    0
+   ],
+   "value": 1.0
+  },
+  {
+   "name": "acc_all_wrong",
+   "func": "accuracy_score",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    0,
+    1
+   ],
+   "y_pred": [
+    1,
+    1,
+    0
+   ],
+   "value": 0.0
+  },
+  {
+   "name": "prf_macro",
+   "func": "precision_recall_f1",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1,
+    2,
+    2,
+    0,
+    1,
+    0
+   ],
+   "y_pred": [
+    0,
+    2,
+    1,
+    2,
+    0,
+    0,
+    2
+   ],
+   "num_classes": null,
+   "average": "macro",
+   "precision": 0.3333333333333333,
+   "recall": 0.38888888888888884,
+   "f1": 0.35555555555555557,
+   "per_precision": [
+    0.6666666666666666,
+    0.0,
+    0.3333333333333333
+   ],
+   "per_recall": [
+    0.6666666666666666,
+    0.0,
+    0.5
+   ],
+   "per_f1": [
+    0.6666666666666666,
+    0.0,
+    0.4
+   ],
+   "support": [
+    3,
+    2,
+    2
+   ],
+   "n": 3
+  },
+  {
+   "name": "prf_micro",
+   "func": "precision_recall_f1",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1,
+    2,
+    2,
+    0,
+    1,
+    0
+   ],
+   "y_pred": [
+    0,
+    2,
+    1,
+    2,
+    0,
+    0,
+    2
+   ],
+   "num_classes": null,
+   "average": "micro",
+   "precision": 0.42857142857142855,
+   "recall": 0.42857142857142855,
+   "f1": 0.42857142857142855,
+   "per_precision": [
+    0.6666666666666666,
+    0.0,
+    0.3333333333333333
+   ],
+   "per_recall": [
+    0.6666666666666666,
+    0.0,
+    0.5
+   ],
+   "per_f1": [
+    0.6666666666666666,
+    0.0,
+    0.4
+   ],
+   "support": [
+    3,
+    2,
+    2
+   ],
+   "n": 3
+  },
+  {
+   "name": "prf_weighted",
+   "func": "precision_recall_f1",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1,
+    2,
+    2,
+    0,
+    1,
+    0
+   ],
+   "y_pred": [
+    0,
+    2,
+    1,
+    2,
+    0,
+    0,
+    2
+   ],
+   "num_classes": null,
+   "average": "weighted",
+   "precision": 0.38095238095238093,
+   "recall": 0.42857142857142855,
+   "f1": 0.39999999999999997,
+   "per_precision": [
+    0.6666666666666666,
+    0.0,
+    0.3333333333333333
+   ],
+   "per_recall": [
+    0.6666666666666666,
+    0.0,
+    0.5
+   ],
+   "per_f1": [
+    0.6666666666666666,
+    0.0,
+    0.4
+   ],
+   "support": [
+    3,
+    2,
+    2
+   ],
+   "n": 3
+  },
+  {
+   "name": "prf_none",
+   "func": "precision_recall_f1",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1,
+    2,
+    2,
+    0,
+    1,
+    0
+   ],
+   "y_pred": [
+    0,
+    2,
+    1,
+    2,
+    0,
+    0,
+    2
+   ],
+   "num_classes": null,
+   "average": "none",
+   "precision": 0.3333333333333333,
+   "recall": 0.38888888888888884,
+   "f1": 0.35555555555555557,
+   "per_precision": [
+    0.6666666666666666,
+    0.0,
+    0.3333333333333333
+   ],
+   "per_recall": [
+    0.6666666666666666,
+    0.0,
+    0.5
+   ],
+   "per_f1": [
+    0.6666666666666666,
+    0.0,
+    0.4
+   ],
+   "support": [
+    3,
+    2,
+    2
+   ],
+   "n": 3
+  },
+  {
+   "name": "prf_unbalanced_macro",
+   "func": "precision_recall_f1",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    2
+   ],
+   "y_pred": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    2
+   ],
+   "num_classes": null,
+   "average": "macro",
+   "precision": 0.8333333333333334,
+   "recall": 0.9583333333333334,
+   "f1": 0.8666666666666667,
+   "per_precision": [
+    1.0,
+    0.5,
+    1.0
+   ],
+   "per_recall": [
+    0.875,
+    1.0,
+    1.0
+   ],
+   "per_f1": [
+    0.9333333333333333,
+    0.6666666666666666,
+    1.0
+   ],
+   "support": [
+    8,
+    1,
+    1
+   ],
+   "n": 3
+  },
+  {
+   "name": "prf_unbalanced_weighted",
+   "func": "precision_recall_f1",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    2
+   ],
+   "y_pred": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    2
+   ],
+   "num_classes": null,
+   "average": "weighted",
+   "precision": 0.95,
+   "recall": 0.9,
+   "f1": 0.9133333333333333,
+   "per_precision": [
+    1.0,
+    0.5,
+    1.0
+   ],
+   "per_recall": [
+    0.875,
+    1.0,
+    1.0
+   ],
+   "per_f1": [
+    0.9333333333333333,
+    0.6666666666666666,
+    1.0
+   ],
+   "support": [
+    8,
+    1,
+    1
+   ],
+   "n": 3
+  },
+  {
+   "name": "prf_absent_class",
+   "func": "precision_recall_f1",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1
+   ],
+   "y_pred": [
+    0,
+    1
+   ],
+   "num_classes": 4,
+   "average": "macro",
+   "precision": 1.0,
+   "recall": 1.0,
+   "f1": 1.0,
+   "per_precision": [
+    1.0,
+    1.0,
+    0.0,
+    0.0
+   ],
+   "per_recall": [
+    1.0,
+    1.0,
+    0.0,
+    0.0
+   ],
+   "per_f1": [
+    1.0,
+    1.0,
+    0.0,
+    0.0
+   ],
+   "support": [
+    1,
+    1,
+    0,
+    0
+   ],
+   "n": 4
+  },
+  {
+   "name": "mcc_basic",
+   "func": "matthews_corrcoef",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1,
+    2,
+    2,
+    0,
+    1,
+    0
+   ],
+   "y_pred": [
+    0,
+    2,
+    1,
+    2,
+    0,
+    0,
+    2
+   ],
+   "num_classes": null,
+   "value": 0.12909944487358055,
+   "n": 3
+  },
+  {
+   "name": "mcc_binary",
+   "func": "matthews_corrcoef",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    0,
+    1,
+    1
+   ],
+   "y_pred": [
+    0,
+    1,
+    1,
+    1
+   ],
+   "num_classes": null,
+   "value": 0.5773502691896258,
+   "n": 2
+  },
+  {
+   "name": "mcc_padded",
+   "func": "matthews_corrcoef",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1
+   ],
+   "y_pred": [
+    1,
+    1
+   ],
+   "num_classes": 3,
+   "value": 0.0,
+   "n": 3
+  },
+  {
+   "name": "topk_k1",
+   "func": "top_k_accuracy",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1,
+    2
+   ],
+   "scores": [
+    [
+     0.5,
+     0.3,
+     0.2
+    ],
+    [
+     0.1,
+     0.6,
+     0.3
+    ],
+    [
+     0.2,
+     0.3,
+     0.5
+    ]
+   ],
+   "k": 1,
+   "value": 1.0,
+   "num_classes": 3
+  },
+  {
+   "name": "topk_k2",
+   "func": "top_k_accuracy",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1,
+    2
+   ],
+   "scores": [
+    [
+     0.5,
+     0.3,
+     0.2
+    ],
+    [
+     0.1,
+     0.6,
+     0.3
+    ],
+    [
+     0.2,
+     0.3,
+     0.5
+    ]
+   ],
+   "k": 2,
+   "value": 1.0,
+   "num_classes": 3
+  },
+  {
+   "name": "topk_k3",
+   "func": "top_k_accuracy",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1,
+    2
+   ],
+   "scores": [
+    [
+     0.5,
+     0.3,
+     0.2
+    ],
+    [
+     0.1,
+     0.6,
+     0.3
+    ],
+    [
+     0.2,
+     0.3,
+     0.5
+    ]
+   ],
+   "k": 3,
+   "value": 1.0,
+   "num_classes": 3
+  },
+  {
+   "name": "topk_ties",
+   "func": "top_k_accuracy",
+   "tol": 0.0,
+   "y_true": [
+    0,
+    1
+   ],
+   "scores": [
+    [
+     0.4,
+     0.4,
+     0.2
+    ],
+    [
+     0.4,
+     0.4,
+     0.2
+    ]
+   ],
+   "k": 1,
+   "value": 0.5,
+   "num_classes": 3
+  },
+  {
+   "name": "roc_basic",
+   "func": "roc_auc_score",
+   "tol": 0.0,
+   "labels": [
+    0,
+    0,
+    1,
+    1
+   ],
+   "scores": [
+    0.1,
+    0.4,
+    0.35,
+    0.8
+   ],
+   "value": 0.75
+  },
+  {
+   "name": "roc_ties",
+   "func": "roc_auc_score",
+   "tol": 0.0,
+   "labels": [
+    0,
+    1,
+    1,
+    0,
+    1
+   ],
+   "scores": [
+    0.5,
+    0.5,
+    0.5,
+    0.5,
+    0.5
+   ],
+   "value": 0.5
+  },
+  {
+   "name": "roc_separable",
+   "func": "roc_auc_score",
+   "tol": 0.0,
+   "labels": [
+    0,
+    0,
+    1,
+    1
+   ],
+   "scores": [
+    0.0,
+    0.25,
+    0.75,
+    1.0
+   ],
+   "value": 1.0
+  },
+  {
+   "name": "roc_perfect_ties",
+   "func": "roc_auc_score",
+   "tol": 0.0,
+   "labels": [
+    1,
+    0,
+    1,
+    0
+   ],
+   "scores": [
+    0.9,
+    0.1,
+    0.8,
+    0.2
+   ],
+   "value": 1.0
+  },
+  {
+   "name": "mae_basic",
+   "func": "mean_absolute_error",
+   "tol": 0.0,
+   "y_true": [
+    1.5,
+    -2.25,
+    0.0,
+    3.75,
+    10.0,
+    -0.5
+   ],
+   "y_pred": [
+    1.25,
+    -2.0,
+    0.5,
+    3.0,
+    9.25,
+    0.0
+   ],
+   "value": 0.5
+  },
+  {
+   "name": "rmse_basic",
+   "func": "root_mean_squared_error",
+   "tol": 0.0,
+   "y_true": [
+    1.5,
+    -2.25,
+    0.0,
+    3.75,
+    10.0,
+    -0.5
+   ],
+   "y_pred": [
+    1.25,
+    -2.0,
+    0.5,
+    3.0,
+    9.25,
+    0.0
+   ],
+   "value": 0.5400617248673217
+  },
+  {
+   "name": "mape_basic",
+   "func": "mean_absolute_percentage_error",
+   "tol": 0.0,
+   "y_true": [
+    1.5,
+    -2.25,
+    0.0,
+    3.75,
+    10.0,
+    -0.5
+   ],
+   "y_pred": [
+    1.25,
+    -2.0,
+    0.5,
+    3.0,
+    9.25,
+    0.0
+   ],
+   "value": 8333333333359.214
+  },
+  {
+   "name": "mape_zero_true",
+   "func": "mean_absolute_percentage_error",
+   "tol": 0.0,
+   "y_true": [
+    0.0,
+    1.0,
+    -2.0
+   ],
+   "y_pred": [
+    0.5,
+    1.5,
+    -1.0
+   ],
+   "value": 16666666666700.0
+  },
+  {
+   "name": "r2_basic",
+   "func": "r2_score",
+   "tol": 0.0,
+   "y_true": [
+    1.5,
+    -2.25,
+    0.0,
+    3.75,
+    10.0,
+    -0.5
+   ],
+   "y_pred": [
+    1.25,
+    -2.0,
+    0.5,
+    3.0,
+    9.25,
+    0.0
+   ],
+   "value": 0.981691368788143
+  },
+  {
+   "name": "r2_perfect",
+   "func": "r2_score",
+   "tol": 0.0,
+   "y_true": [
+    1.5,
+    -2.25,
+    0.0,
+    3.75,
+    10.0,
+    -0.5
+   ],
+   "y_pred": [
+    1.5,
+    -2.25,
+    0.0,
+    3.75,
+    10.0,
+    -0.5
+   ],
+   "value": 1.0
+  },
+  {
+   "name": "r2_constant_target_hit",
+   "func": "r2_score",
+   "tol": 0.0,
+   "y_true": [
+    2.0,
+    2.0,
+    2.0
+   ],
+   "y_pred": [
+    2.0,
+    2.0,
+    2.0
+   ],
+   "value": 1.0
+  },
+  {
+   "name": "r2_constant_target_miss",
+   "func": "r2_score",
+   "tol": 0.0,
+   "y_true": [
+    2.0,
+    2.0,
+    2.0
+   ],
+   "y_pred": [
+    2.0,
+    3.0,
+    2.0
+   ],
+   "value": 0.0
+  }
+ ]
+}

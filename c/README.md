@@ -27,6 +27,7 @@
 |--------|---|------|
 | `Layer` / `MLP` / 四个优化器 / `Model.fit` | `ai.c` | 已完成，逐位一致 + 零分配 |
 | `focal_loss` / `bce_loss` / `bce_with_logits_loss` / `huber_loss` | `losses.c` | 已完成：48 个标量/数组里 47 个逐位相同，仅 1 个 loss 因 `pow` 差 1 ULP（5.551e-17）；`LossKind` 扩到 6 个，训练与验证共用 `trainer_loss_apply` |
+| `confusion_matrix` / `accuracy_score` / `precision_recall_f1` / `matthews_corrcoef` / `top_k_accuracy` / `roc_auc_score` / `mean_absolute_error` / `root_mean_squared_error` / `mean_absolute_percentage_error` / `r2_score` | `metrics.c` | 已完成：参考 JSON 32 个用例 / 141 项检查**全部逐位相同**（容差 0）|
 | `Conv2d` / `MaxPool2d` / `Flatten` | `layers_conv.c` | 已完成，12 项逐位一致 |
 | `Dropout` / `BatchNorm1d` / `LayerNorm` | `layers_norm.c` | 已完成，21 项逐位一致 |
 | `RNNCell/RNN` / `LSTMCell/LSTM` / `GRUCell/GRU` + step cache | `rnn.c` | 已完成 |
@@ -48,7 +49,7 @@ cd c
 # 没有 make 时（Windows/MinGW 与 Linux/macOS 通用）
 gcc -std=c17 -O2 -Wall -Wextra -o demo demo.c ai.c tensor.c layers_conv.c \
     layers_norm.c rnn.c attention.c llm.c containers.c json.c model_io.c text.c \
-    optim.c sched.c activations.c losses.c -lm
+    optim.c sched.c activations.c losses.c metrics.c -lm
 ./demo
 
 # 有 make 时
@@ -62,7 +63,7 @@ make check      # 与 Python 版做数值等价比对
 
 ```bash
 SRC="ai.c tensor.c layers_conv.c layers_norm.c rnn.c attention.c llm.c containers.c \
-     json.c model_io.c text.c optim.c sched.c activations.c losses.c model_high.c"
+     json.c model_io.c text.c optim.c sched.c activations.c losses.c metrics.c model_high.c"
 gcc -std=c17 -O2 -Wall -Wextra -o tests/compare_llm tests/compare_llm.c $SRC -lm
 gcc -std=c17 -O2 -Wall -Wextra -o tests/test_llm_ext tests/test_llm_ext.c $SRC -lm
 python tools/llm_reference.py && ./tests/compare_llm   # 6 段比对
@@ -82,6 +83,8 @@ python tools/llm_reference.py && ./tests/compare_llm   # 6 段比对
 c/
 ├── ai.h / ai.c            全连接层、MLP、MSE/CE、四个优化器、训练循环、预测/评分
 ├── losses.h / losses.c    focal / bce / bce_with_logits / huber（含 Trainer 分发）
+├── metrics.h / metrics.c  混淆矩阵 / P-R-F1（4 种口径）/ MCC / top-k / ROC-AUC /
+│                          MAE·RMSE·MAPE·R²
 ├── tensor.h / tensor.c    张量类型 + 通用模块 vtable（供容器类使用）
 ├── numeric.h              与 Python 对齐的 Neumaier 补偿求和原语
 ├── layers_conv.h/.c       Conv2d / MaxPool2d / Flatten
@@ -168,6 +171,7 @@ python tools/sched_extra_reference.py && ./tests/compare_sched_extra    # 104 �
 python tools/rmsnorm_reference.py     && ./tests/compare_rmsnorm        # 36 数组 153 值
 python tools/activations_reference.py && ./tests/compare_activations    # 27 数组
 python tools/loss_reference.py       && ./tests/compare_loss            # 24 用例 48 数组
+python tools/metrics_reference.py    && ./tests/compare_metrics         # 32 用例 141 项
 ```
 
 - **Lion / Adafactor / WarmupLR / ReduceLROnPlateau / RMSNorm：全部逐位相同**
@@ -195,6 +199,16 @@ python tools/loss_reference.py       && ./tests/compare_loss            # 24 用
   `trainer_loss_apply(t, pred, y, od, y_idx, grad)`，两条路径共用，验证时把梯度写进
   `grad_buf` 而不覆盖 `pred`。`tests/test_loss.c` 的第 [6] 节验证「训练返回的 loss 与直接
   调用 `focal_loss_grad` 逐位相同」，也就是分发确实接对了。
+- **指标模块：32 个用例、141 项检查全部逐位相同（容差 0）**。分类指标建立在整数混淆矩阵
+  上，本来就没有舍入；容易出事的其实是回归四项——AI.py 里 `mean_absolute_error` 与
+  `root_mean_squared_error` 用的是 `sum(...)`，CPython 3.12+ 对浮点走 Neumaier 补偿求和，
+  所以 C 侧必须用同样的补偿累加；而 `mean_absolute_percentage_error` 的 `total` 和
+  `r2_score` 的 `ss_tot`/`ss_res` 在 Python 里是朴素 `+=`，这里就得朴素加，换成补偿求和
+  反而会差最后几位。`metrics.c` 的注释把这些位置逐一标出来了。
+  `tests/test_metrics.c` 另有 50 项不依赖 Python 的自测，重点是几条数学恒等式：
+  单标签多分类的 micro-F1 恒等于准确率、`k = 类别数` 时 top-k 恒为 1、`k=1` 时 top-k
+  等于 argmax 后的准确率、标签翻转后 AUC 镜像成 `1 - AUC`、常数目标下 R² 取 1.0/0.0。
+  这些恒等式能抓住「矩阵行列搞反」「并列秩算错」一类不会让单点数值明显偏离的错误。
 
 覆盖：BatchNorm1d（训练 forward/反向 dx/grad_gamma/grad_beta/running 统计量/mean/var/inv_std/x_hat、
 推理 forward）、LayerNorm（forward/反向/参数梯度/中间量）、Dropout（灌入 Python 的 mask 后逐位比对）、

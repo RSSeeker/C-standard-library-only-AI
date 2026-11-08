@@ -69,6 +69,8 @@ check: compare_python
 	$(MAKE) tests/compare_activations && ./tests/compare_activations activations_reference.json
 	python tools/loss_reference.py loss_reference.json
 	$(MAKE) tests/compare_loss && ./tests/compare_loss loss_reference.json
+	python tools/metrics_reference.py metrics_reference.json
+	$(MAKE) tests/compare_metrics && ./tests/compare_metrics metrics_reference.json
 	python tools/conv_reference.py conv_reference.json
 	$(MAKE) tests/compare_conv && ./tests/compare_conv conv_reference.json
 	python tools/llm_reference.py llm_reference.json
@@ -81,6 +83,6 @@ clean:
 	      norm_reference.json conv_reference.json llm_reference.json \
 	      adamw_reference.json lion_reference.json adafactor_reference.json \
 	      sched_extra_reference.json rmsnorm_reference.json activations_reference.json \
-	      loss_reference.json
+	      loss_reference.json metrics_reference.json
 
 .PHONY: all test check clean
