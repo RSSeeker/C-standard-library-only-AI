@@ -30,6 +30,7 @@
 | `confusion_matrix` / `accuracy_score` / `precision_recall_f1` / `matthews_corrcoef` / `top_k_accuracy` / `roc_auc_score` / `mean_absolute_error` / `root_mean_squared_error` / `mean_absolute_percentage_error` / `r2_score` | `metrics.c` | 已完成：参考 JSON 32 个用例 / 141 项检查**全部逐位相同**（容差 0）|
 | `Conv2d`（含 `groups` / `dilation`）/ `Conv1d` / `ConvTranspose2d`（含 `output_padding`） / `MaxPool2d` / `Flatten` | `layers_conv.c` | 已完成，70 项逐位一致（Conv2d 6 种配置、Conv1d 5 种、ConvTranspose2d 5 种） |
 | `BatchNorm2d` / `GroupNorm` / `InstanceNorm` / `DropPath` / `Dropout` / `BatchNorm1d` / `LayerNorm` | `layers_norm.c` | 已完成，50 项逐位一致（BN2d 训练 6 项 + 推理 5 项、GroupNorm 4 项、InstanceNorm 4 项、DropPath 3 情形 × 3 项，另含原有 22 项） |
+| `augment_cutmix` / `augment_cutout` / `augment_randaugment` / `mixup` | `augment.c` | 已完成，24 项逐位一致（随机量由参考脚本注入，见下） |
 | `RNNCell/RNN` / `LSTMCell/LSTM` / `GRUCell/GRU` + step cache | `rnn.c` | 已完成 |
 | `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成（含 `causal` 因果掩码开关、`mha_set_window` 滑动窗口、`mha_set_rope` 旋转位置编码、`mha_create_gqa` 的 GQA/MQA、`mha_set_alibi` + `tel_set_alibi` / `te_set_alibi` 的 ALiBi 距离偏置、`mha_forward_step` 增量前向、`mha_set_training` + `mha_set_attn_mask` 的注意力权重 dropout） |
 | `MultiHeadAttention(causal=True)` / `CausalLM`（LLM） | `attention.c` + `llm.c` | 已完成：因果掩码、teacher forcing 训练、自回归生成、`llm_generate_p`（nucleus 采样）、`llm_generate_ex` / `llm_generate_cached_ex`（min_p + repetition/presence/frequency 罚分 + no_repeat_ngram）、`llm_perplexity` |
@@ -49,7 +50,7 @@ cd c
 # 没有 make 时（Windows/MinGW 与 Linux/macOS 通用）
 gcc -std=c17 -O2 -Wall -Wextra -o demo demo.c ai.c tensor.c layers_conv.c \
     layers_norm.c rnn.c attention.c llm.c containers.c json.c model_io.c text.c \
-    optim.c sched.c activations.c losses.c metrics.c -lm
+    optim.c sched.c activations.c losses.c metrics.c augment.c -lm
 ./demo
 
 # 有 make 时
@@ -63,7 +64,8 @@ make check      # 与 Python 版做数值等价比对
 
 ```bash
 SRC="ai.c tensor.c layers_conv.c layers_norm.c rnn.c attention.c llm.c containers.c \
-     json.c model_io.c text.c optim.c sched.c activations.c losses.c metrics.c model_high.c"
+     json.c model_io.c text.c optim.c sched.c activations.c losses.c metrics.c model_high.c \
+     augment.c"
 gcc -std=c17 -O2 -Wall -Wextra -o tests/compare_llm tests/compare_llm.c $SRC -lm
 gcc -std=c17 -O2 -Wall -Wextra -o tests/test_llm_ext tests/test_llm_ext.c $SRC -lm
 python tools/llm_reference.py && ./tests/compare_llm   # 6 段比对
@@ -89,6 +91,7 @@ c/
 ├── numeric.h              与 Python 对齐的 Neumaier 补偿求和原语
 ├── layers_conv.h/.c       Conv2d / Conv1d / ConvTranspose2d / MaxPool2d / Flatten
 ├── layers_norm.h/.c       Dropout / BatchNorm1d / BatchNorm2d / LayerNorm / GroupNorm / InstanceNorm / DropPath
+├── augment.h / augment.c   数据增广内核（brightness / contrast / shift / rotate90 / cutout / cutmix / mixup / randaugment）
 ├── rnn.h / rnn.c          RNNCell/RNN、LSTMCell/LSTM、GRUCell/GRU（含 step cache）
 ├── attention.h / .c       MultiHeadAttention / FeedForward / TransformerEncoder / PositionalEncoding / Embedding（含 causal 掩码、滑动窗口、RoPE、GQA/MQA）
 ├── llm.h / llm.c          CausalLM：因果语言模型（复用 attention.c 的编码器 + 词表头 + Adam + nucleus 采样 + 困惑度）
@@ -158,6 +161,7 @@ Python 写 -> C 读：  最大差异 0.000e+00  PASS   （含 softmax 输出层�
 python tools/norm_reference.py && ./tests/compare_norm     # 50 项，全部 0.000e+00
 python tools/conv_reference.py && ./tests/compare_conv     # 70 项，全部 0.000e+00
 python tools/llm_reference.py && ./tests/compare_llm      # 6 段，见下
+python tools/augment_reference.py && ./tests/compare_augment  # 24 项，全部 0.000e+00
 python tools/attention_reference.py && ./tests/compare_attention  # 13 个用例，见第 8 节
 ```
 
@@ -246,6 +250,17 @@ Conv2d（六种配置的 forward/grad_w/grad_b/dx：默认 2 组、groups=2、gr
 dilation=2、groups+dilation+stride 叠加）、Conv1d（五种配置：默认、stride+padding、分组、深度、
 分组+大 stride+大 padding）、ConvTranspose2d（五种配置：默认、stride 2 + output_padding、分组、
 深度、分组+stride+output_padding 叠加）、MaxPool2d（两种配置）、Flatten。
+
+覆盖：`augment_brightness` / `augment_contrast` / `augment_shift` / `augment_rotate90`（对应 Python 的
+`_aug_brightness` / `_aug_contrast` / `_aug_shift` / `_aug_rotate90`）、`aug_cutout`、`aug_cutmix`
+（含 `aug_cutmix_box` 的裁剪框）、`aug_mixup` / `aug_mixup_soft`、`aug_randaugment` 的驱动逻辑，
+合计 24 项逐位相同（容差 0.0e+00）。
+
+> **随机性从外部注入**：Python 用 `random.Random`（Mersenne Twister）与 `rng.gauss`，C 用 splitmix64，
+> 两者不可能复现。所以参考脚本把 Python 抽到的 `lam` / 裁剪框 `(cx, cy)` / 洞位置 `(xs, ys)` /
+> 操作序列与强度写进 JSON，C 侧按同样的参数执行——这与 `dropout_set_mask`、`droppath_set_keep`
+> 是同一套做法。`round()` 的差异也在这里踩过：Python 的四舍六入五成双对应 C 的 `rint()` 而不是
+> `round()`（后者五入），裁剪框边长与 Cutout 的洞边长都必须用 `rint()`。
 
 覆盖：`BatchNorm2d`（训练 forward、反向 dx / grad_gamma / grad_beta、running_mean / running_var
 更新、mean / inv、x_hat；推理 forward 与「推理不更新 running 统计量」）、`GroupNorm`（forward、
