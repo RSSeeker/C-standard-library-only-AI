@@ -210,6 +210,207 @@ static int fd_check_conv(int C, int OC, int K, int S, int P, int H, int W,
     return ok;
 }
 
+/* ============ 1b) Conv1d / ConvTranspose2d 的有限差分校验 ============ */
+
+/* L = Σ coef * out，与 Conv2d 段同样的口径（Neumaier，操作数顺序无关紧要，
+ * 因为这里只是把 dL/dout 打进层里做差分） */
+static double conv1d_loss(Conv1d *net, const Tensor *x, const Tensor *coef,
+                          Tensor *out, double *prod)
+{
+    conv1d_forward(net, x, out);
+    for (int i = 0; i < out->size; i++) prod[i] = coef->data[i] * out->data[i];
+    return sum_neumaier(prod, out->size);
+}
+
+static int fd_check_conv1d(int C, int OC, int K, int S, int P, int L, int G,
+                           unsigned long long seed)
+{
+    const int cg = C / G;
+    const int fan_in = cg * K;
+    const size_t w_n = (size_t)OC * fan_in;
+
+    Conv1d *net = conv1d_create(C, OC, K, S, P, G);
+
+    double *Wt = t_xmalloc(w_n * sizeof(double));
+    double *bt = t_xmalloc((size_t)OC * sizeof(double));
+    rng_seed(seed);
+    const double std = sqrt(2.0 / (double)fan_in);
+    for (size_t i = 0; i < w_n; i++) Wt[i] = rng_gauss() * std;
+    for (int oc = 0; oc < OC; oc++) bt[oc] = 0.1 * rng_gauss();
+    conv1d_set_weights(net, Wt, bt);
+
+    int lo = 0;
+    conv1d_out_len(net, L, &lo);
+    const int out_shape[2] = { OC, lo };
+    const int x_shape[2] = { C, L };
+
+    Tensor *x    = tensor_new(2, x_shape);
+    Tensor *out  = tensor_new(2, out_shape);
+    Tensor *coef = tensor_new(2, out_shape);
+    Tensor *dx   = tensor_new(2, x_shape);
+    fill_gauss(x->data, (size_t)x->size);
+    fill_gauss(coef->data, (size_t)coef->size);
+    double *prod = t_xmalloc((size_t)out->size * sizeof(double));
+
+    conv1d_zero_grad(net);
+    conv1d_forward(net, x, out);
+    conv1d_backward(net, coef, dx);
+
+    double worst_w = 0.0, worst_b = 0.0, worst_x = 0.0;
+
+    for (size_t i = 0; i < w_n; i++) {
+        double old = Wt[i];
+        Wt[i] = old + FD_EPS; conv1d_set_weights(net, Wt, NULL);
+        double lp = conv1d_loss(net, x, coef, out, prod);
+        Wt[i] = old - FD_EPS; conv1d_set_weights(net, Wt, NULL);
+        double lm = conv1d_loss(net, x, coef, out, prod);
+        Wt[i] = old;          conv1d_set_weights(net, Wt, NULL);
+
+        double err = fabs((lp - lm) / (2.0 * FD_EPS) - net->gW[i]);
+        if (err > worst_w) worst_w = err;
+    }
+
+    for (int oc = 0; oc < OC; oc++) {
+        double old = bt[oc];
+        bt[oc] = old + FD_EPS; conv1d_set_weights(net, NULL, bt);
+        double lp = conv1d_loss(net, x, coef, out, prod);
+        bt[oc] = old - FD_EPS; conv1d_set_weights(net, NULL, bt);
+        double lm = conv1d_loss(net, x, coef, out, prod);
+        bt[oc] = old;          conv1d_set_weights(net, NULL, bt);
+
+        double err = fabs((lp - lm) / (2.0 * FD_EPS) - net->gb[oc]);
+        if (err > worst_b) worst_b = err;
+    }
+
+    for (int i = 0; i < x->size; i++) {
+        double old = x->data[i];
+        x->data[i] = old + FD_EPS;
+        double lp = conv1d_loss(net, x, coef, out, prod);
+        x->data[i] = old - FD_EPS;
+        double lm = conv1d_loss(net, x, coef, out, prod);
+        x->data[i] = old;
+
+        double err = fabs((lp - lm) / (2.0 * FD_EPS) - dx->data[i]);
+        if (err > worst_x) worst_x = err;
+    }
+
+    int ok = (worst_w < FD_TOL) && (worst_b < FD_TOL) && (worst_x < FD_TOL);
+    if (conv1d_param_count(net) != OC * fan_in + OC) {
+        printf("    param_count 不符：%d != %d\n", conv1d_param_count(net), OC * fan_in + OC);
+        ok = 0;
+    }
+
+    printf("  C=%d OC=%d K=%d stride=%d pad=%d groups=%d  L=%d  ->  输出 (%d,)\n",
+           C, OC, K, S, P, G, L, lo);
+    printf("    grad_w: 最大误差 %.3e   grad_b: %.3e   dx: %.3e   %s\n",
+           worst_w, worst_b, worst_x, ok ? "[通过]" : "[失败]");
+
+    tensor_free(x); tensor_free(out); tensor_free(coef); tensor_free(dx);
+    free(prod); free(Wt); free(bt);
+    conv1d_free(net);
+    return ok;
+}
+
+static double convt2d_loss(ConvTranspose2d *net, const Tensor *x, const Tensor *coef,
+                           Tensor *out, double *prod)
+{
+    convt2d_forward(net, x, out);
+    for (int i = 0; i < out->size; i++) prod[i] = coef->data[i] * out->data[i];
+    return sum_neumaier(prod, out->size);
+}
+
+static int fd_check_convt2d(int C, int OC, int K, int S, int P, int OP, int H, int W,
+                            int G, unsigned long long seed)
+{
+    const int cg = C / G;
+    const int og = OC / G;
+    const int fan_in = cg * K * K;
+    /* 转置卷积的权重是 [cin][og][kh][kw]，与 Conv2d 的 [oc][cg][kh][kw] 不同 */
+    const size_t w_n = (size_t)C * (size_t)og * (size_t)K * (size_t)K;
+
+    ConvTranspose2d *net = convt2d_create(C, OC, K, S, P, OP, G);
+
+    double *Wt = t_xmalloc(w_n * sizeof(double));
+    double *bt = t_xmalloc((size_t)OC * sizeof(double));
+    rng_seed(seed);
+    const double std = sqrt(2.0 / (double)fan_in);
+    for (size_t i = 0; i < w_n; i++) Wt[i] = rng_gauss() * std;
+    for (int co = 0; co < OC; co++) bt[co] = 0.1 * rng_gauss();
+    convt2d_set_weights(net, Wt, bt);
+
+    int ho = 0, wo = 0;
+    convt2d_out_shape(net, H, W, &ho, &wo);
+    const int out_shape[3] = { OC, ho, wo };
+    const int x_shape[3] = { C, H, W };
+
+    Tensor *x    = tensor_new(3, x_shape);
+    Tensor *out  = tensor_new(3, out_shape);
+    Tensor *coef = tensor_new(3, out_shape);
+    Tensor *dx   = tensor_new(3, x_shape);
+    fill_gauss(x->data, (size_t)x->size);
+    fill_gauss(coef->data, (size_t)coef->size);
+    double *prod = t_xmalloc((size_t)out->size * sizeof(double));
+
+    convt2d_zero_grad(net);
+    convt2d_forward(net, x, out);
+    convt2d_backward(net, coef, dx);
+
+    double worst_w = 0.0, worst_b = 0.0, worst_x = 0.0;
+
+    for (size_t i = 0; i < w_n; i++) {
+        double old = Wt[i];
+        Wt[i] = old + FD_EPS; convt2d_set_weights(net, Wt, NULL);
+        double lp = convt2d_loss(net, x, coef, out, prod);
+        Wt[i] = old - FD_EPS; convt2d_set_weights(net, Wt, NULL);
+        double lm = convt2d_loss(net, x, coef, out, prod);
+        Wt[i] = old;          convt2d_set_weights(net, Wt, NULL);
+
+        double err = fabs((lp - lm) / (2.0 * FD_EPS) - net->gW[i]);
+        if (err > worst_w) worst_w = err;
+    }
+
+    for (int co = 0; co < OC; co++) {
+        double old = bt[co];
+        bt[co] = old + FD_EPS; convt2d_set_weights(net, NULL, bt);
+        double lp = convt2d_loss(net, x, coef, out, prod);
+        bt[co] = old - FD_EPS; convt2d_set_weights(net, NULL, bt);
+        double lm = convt2d_loss(net, x, coef, out, prod);
+        bt[co] = old;          convt2d_set_weights(net, NULL, bt);
+
+        double err = fabs((lp - lm) / (2.0 * FD_EPS) - net->gb[co]);
+        if (err > worst_b) worst_b = err;
+    }
+
+    for (int i = 0; i < x->size; i++) {
+        double old = x->data[i];
+        x->data[i] = old + FD_EPS;
+        double lp = convt2d_loss(net, x, coef, out, prod);
+        x->data[i] = old - FD_EPS;
+        double lm = convt2d_loss(net, x, coef, out, prod);
+        x->data[i] = old;
+
+        double err = fabs((lp - lm) / (2.0 * FD_EPS) - dx->data[i]);
+        if (err > worst_x) worst_x = err;
+    }
+
+    int ok = (worst_w < FD_TOL) && (worst_b < FD_TOL) && (worst_x < FD_TOL);
+    if (convt2d_param_count(net) != (int)w_n + OC) {
+        printf("    param_count 不符：%d != %d\n", convt2d_param_count(net), (int)w_n + OC);
+        ok = 0;
+    }
+
+    printf("  C=%d OC=%d K=%d stride=%d pad=%d out_pad=%d groups=%d  H=%d W=%d"
+           "  ->  输出 (%d,%d)\n",
+           C, OC, K, S, P, OP, G, H, W, ho, wo);
+    printf("    grad_w: 最大误差 %.3e   grad_b: %.3e   dx: %.3e   %s\n",
+           worst_w, worst_b, worst_x, ok ? "[通过]" : "[失败]");
+
+    tensor_free(x); tensor_free(out); tensor_free(coef); tensor_free(dx);
+    free(prod); free(Wt); free(bt);
+    convt2d_free(net);
+    return ok;
+}
+
 /* ================== 2) MaxPool2d 的校验 ================== */
 
 /* 池化 backward 的差分校验：L = Σ coef*out，连续输入下 argmax 稳定（无并列） */
@@ -452,6 +653,137 @@ static int check_flatten(void)
 }
 
 /* ================== 4) Module vtable 路径 ================== */
+
+/* Conv1d / ConvTranspose2d 也要能被 Sequential 这类容器当 Module 用：
+ * module 路径与直接调用必须逐位一致（含 to_string 与 container free） */
+static int check_new_module_vtable(void)
+{
+    int bad = 0;
+    printf("    Conv1d / ConvTranspose2d 的 vtable 与直接调用逐位一致：");
+
+    /* ---- Conv1d ---- */
+    {
+        const int C = 2, OC = 2, K = 3, S = 1, P = 1, L = 8, G = 2;
+        Conv1d *net = conv1d_create(C, OC, K, S, P, G);
+        int lo = 0;
+        conv1d_out_len(net, L, &lo);
+
+        rng_seed(20241001);
+        const size_t w_n = (size_t)OC * (C / G) * K;
+        double *Wt = t_xmalloc(w_n * sizeof(double));
+        double *bt = t_xmalloc((size_t)OC * sizeof(double));
+        fill_gauss(Wt, w_n);
+        fill_gauss(bt, (size_t)OC);
+        conv1d_set_weights(net, Wt, bt);
+
+        const int xs[2] = { C, L };
+        const int os[2] = { OC, lo };
+        Tensor *x = tensor_new(2, xs), *o1 = tensor_new(2, os), *o2 = tensor_new(2, os);
+        Tensor *coef = tensor_new(2, os), *d1 = tensor_new(2, xs), *d2 = tensor_new(2, xs);
+        fill_gauss(x->data, (size_t)x->size);
+        fill_gauss(coef->data, (size_t)coef->size);
+
+        Module *m = conv1d_as_module(net);
+        if (m != conv1d_as_module(net)) { printf(" as_module 不稳定"); bad++; }
+        if (module_param_count(m) != conv1d_param_count(net)) { printf(" param_count 不一致"); bad++; }
+        if (conv1d_param_count(net) != (int)w_n + OC) { printf(" param_count 数值不对"); bad++; }
+
+        conv1d_forward(net, x, o1);
+        module_forward(m, x, o2);
+        if (memcmp(o1->data, o2->data, (size_t)o1->size * sizeof(double)) != 0) {
+            printf(" module_forward 不一致"); bad++;
+        }
+
+        conv1d_zero_grad(net);
+        conv1d_backward(net, coef, d1);
+        double *gW_ref = t_xmalloc(w_n * sizeof(double));
+        double *gb_ref = t_xmalloc((size_t)OC * sizeof(double));
+        memcpy(gW_ref, net->gW, w_n * sizeof(double));
+        memcpy(gb_ref, net->gb, (size_t)OC * sizeof(double));
+
+        module_zero_grad(m);
+        module_backward(m, coef, d2);
+        if (memcmp(net->gW, gW_ref, w_n * sizeof(double)) != 0 ||
+            memcmp(net->gb, gb_ref, (size_t)OC * sizeof(double)) != 0 ||
+            memcmp(d1->data, d2->data, (size_t)d1->size * sizeof(double)) != 0) {
+            printf(" module_backward 不一致"); bad++;
+        }
+
+        char buf[96];
+        buf[0] = '\0';
+        m->vt->to_string(m, buf, sizeof(buf));
+        if (buf[0] == '\0') { printf(" to_string 空"); bad++; }
+        if (strstr(buf, "groups=2") == NULL) { printf(" to_string 没写出 groups"); bad++; }
+
+        module_free(m);
+        free(Wt); free(bt); free(gW_ref); free(gb_ref);
+        tensor_free(x); tensor_free(o1); tensor_free(o2);
+        tensor_free(coef); tensor_free(d1); tensor_free(d2);
+    }
+
+    /* ---- ConvTranspose2d ---- */
+    {
+        const int C = 2, OC = 2, K = 3, S = 2, P = 1, OP = 0, H = 4, W = 4, G = 2;
+        ConvTranspose2d *net = convt2d_create(C, OC, K, S, P, OP, G);
+        int ho = 0, wo = 0;
+        convt2d_out_shape(net, H, W, &ho, &wo);
+
+        rng_seed(20241002);
+        const size_t w_n = (size_t)C * (OC / G) * K * K;
+        double *Wt = t_xmalloc(w_n * sizeof(double));
+        double *bt = t_xmalloc((size_t)OC * sizeof(double));
+        fill_gauss(Wt, w_n);
+        fill_gauss(bt, (size_t)OC);
+        convt2d_set_weights(net, Wt, bt);
+
+        const int xs[3] = { C, H, W };
+        const int os[3] = { OC, ho, wo };
+        Tensor *x = tensor_new(3, xs), *o1 = tensor_new(3, os), *o2 = tensor_new(3, os);
+        Tensor *coef = tensor_new(3, os), *d1 = tensor_new(3, xs), *d2 = tensor_new(3, xs);
+        fill_gauss(x->data, (size_t)x->size);
+        fill_gauss(coef->data, (size_t)coef->size);
+
+        Module *m = convt2d_as_module(net);
+        if (m != convt2d_as_module(net)) { printf(" as_module 不稳定"); bad++; }
+        if (module_param_count(m) != convt2d_param_count(net)) { printf(" param_count 不一致"); bad++; }
+        if (convt2d_param_count(net) != (int)w_n + OC) { printf(" param_count 数值不对"); bad++; }
+
+        convt2d_forward(net, x, o1);
+        module_forward(m, x, o2);
+        if (memcmp(o1->data, o2->data, (size_t)o1->size * sizeof(double)) != 0) {
+            printf(" module_forward 不一致(转置)"); bad++;
+        }
+
+        convt2d_zero_grad(net);
+        convt2d_backward(net, coef, d1);
+        double *gW_ref = t_xmalloc(w_n * sizeof(double));
+        double *gb_ref = t_xmalloc((size_t)OC * sizeof(double));
+        memcpy(gW_ref, net->gW, w_n * sizeof(double));
+        memcpy(gb_ref, net->gb, (size_t)OC * sizeof(double));
+
+        module_zero_grad(m);
+        module_backward(m, coef, d2);
+        if (memcmp(net->gW, gW_ref, w_n * sizeof(double)) != 0 ||
+            memcmp(net->gb, gb_ref, (size_t)OC * sizeof(double)) != 0 ||
+            memcmp(d1->data, d2->data, (size_t)d1->size * sizeof(double)) != 0) {
+            printf(" module_backward 不一致(转置)"); bad++;
+        }
+
+        char buf[96];
+        buf[0] = '\0';
+        m->vt->to_string(m, buf, sizeof(buf));
+        if (buf[0] == '\0') { printf(" to_string 空(转置)"); bad++; }
+        if (strstr(buf, "ConvTranspose2d") == NULL) { printf(" to_string 名字不对"); bad++; }
+
+        module_free(m);
+        free(Wt); free(bt); free(gW_ref); free(gb_ref);
+        tensor_free(x); tensor_free(o1); tensor_free(o2);
+        tensor_free(coef); tensor_free(d1); tensor_free(d2);
+    }
+
+    printf("%s\n", bad ? "[失败]" : "[通过]");
+    return bad == 0;
+}
 
 static int check_module_vtable(void)
 {
@@ -726,6 +1058,18 @@ int main(void)
     fails += !fd_check_conv(2, 3, 3, 1, 2, 7, 7, 1, 2, 19);
     fails += !fd_check_conv(4, 6, 3, 2, 2, 9, 9, 2, 2, 23);
 
+    printf("\n========== 1b) Conv1d 有限差分校验 ==========\n");
+    fails += !fd_check_conv1d(1, 2, 3, 1, 0, 7, 1, 29);      /* 默认路径 */
+    fails += !fd_check_conv1d(2, 3, 2, 2, 1, 8, 1, 31);      /* stride + padding */
+    fails += !fd_check_conv1d(4, 6, 3, 1, 1, 9, 2, 37);      /* 分组 */
+    fails += !fd_check_conv1d(3, 3, 3, 2, 1, 10, 3, 41);     /* 深度（groups == C） */
+
+    printf("\n========== 1c) ConvTranspose2d 有限差分校验 ==========\n");
+    fails += !fd_check_convt2d(1, 2, 2, 1, 0, 0, 4, 4, 1, 43);     /* 默认路径 */
+    fails += !fd_check_convt2d(2, 3, 3, 2, 1, 1, 5, 5, 1, 47);     /* stride + out_pad */
+    fails += !fd_check_convt2d(4, 6, 3, 2, 1, 0, 6, 6, 2, 53);     /* 分组 */
+    fails += !fd_check_convt2d(3, 3, 3, 1, 1, 0, 5, 5, 3, 59);     /* 深度 */
+
     printf("\n========== 2) MaxPool2d 校验 ==========\n");
     fails += !check_pool_mask(2, 2, 2, 6, 5, 21);
     fails += !check_pool_backward_props(2, 2, 2, 6, 5, 22);
@@ -739,6 +1083,7 @@ int main(void)
 
     printf("\n========== 4) Module vtable 校验 ==========\n");
     fails += !check_module_vtable();
+    fails += !check_new_module_vtable();
 
 #if defined(CONV_NOALLOC)
     printf("\n========== 5) 热路径零分配 / 释放路径校验 ==========\n");

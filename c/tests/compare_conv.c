@@ -1,6 +1,7 @@
 /*
  * compare_conv.c —— 读取 tools/conv_reference.py 的参考数据，
- * 用 C 实现重算 Conv2d / MaxPool2d / Flatten 并逐项比对（默认要求逐位相同）。
+ * 用 C 实现重算 Conv2d / Conv1d / ConvTranspose2d / MaxPool2d / Flatten 并逐项比对
+ * （默认要求逐位相同）。
  *
  * 用法: compare_conv [conv_reference.json] [容差]
  */
@@ -134,6 +135,144 @@ int main(int argc, char **argv)
         free(w); free(b); free(want); free(got_w); free(got_b);
         tensor_free(x); tensor_free(out); tensor_free(dout); tensor_free(dx);
         conv2d_free(conv);
+    }
+
+    /* ===================== Conv1d ===================== */
+    const JsonValue *ones = need(root, "conv1d", "root");
+    int n_one = json_array_len(ones);
+    for (int ci = 0; ci < n_one; ci++) {
+        const JsonValue *c = json_at(ones, ci);
+        int C = json_int(need(c, "C", "conv1d"), 0);
+        int OC = json_int(need(c, "OC", "conv1d"), 0);
+        int K = json_int(need(c, "K", "conv1d"), 0);
+        int S = json_int(need(c, "S", "conv1d"), 0);
+        int P = json_int(need(c, "P", "conv1d"), 0);
+        int L = json_int(need(c, "L", "conv1d"), 0);
+        int lo = json_int(need(c, "lo", "conv1d"), 0);
+        const JsonValue *jg = json_get(c, "groups");
+        int G = jg ? json_int(jg, 1) : 1;
+        int cg = C / G;
+
+        printf("\nConv1d[%d] C=%d OC=%d K=%d S=%d P=%d groups=%d  L=%d -> %d\n",
+               ci, C, OC, K, S, P, G, L, lo);
+
+        Conv1d *conv = conv1d_create(C, OC, K, S, P, G);
+        int nW = OC * cg * K;
+        double *w = malloc((size_t)nW * sizeof(double));
+        double *b = malloc((size_t)OC * sizeof(double));
+        arr_vals(need(c, "weights", "conv1d"), w, nW);
+        arr_vals(need(c, "b", "conv1d"), b, OC);
+        conv1d_set_weights(conv, w, b);
+
+        int xs[2] = { C, L };
+        int os[2] = { OC, lo };
+        Tensor *x = tensor_new(2, xs), *out = tensor_new(2, os);
+        Tensor *dout = tensor_new(2, os), *dx = tensor_new(2, xs);
+        arr_vals(need(c, "x", "conv1d"), x->data, C * L);
+        arr_vals(need(c, "dout", "conv1d"), dout->data, OC * lo);
+
+        int n_out = OC * lo, n_in = C * L;
+        int cap = n_out > n_in ? n_out : n_in;
+        if (nW > cap) cap = nW;
+        double *want = malloc((size_t)cap * sizeof(double));
+
+        conv1d_forward(conv, x, out);
+        arr_vals(need(c, "out", "conv1d"), want, n_out);
+        report("forward", out->data, want, n_out);
+
+        conv1d_backward(conv, dout, dx);
+        arr_vals(need(c, "dx", "conv1d"), want, n_in);
+        report("backward dx", dx->data, want, n_in);
+
+        double *got_w = malloc((size_t)nW * sizeof(double));
+        double *got_b = malloc((size_t)OC * sizeof(double));
+        {
+            int k = 0;
+            for (int oc = 0; oc < OC; oc++)
+                for (int ic = 0; ic < cg; ic++)
+                    for (int kk = 0; kk < K; kk++)
+                        got_w[k++] = conv->gW[(oc * cg + ic) * K + kk];
+        }
+        for (int oc = 0; oc < OC; oc++) got_b[oc] = conv->gb[oc];
+        arr_vals(need(c, "grad_w", "conv1d"), want, nW);
+        report("grad_w", got_w, want, nW);
+        arr_vals(need(c, "grad_b", "conv1d"), want, OC);
+        report("grad_b", got_b, want, OC);
+
+        free(w); free(b); free(want); free(got_w); free(got_b);
+        tensor_free(x); tensor_free(out); tensor_free(dout); tensor_free(dx);
+        conv1d_free(conv);
+    }
+
+    /* ===================== ConvTranspose2d ===================== */
+    const JsonValue *tcs = need(root, "convt2d", "root");
+    int n_tc = json_array_len(tcs);
+    for (int ci = 0; ci < n_tc; ci++) {
+        const JsonValue *c = json_at(tcs, ci);
+        int C = json_int(need(c, "C", "convt2d"), 0);
+        int OC = json_int(need(c, "OC", "convt2d"), 0);
+        int K = json_int(need(c, "K", "convt2d"), 0);
+        int S = json_int(need(c, "S", "convt2d"), 0);
+        int P = json_int(need(c, "P", "convt2d"), 0);
+        int OP = json_int(need(c, "OP", "convt2d"), 0);
+        int H = json_int(need(c, "H", "convt2d"), 0);
+        int W = json_int(need(c, "W", "convt2d"), 0);
+        int ho = json_int(need(c, "ho", "convt2d"), 0);
+        int wo = json_int(need(c, "wo", "convt2d"), 0);
+        const JsonValue *jg = json_get(c, "groups");
+        int G = jg ? json_int(jg, 1) : 1;
+        int og = OC / G;
+
+        printf("\nConvTranspose2d[%d] C=%d OC=%d K=%d S=%d P=%d OP=%d groups=%d  %dx%d -> %dx%d\n",
+               ci, C, OC, K, S, P, OP, G, H, W, ho, wo);
+
+        ConvTranspose2d *conv = convt2d_create(C, OC, K, S, P, OP, G);
+        int nW = C * og * K * K;
+        double *w = malloc((size_t)nW * sizeof(double));
+        double *b = malloc((size_t)OC * sizeof(double));
+        arr_vals(need(c, "weights", "convt2d"), w, nW);
+        arr_vals(need(c, "b", "convt2d"), b, OC);
+        convt2d_set_weights(conv, w, b);
+
+        int xs[3] = { C, H, W };
+        int os[3] = { OC, ho, wo };
+        Tensor *x = tensor_new(3, xs), *out = tensor_new(3, os);
+        Tensor *dout = tensor_new(3, os), *dx = tensor_new(3, xs);
+        arr_vals(need(c, "x", "convt2d"), x->data, C * H * W);
+        arr_vals(need(c, "dout", "convt2d"), dout->data, OC * ho * wo);
+
+        int n_out = OC * ho * wo, n_in = C * H * W;
+        int cap = n_out > n_in ? n_out : n_in;
+        if (nW > cap) cap = nW;
+        double *want = malloc((size_t)cap * sizeof(double));
+
+        convt2d_forward(conv, x, out);
+        arr_vals(need(c, "out", "convt2d"), want, n_out);
+        report("forward", out->data, want, n_out);
+
+        convt2d_backward(conv, dout, dx);
+        arr_vals(need(c, "dx", "convt2d"), want, n_in);
+        report("backward dx", dx->data, want, n_in);
+
+        double *got_w = malloc((size_t)nW * sizeof(double));
+        double *got_b = malloc((size_t)OC * sizeof(double));
+        {
+            int k = 0;
+            for (int cin = 0; cin < C; cin++)
+                for (int co = 0; co < og; co++)
+                    for (int kh = 0; kh < K; kh++)
+                        for (int kw = 0; kw < K; kw++)
+                            got_w[k++] = conv->gW[((cin * og + co) * K + kh) * K + kw];
+        }
+        for (int co = 0; co < OC; co++) got_b[co] = conv->gb[co];
+        arr_vals(need(c, "grad_w", "convt2d"), want, nW);
+        report("grad_w", got_w, want, nW);
+        arr_vals(need(c, "grad_b", "convt2d"), want, OC);
+        report("grad_b", got_b, want, OC);
+
+        free(w); free(b); free(want); free(got_w); free(got_b);
+        tensor_free(x); tensor_free(out); tensor_free(dout); tensor_free(dx);
+        convt2d_free(conv);
     }
 
     /* ===================== MaxPool2d ===================== */

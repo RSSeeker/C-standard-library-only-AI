@@ -1,11 +1,15 @@
 /*
- * layers_conv.h —— CNN 三件套（Conv2d / MaxPool2d / Flatten）的 C17 移植接口
+ * layers_conv.h —— CNN 家族（Conv2d / ConvTranspose2d / Conv1d / MaxPool2d / Flatten）的 C17 移植接口
  *
  * 对应 AI.py 里的同名类：
  *   Conv2d(in_channels, out_channels, kernel_size, stride, padding)
  *       -> conv2d_create(in_channels, out_channels, kernel_size, stride, padding)
  *   MaxPool2d(kernel_size, stride=None) -> maxpool2d_create(kernel_size, stride)
  *   Flatten()                           -> flatten_create()
+ *   Conv1d(in, out, kernel_size, stride, padding, groups)
+ *       -> conv1d_create(in, out, kernel_size, stride, padding, groups)
+ *   ConvTranspose2d(in, out, kernel_size, stride, padding, output_padding, groups)
+ *       -> convt2d_create(in, out, kernel_size, stride, padding, output_padding, groups)
  *
  * 张量形状约定（与 Python 版一致，一律行主序、double、连续）：
  *   Conv2d   : 输入 (C, H, W)  ->  输出 (out_channels, Ho, Wo)
@@ -206,5 +210,128 @@ int  flatten_param_count(Flatten *self);
 
 Module *flatten_as_module(Flatten *self);
 void    flatten_to_string(const Flatten *self, char *buf, size_t n);
+
+/* ====================== Conv1d（W: conv1d / A 档） ====================== */
+
+typedef struct {
+    Module mod;             /* 必须是第一个成员，理由见文件头的"所有权约定" */
+
+    int in_channels;
+    int out_channels;
+    int k;                  /* 核长度（Python 的 kernel_size / self.k） */
+    int s;                  /* stride（Python 的 self.s） */
+    int p;                  /* padding（Python 的 self.p） */
+
+    int groups;
+    int cg;                 /* = in_channels / groups */
+    int og;                 /* = out_channels / groups */
+
+    /* 参数与梯度：W 展平成 [oc][ic][k]（oc 最外层，ic 只到 cg），
+     * 与 Python 的 self.weights / self.grad_w 同序 */
+    double *W;
+    double *b;
+    double *gW;
+    double *gb;
+
+    /* Adam 状态（与 Conv2d 一样先分配好，留给后续 optimizer 移植统一使用） */
+    double *mW, *vW;
+    double *mb, *vb;
+
+    /* 前向缓存：对应 Python 的 self.x / self.l_out */
+    int in_c, in_l;         /* 输入形状 (C, L) */
+    int out_l;              /* 输出长度 Lo */
+    double *xbuf;           /* (C, L)：Python 里 backward 直接读 self.x，这里存一份 */
+
+    int bound;
+} Conv1d;
+
+/* 创建一个 1D 卷积层（groups 语义与 Conv2d 一致：每组只吃 cg 个输入通道）。
+ * 要求 kernel_size >= 1、stride >= 1、padding >= 0、groups >= 1 且同时整除
+ * in_channels / out_channels，否则报错退出 */
+Conv1d *conv1d_create(int in_channels, int out_channels, int kernel_size,
+                      int stride, int padding, int groups);
+void    conv1d_free(Conv1d *self);
+
+/* 绑定输入长度并分配输入缓存（同 Conv2d 的懒绑定约定） */
+void conv1d_bind_shape(Conv1d *self, int C, int L);
+/* 输出长度，对应 Python 的 _out_len：lo = (L + 2p - k)//s + 1 */
+void conv1d_out_len(const Conv1d *self, int L, int *lo);
+
+void conv1d_zero_grad(Conv1d *self);
+void conv1d_forward(Conv1d *self, const Tensor *x, Tensor *out);
+void conv1d_backward(Conv1d *self, const Tensor *dout, Tensor *dx);
+int  conv1d_param_count(Conv1d *self);
+
+/* 从外部灌入权重：W 按 [oc][ic][k] 展平（ic 只到 cg），长度 out_channels*cg*k；
+ * b 长度 out_channels，可以传 NULL（保持原值） */
+void conv1d_set_weights(Conv1d *self, const double *W, const double *b);
+void conv1d_get_weights(const Conv1d *self, double *W, double *b);
+
+/* He 初始化：std = sqrt(2 / fan_in)，fan_in = cg*k（与 Python 一致） */
+void conv1d_init_he(Conv1d *self, unsigned long long *rng_state);
+
+Module *conv1d_as_module(Conv1d *self);
+void    conv1d_to_string(const Conv1d *self, char *buf, size_t n);
+
+/* ================= ConvTranspose2d（W: conv_t2d / A 档） ================= */
+
+typedef struct {
+    Module mod;             /* 必须是第一个成员 */
+
+    int in_channels;
+    int out_channels;
+    int kh, kw;
+    int sh, sw;
+    int ph, pw;             /* padding */
+    int oph, opw;           /* output_padding（必须 < stride，与 PyTorch 一致） */
+
+    int groups;
+    int cg;                 /* = in_channels / groups */
+    int og;                 /* = out_channels / groups */
+
+    /* 参数与梯度：W 展平成 [cin][og][kh][kw]（与 Python 的 weights 同序，
+     * 即 PyTorch 的 (in, out/groups, kh, kw) 布局；注意与 Conv2d 不同） */
+    double *W;
+    double *b;
+    double *gW;
+    double *gb;
+
+    double *mW, *vW;
+    double *mb, *vb;
+
+    /* 前向缓存：对应 Python 的 self.x / self.x_shape / self.h_out / self.w_out */
+    int in_c, in_h, in_w;
+    int out_h, out_w;
+    double *xbuf;           /* (Cin, H, W)：backward 直接读输入值 */
+    double *rows;           /* 长度 out_h：grad_b 的两级求和暂存（见 convt2d_backward） */
+
+    int bound;
+} ConvTranspose2d;
+
+/* 创建转置卷积层：Ho = (H-1)*stride - 2*padding + kernel + output_padding。
+ * 要求 kernel/stride >= 1、padding/output_padding >= 0、output_padding < stride、
+ * groups >= 1 且同时整除 in/out_channels */
+ConvTranspose2d *convt2d_create(int in_channels, int out_channels, int kernel_size,
+                                int stride, int padding, int output_padding, int groups);
+void convt2d_free(ConvTranspose2d *self);
+
+void convt2d_bind_shape(ConvTranspose2d *self, int C, int H, int W);
+/* 输出空间尺寸，对应 Python 的 _out_shape */
+void convt2d_out_shape(const ConvTranspose2d *self, int H, int W, int *ho, int *wo);
+
+void convt2d_zero_grad(ConvTranspose2d *self);
+void convt2d_forward(ConvTranspose2d *self, const Tensor *x, Tensor *out);
+void convt2d_backward(ConvTranspose2d *self, const Tensor *dout, Tensor *dx);
+int  convt2d_param_count(ConvTranspose2d *self);
+
+/* W 按 [cin][og][kh][kw] 展平，长度 in_channels*og*kh*kw */
+void convt2d_set_weights(ConvTranspose2d *self, const double *W, const double *b);
+void convt2d_get_weights(const ConvTranspose2d *self, double *W, double *b);
+
+/* He 初始化：std = sqrt(2 / fan_in)，fan_in = cg*kh*kw（与 Python 一致） */
+void convt2d_init_he(ConvTranspose2d *self, unsigned long long *rng_state);
+
+Module *convt2d_as_module(ConvTranspose2d *self);
+void    convt2d_to_string(const ConvTranspose2d *self, char *buf, size_t n);
 
 #endif /* AI_LAYERS_CONV_H */

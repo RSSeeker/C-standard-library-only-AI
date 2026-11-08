@@ -12,7 +12,7 @@
 
 | 项目 | 状态 |
 |------|------|
-| 数值等价性 | MLP 前向/梯度、Conv2d/MaxPool2d/Flatten、BatchNorm1d/LayerNorm/Dropout、注意力组件、MHA/FFN/TransformerEncoderLayer 前向/反向 **全部与 Python 逐位一致**（0.000e+00，含 window/RoPE/GQA/MQA、ALiBi 与注意力权重 dropout 的注入 mask 对拍，见第 8 节） |
+| 数值等价性 | MLP 前向/梯度、Conv2d/Conv1d/ConvTranspose2d/MaxPool2d/Flatten、BatchNorm1d/LayerNorm/Dropout、注意力组件、MHA/FFN/TransformerEncoderLayer 前向/反向 **全部与 Python 逐位一致**（0.000e+00，含 window/RoPE/GQA/MQA、ALiBi 与注意力权重 dropout 的注入 mask 对拍，见第 8 节） |
 | 训练循环 | **零分配**（预热后 `malloc` 调用次数 = 0，用链接器 `--wrap` 统计，与机器负载无关） |
 | 性能 | MLP[64,256,128,8]、5 万参数、1000 样本 × 5 轮：C 约 1.3 s vs Python 约 77 s（**约 58–68 倍**） |
 | 存档互通 | 与 Python 的 `save_model` / `load_model` **双向互通**，两个方向都逐位一致 |
@@ -28,7 +28,7 @@
 | `Layer` / `MLP` / 四个优化器 / `Model.fit` | `ai.c` | 已完成，逐位一致 + 零分配 |
 | `focal_loss` / `bce_loss` / `bce_with_logits_loss` / `huber_loss` | `losses.c` | 已完成：48 个标量/数组里 47 个逐位相同，仅 1 个 loss 因 `pow` 差 1 ULP（5.551e-17）；`LossKind` 扩到 6 个，训练与验证共用 `trainer_loss_apply` |
 | `confusion_matrix` / `accuracy_score` / `precision_recall_f1` / `matthews_corrcoef` / `top_k_accuracy` / `roc_auc_score` / `mean_absolute_error` / `root_mean_squared_error` / `mean_absolute_percentage_error` / `r2_score` | `metrics.c` | 已完成：参考 JSON 32 个用例 / 141 项检查**全部逐位相同**（容差 0）|
-| `Conv2d`（含 `groups` / `dilation`）/ `MaxPool2d` / `Flatten` | `layers_conv.c` | 已完成，30 项逐位一致（6 种卷积配置：默认×2、分组、深度、膨胀、分组+膨胀+stride）|
+| `Conv2d`（含 `groups` / `dilation`）/ `Conv1d` / `ConvTranspose2d`（含 `output_padding`） / `MaxPool2d` / `Flatten` | `layers_conv.c` | 已完成，70 项逐位一致（Conv2d 6 种配置、Conv1d 5 种、ConvTranspose2d 5 种） |
 | `Dropout` / `BatchNorm1d` / `LayerNorm` | `layers_norm.c` | 已完成，21 项逐位一致 |
 | `RNNCell/RNN` / `LSTMCell/LSTM` / `GRUCell/GRU` + step cache | `rnn.c` | 已完成 |
 | `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成（含 `causal` 因果掩码开关、`mha_set_window` 滑动窗口、`mha_set_rope` 旋转位置编码、`mha_create_gqa` 的 GQA/MQA、`mha_set_alibi` + `tel_set_alibi` / `te_set_alibi` 的 ALiBi 距离偏置、`mha_forward_step` 增量前向、`mha_set_training` + `mha_set_attn_mask` 的注意力权重 dropout） |
@@ -87,7 +87,7 @@ c/
 │                          MAE·RMSE·MAPE·R²
 ├── tensor.h / tensor.c    张量类型 + 通用模块 vtable（供容器类使用）
 ├── numeric.h              与 Python 对齐的 Neumaier 补偿求和原语
-├── layers_conv.h/.c       Conv2d / MaxPool2d / Flatten
+├── layers_conv.h/.c       Conv2d / Conv1d / ConvTranspose2d / MaxPool2d / Flatten
 ├── layers_norm.h/.c       BatchNorm1d / LayerNorm / Dropout
 ├── rnn.h / rnn.c          RNNCell/RNN、LSTMCell/LSTM、GRUCell/GRU（含 step cache）
 ├── attention.h / .c       MultiHeadAttention / FeedForward / TransformerEncoder / PositionalEncoding / Embedding（含 causal 掩码、滑动窗口、RoPE、GQA/MQA）
@@ -156,7 +156,7 @@ Python 写 -> C 读：  最大差异 0.000e+00  PASS   （含 softmax 输出层�
 
 ```
 python tools/norm_reference.py && ./tests/compare_norm     # 21 项，全部 0.000e+00
-python tools/conv_reference.py && ./tests/compare_conv     # 30 项，全部 0.000e+00
+python tools/conv_reference.py && ./tests/compare_conv     # 70 项，全部 0.000e+00
 python tools/llm_reference.py && ./tests/compare_llm      # 6 段，见下
 python tools/attention_reference.py && ./tests/compare_attention  # 13 个用例，见第 8 节
 ```
@@ -223,10 +223,29 @@ python tools/metrics_reference.py    && ./tests/compare_metrics         # 32 用
   逐参数中心差分（`grad_w`/`grad_b`/`dx` 最大误差均 <1.3e-9），并顺带校验
   `conv2d_param_count == out_channels*cg*kh*kw + out_channels`。
 
+- **`Conv1d` / `ConvTranspose2d`：5 + 5 种配置全部逐位相同（容差 0）**，`compare_conv` 的项数
+  从 30 涨到 70。这两个模块的思路与 `Conv2d` 不同，是照 Python 原样搬的：
+  - `Conv1d` 不用 im2col，就是 `total = biases[oc]` 起步、按 `ic -> kk` 朴素累加的三重循环
+    （Python 里就是 `total += w[ic][kk] * x[idx]`），所以 C 侧也不能图省事改成点积；
+    `grad_b` 是 `sum(d)` = Neumaier，`grad_w` / `dx` 都是朴素 `+=`。
+  - `ConvTranspose2d` 的权重布局是 `[cin][og][kh][kw]`（PyTorch 的 `(in, out/groups, kh, kw)`），
+    **与 `Conv2d` 的 `[oc][cg][kh][kw]` 不同**；前向先把输出整体填成 `bias[co]` 再散写，
+    `grad_b` 是「每行先 Neumaier，再对 `ho` 个行和 Neumaier」的两级求和，并且必须放在
+    `ci` 循环之外——放进循环会被放大 `cin/groups` 倍（这正是 Python 侧修过的 bug）。
+  - 两个模块各留一份 `xbuf`（输入快照，反向要读输入值）；`Conv2d` 里那套 `xpad` / `dcol`
+    组间复用的手法在这里不适用：没有 im2col，也没有可复用的补零缓冲。
+  - 参考脚本这边顺带揪出一个**变量遮蔽**的坑：新加的 `ConvTranspose2d` 循环复用了
+    `C/H/W` 与 `x/out/dout/dx` 这几个名字，导致 `conv_reference.json` 里 `flatten` 段的元数据
+    （2×3×4）和实际数组（最后一个转置卷积用例的 2×5×5）对不上，`compare_conv` 于是报
+    Flatten 超差。修法是把 Flatten 段的结果立刻存进 `flat_*` 独立变量再组装 JSON。
+    这类错误只会让参考数据自相矛盾，不会让 C 侧算错；但如果只看 `forward` 一项，
+    很容易误判成 C 的 bug。
 覆盖：BatchNorm1d（训练 forward/反向 dx/grad_gamma/grad_beta/running 统计量/mean/var/inv_std/x_hat、
 推理 forward）、LayerNorm（forward/反向/参数梯度/中间量）、Dropout（灌入 Python 的 mask 后逐位比对）、
 Conv2d（六种配置的 forward/grad_w/grad_b/dx：默认 2 组、groups=2、groups=C 的深度卷积、
-dilation=2、groups+dilation+stride 叠加）、MaxPool2d（两种配置）、Flatten。
+dilation=2、groups+dilation+stride 叠加）、Conv1d（五种配置：默认、stride+padding、分组、深度、
+分组+大 stride+大 padding）、ConvTranspose2d（五种配置：默认、stride 2 + output_padding、分组、
+深度、分组+stride+output_padding 叠加）、MaxPool2d（两种配置）、Flatten。
 
 `compare_llm` 比对 CausalLM 的八段：前向 logits、loss + 19 个梯度块、一步 Adam 后的参数、
 训练 3 轮后的参数与 eval loss（含 perplexity）、贪心生成的 token、top_p 确定性生成、
