@@ -26,6 +26,7 @@
 | Python | C | 状态 |
 |--------|---|------|
 | `Layer` / `MLP` / 四个优化器 / `Model.fit` | `ai.c` | 已完成，逐位一致 + 零分配 |
+| `focal_loss` / `bce_loss` / `bce_with_logits_loss` / `huber_loss` | `losses.c` | 已完成：48 个标量/数组里 47 个逐位相同，仅 1 个 loss 因 `pow` 差 1 ULP（5.551e-17）；`LossKind` 扩到 6 个，训练与验证共用 `trainer_loss_apply` |
 | `Conv2d` / `MaxPool2d` / `Flatten` | `layers_conv.c` | 已完成，12 项逐位一致 |
 | `Dropout` / `BatchNorm1d` / `LayerNorm` | `layers_norm.c` | 已完成，21 项逐位一致 |
 | `RNNCell/RNN` / `LSTMCell/LSTM` / `GRUCell/GRU` + step cache | `rnn.c` | 已完成 |
@@ -46,7 +47,8 @@ cd c
 
 # 没有 make 时（Windows/MinGW 与 Linux/macOS 通用）
 gcc -std=c17 -O2 -Wall -Wextra -o demo demo.c ai.c tensor.c layers_conv.c \
-    layers_norm.c rnn.c attention.c llm.c containers.c json.c model_io.c text.c sched.c -lm
+    layers_norm.c rnn.c attention.c llm.c containers.c json.c model_io.c text.c \
+    optim.c sched.c activations.c losses.c -lm
 ./demo
 
 # 有 make 时
@@ -60,7 +62,7 @@ make check      # 与 Python 版做数值等价比对
 
 ```bash
 SRC="ai.c tensor.c layers_conv.c layers_norm.c rnn.c attention.c llm.c containers.c \
-     json.c model_io.c text.c sched.c model_high.c"
+     json.c model_io.c text.c optim.c sched.c activations.c losses.c model_high.c"
 gcc -std=c17 -O2 -Wall -Wextra -o tests/compare_llm tests/compare_llm.c $SRC -lm
 gcc -std=c17 -O2 -Wall -Wextra -o tests/test_llm_ext tests/test_llm_ext.c $SRC -lm
 python tools/llm_reference.py && ./tests/compare_llm   # 6 段比对
@@ -78,7 +80,8 @@ python tools/llm_reference.py && ./tests/compare_llm   # 6 段比对
 
 ```
 c/
-├── ai.h / ai.c            全连接层、MLP、损失、四个优化器、训练循环、预测/评分
+├── ai.h / ai.c            全连接层、MLP、MSE/CE、四个优化器、训练循环、预测/评分
+├── losses.h / losses.c    focal / bce / bce_with_logits / huber（含 Trainer 分发）
 ├── tensor.h / tensor.c    张量类型 + 通用模块 vtable（供容器类使用）
 ├── numeric.h              与 Python 对齐的 Neumaier 补偿求和原语
 ├── layers_conv.h/.c       Conv2d / MaxPool2d / Flatten
@@ -164,6 +167,7 @@ python tools/adafactor_reference.py   && ./tests/compare_adafactor      # 5 用�
 python tools/sched_extra_reference.py && ./tests/compare_sched_extra    # 104 项
 python tools/rmsnorm_reference.py     && ./tests/compare_rmsnorm        # 36 数组 153 值
 python tools/activations_reference.py && ./tests/compare_activations    # 27 数组
+python tools/loss_reference.py       && ./tests/compare_loss            # 24 用例 48 数组
 ```
 
 - **Lion / Adafactor / WarmupLR / ReduceLROnPlateau / RMSNorm：全部逐位相同**
@@ -178,6 +182,19 @@ python tools/activations_reference.py && ./tests/compare_activations    # 27 数
   softplus/mish/dmish 因 `log1p`/`tanh` 有 3–15% 的输入差 1 ULP（最大绝对差 2.220e-16）。
   这些用例在参考 JSON 里按 (用例, 函数) 标 `tol=1e-12`（绝对）并附 `func_notes` 说明，
   `compare_activations` 会把容差和逐位比例一起打印出来，不存在静默放宽容差。
+- **损失族（focal / bce / bce_with_logits / huber）：48 个标量/数组里 47 个逐位相同**。
+  唯一不是逐位的是 `gamma3_alpha2` 的 loss（C 0.39583759616963481 vs
+  Python 0.39583759616963488，差 5.551e-17）：`pow(0.6, 3.0)` 在 msvcrt 返回精确立方
+  0.216、UCRT 返回 0.21599999999999997；同一用例的 3 个梯度值**逐位相同**。参考 JSON 里
+  这一条标 `tol=1e-12` 并写明原因，其余 23 个用例的 `tol` 都是 0。
+- 这四种损失不只在 `losses.c` 里独立可测，也接进了训练器：`LossKind` 从 2 个扩到 6 个
+  （`LOSS_FOCAL/LOSS_BCE/LOSS_BCE_LOGITS/LOSS_HUBER`），默认参数 `gamma=2, alpha=-1（不做
+  加权）, delta=1, eps=1e-12` 与 Python 的默认实参一致，用 `trainer_set_loss_params` /
+  `trainer_set_focal` 修改。训练路径（`trainer_accumulate`）与验证路径原先各写一份
+  `if (LOSS_MSE) ... else ...` 二分，新损失进来会变成四个分叉；现统一成
+  `trainer_loss_apply(t, pred, y, od, y_idx, grad)`，两条路径共用，验证时把梯度写进
+  `grad_buf` 而不覆盖 `pred`。`tests/test_loss.c` 的第 [6] 节验证「训练返回的 loss 与直接
+  调用 `focal_loss_grad` 逐位相同」，也就是分发确实接对了。
 
 覆盖：BatchNorm1d（训练 forward/反向 dx/grad_gamma/grad_beta/running 统计量/mean/var/inv_std/x_hat、
 推理 forward）、LayerNorm（forward/反向/参数梯度/中间量）、Dropout（灌入 Python 的 mask 后逐位比对）、

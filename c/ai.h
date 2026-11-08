@@ -42,7 +42,11 @@ typedef enum {
 /* ---------- 损失函数 ---------- */
 typedef enum {
     LOSS_MSE = 0,
-    LOSS_CROSS_ENTROPY = 1
+    LOSS_CROSS_ENTROPY = 1,
+    LOSS_FOCAL = 2,          /* pred 是 softmax 概率 + 类别下标 */
+    LOSS_BCE = 3,            /* pred 是概率，y 是 0/1 向量 */
+    LOSS_BCE_LOGITS = 4,     /* pred 是 logits（内部 sigmoid） */
+    LOSS_HUBER = 5           /* 回归，delta 可配 */
 } LossKind;
 
 /* ---------- 优化器 ---------- */
@@ -113,6 +117,14 @@ typedef struct {
     int buf_dim;
     int *idx_buf;      /* 打乱/切分用的索引缓冲 */
     int idx_dim;
+    /* 额外损失的参数（trainer_init 里给默认值；用 trainer_set_loss_params 改）：
+     *   LOSS_FOCAL       : loss_gamma、loss_alpha（<0 表示不做 alpha 加权）
+     *   LOSS_BCE         : loss_eps
+     *   LOSS_HUBER       : loss_delta */
+    double loss_gamma;
+    double loss_alpha;
+    double loss_delta;
+    double loss_eps;
 } Trainer;
 
 /* 初始化训练器（把结构体清零并设置好网络/损失/优化器），
@@ -121,6 +133,15 @@ void trainer_init(Trainer *t, MLP *net, LossKind loss, OptKind kind, double lr);
 
 /* 释放 trainer 内部缓冲（不释放 net） */
 void trainer_release(Trainer *t);
+
+/* 设置额外损失的参数（只对相应 LossKind 生效；非法值立刻退出）：
+ *   gamma >= 0；alpha < 0 表示不做 alpha 加权；delta > 0；eps 在 (0, 0.5) 内。
+ * 默认值：gamma=2.0、alpha=-1、delta=1.0、eps=1e-12（与 AI.py 的默认参数一致）。 */
+void trainer_set_loss_params(Trainer *t, double gamma, double alpha,
+                             double delta, double eps);
+
+/* 只改 focal 的 gamma / alpha（等价于 set_loss_params 里对应两项） */
+void trainer_set_focal(Trainer *t, double gamma, double alpha);
 
 /* ================= MLP ================= */
 

@@ -9,6 +9,7 @@
 #include "ai.h"
 #include "sched.h"
 #include "activations.h"
+#include "losses.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -467,7 +468,30 @@ void trainer_init(Trainer *t, MLP *net, LossKind loss, OptKind kind, double lr)
     memset(t, 0, sizeof(*t));
     t->net = net;
     t->loss = loss;
+    /* 额外损失的默认参数，与 AI.py 的默认实参一致 */
+    t->loss_gamma = 2.0;
+    t->loss_alpha = -1.0;   /* -1 = 不做 alpha 加权（Python 的 alpha=None） */
+    t->loss_delta = 1.0;
+    t->loss_eps = 1e-12;
     optimizer_init(&t->opt, kind, lr);
+}
+
+void trainer_set_loss_params(Trainer *t, double gamma, double alpha,
+                             double delta, double eps)
+{
+    if (!(gamma >= 0.0)) ai_die("trainer_set_loss_params", "gamma 必须 >= 0");
+    if (!(delta > 0.0)) ai_die("trainer_set_loss_params", "delta 必须 > 0");
+    if (!(eps > 0.0) || !(eps < 0.5))
+        ai_die("trainer_set_loss_params", "eps 必须在 (0, 0.5) 内");
+    t->loss_gamma = gamma;
+    t->loss_alpha = alpha;
+    t->loss_delta = delta;
+    t->loss_eps = eps;
+}
+
+void trainer_set_focal(Trainer *t, double gamma, double alpha)
+{
+    trainer_set_loss_params(t, gamma, alpha, t->loss_delta, t->loss_eps);
 }
 
 void trainer_release(Trainer *t)
@@ -504,6 +528,34 @@ static void trainer_ensure_buf(Trainer *t, int out_dim)
     t->buf_dim = out_dim;
 }
 
+/* 按当前 LossKind 算损失；grad 非 NULL 时同时写出对 pred/logits 的梯度。
+ * 新损失统一走这里，训练与验证两条路径不会再各写一份 if/else。 */
+static double trainer_loss_apply(Trainer *t, const double *pred, const double *y,
+                                 int od, int y_idx, double *grad)
+{
+    switch (t->loss) {
+    case LOSS_MSE:
+        if (grad) mse_grad(pred, y, od, grad);
+        return mse_loss(pred, y, od);
+    case LOSS_CROSS_ENTROPY:
+        return ce_loss_grad(pred, od, y_idx, grad);
+    case LOSS_FOCAL:
+        return focal_loss_grad(pred, od, y_idx, t->loss_gamma, t->loss_alpha, grad);
+    case LOSS_BCE:
+        if (!y) ai_die("trainer_loss_apply", "LOSS_BCE 需要 y（0/1 向量）");
+        return bce_loss_grad(pred, y, od, t->loss_eps, grad);
+    case LOSS_BCE_LOGITS:
+        if (!y) ai_die("trainer_loss_apply", "LOSS_BCE_LOGITS 需要 y（0/1 向量）");
+        return bce_with_logits_loss_grad(pred, y, od, grad);
+    case LOSS_HUBER:
+        if (!y) ai_die("trainer_loss_apply", "LOSS_HUBER 需要 y（回归目标）");
+        return huber_loss_grad(pred, y, od, t->loss_delta, grad);
+    default:
+        ai_die("trainer_loss_apply", "未知 LossKind");
+        return 0.0;
+    }
+}
+
 double trainer_accumulate(Trainer *t, const double *x, const double *y, int y_idx)
 {
     int out_dim = t->net->layers[t->net->n_layers - 1].fan_out;
@@ -512,13 +564,7 @@ double trainer_accumulate(Trainer *t, const double *x, const double *y, int y_id
     double *grad = t->grad_buf;
 
     mlp_forward(t->net, x, pred);
-    double loss;
-    if (t->loss == LOSS_MSE) {
-        loss = mse_loss(pred, y, out_dim);
-        mse_grad(pred, y, out_dim, grad);
-    } else {
-        loss = ce_loss_grad(pred, out_dim, y_idx, grad);
-    }
+    double loss = trainer_loss_apply(t, pred, y, out_dim, y_idx, grad);
     mlp_backward(t->net, grad);
     return loss;
 }
@@ -684,8 +730,7 @@ int trainer_fit(Trainer *t, const Dataset *train, const Dataset *val,
                 trainer_ensure_buf(t, od);
                 double *pred = t->pred_buf;
                 mlp_forward(t->net, x, pred);
-                if (t->loss == LOSS_MSE) vloss += mse_loss(pred, y, od);
-                else vloss += ce_loss_grad(pred, od, y_idx, pred);
+                vloss += trainer_loss_apply(t, pred, y, od, y_idx, t->grad_buf);
             }
             vloss /= (double)vn;
             if (history_val) history_val[epoch - 1] = vloss;
