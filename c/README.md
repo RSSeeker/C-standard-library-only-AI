@@ -12,7 +12,7 @@
 
 | 项目 | 状态 |
 |------|------|
-| 数值等价性 | MLP 前向/梯度、Conv2d/Conv1d/ConvTranspose2d/MaxPool2d/Flatten、BatchNorm1d/BatchNorm2d/LayerNorm/GroupNorm/InstanceNorm/DropPath/Dropout，LoRA/EMA/SWA/Lookahead、注意力组件、MHA/FFN（relu 与 gelu/sigmoid/linear/silu/mish/elu/selu）/TransformerEncoderLayer 前向/反向 **全部与 Python 逐位一致**（0.000e+00，含 window/RoPE/GQA/MQA、ALiBi 与注意力权重 dropout 的注入 mask 对拍，见第 8 节） |
+| 数值等价性 | MLP 前向/梯度、Conv2d/Conv1d/ConvTranspose2d/MaxPool2d/Flatten、BatchNorm1d/BatchNorm2d/LayerNorm/GroupNorm/InstanceNorm/DropPath/Dropout，LoRA/EMA/SWA/Lookahead、注意力组件、MHA/FFN（relu 与 gelu/sigmoid/linear/silu/mish/elu/selu）/TransformerEncoderLayer 前向/反向 **全部与 Python 逐位一致**（0.000e+00，含 window/RoPE/GQA/MQA、ALiBi 与注意力权重 dropout 的注入 mask 对拍，见第 8 节） |、TokenClassificationHead/MultiLabelHead/MoE。
 | 训练循环 | **零分配**（预热后 `malloc` 调用次数 = 0，用链接器 `--wrap` 统计，与机器负载无关） |
 | 性能 | MLP[64,256,128,8]、5 万参数、1000 样本 × 5 轮：C 约 1.3 s vs Python 约 77 s（**约 58–68 倍**） |
 | 存档互通 | 与 Python 的 `save_model` / `load_model` **双向互通**，两个方向都逐位一致 |
@@ -33,6 +33,7 @@
 | `BatchNorm2d` / `GroupNorm` / `InstanceNorm` / `DropPath` / `Dropout` / `BatchNorm1d` / `LayerNorm` | `layers_norm.c` | 已完成，50 项逐位一致（BN2d 训练 6 项 + 推理 5 项、GroupNorm 4 项、InstanceNorm 4 项、DropPath 3 情形 × 3 项，另含原有 22 项） |
 | `augment_cutmix` / `augment_cutout` / `augment_randaugment` / `mixup` | `augment.c` | 已完成，24 项逐位一致（随机量由参考脚本注入，见下） |
 | `LoRA` / `EMA` / `SWA` / `Lookahead` | `adapt.c` | 已完成，28 个数组逐位一致（LoRA 的 forward / dx / grad_A / grad_B / merge / 合并后的 forward 与 dx；EMA / SWA / Lookahead 的更新顺序） |
+| `TokenClassificationHead` / `MultiLabelHead` / `MoE` | `heads.c` | 已完成，70 项数组逐位相同 + 39 项闭式与差分自测 |
 | `RNNCell/RNN` / `LSTMCell/LSTM` / `GRUCell/GRU` + step cache | `rnn.c` | 已完成 |
 | `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成（含 `causal` 因果掩码开关、`mha_set_window` 滑动窗口、`mha_set_rope` 旋转位置编码、`mha_create_gqa` 的 GQA/MQA、`mha_set_alibi` + `tel_set_alibi` / `te_set_alibi` 的 ALiBi 距离偏置、`mha_forward_step` 增量前向、`mha_set_training` + `mha_set_attn_mask` 的注意力权重 dropout） |
 | `MultiHeadAttention(causal=True)` / `CausalLM`（LLM） | `attention.c` + `llm.c` | 已完成：因果掩码、teacher forcing 训练、自回归生成、`llm_generate_p`（nucleus 采样）、`llm_generate_ex` / `llm_generate_cached_ex`（min_p + repetition/presence/frequency 罚分 + no_repeat_ngram）、`llm_perplexity` |
@@ -51,7 +52,7 @@ cd c
 
 # 没有 make 时（Windows/MinGW 与 Linux/macOS 通用）
 gcc -std=c17 -O2 -Wall -Wextra -o demo demo.c ai.c tensor.c layers_conv.c \
-    layers_norm.c adapt.c rnn.c attention.c llm.c containers.c json.c model_io.c text.c \
+    layers_norm.c adapt.c heads.c rnn.c attention.c llm.c containers.c json.c model_io.c text.c \
     optim.c sched.c activations.c losses.c metrics.c augment.c -lm
 ./demo
 
@@ -65,7 +66,7 @@ make check      # 与 Python 版做数值等价比对
 扩展特性自测，不需要额外的 c/ 源文件）：
 
 ```bash
-SRC="ai.c tensor.c layers_conv.c layers_norm.c adapt.c rnn.c attention.c llm.c containers.c \
+SRC="ai.c tensor.c layers_conv.c layers_norm.c adapt.c heads.c rnn.c attention.c llm.c containers.c \
      json.c model_io.c text.c optim.c sched.c activations.c losses.c metrics.c model_high.c \
      augment.c"
 gcc -std=c17 -O2 -Wall -Wextra -o tests/compare_llm tests/compare_llm.c $SRC -lm
@@ -94,6 +95,7 @@ c/
 ├── layers_conv.h/.c       Conv2d / Conv1d / ConvTranspose2d / MaxPool2d / Flatten
 ├── layers_norm.h/.c       Dropout / BatchNorm1d / BatchNorm2d / LayerNorm / GroupNorm / InstanceNorm / DropPath
 ├── adapt.h/.c            LoRA / EMA / SWA / Lookahead
+├── heads.h/.c            TokenClassificationHead / MultiLabelHead / MoE
 ├── augment.h / augment.c   数据增广内核（brightness / contrast / shift / rotate90 / cutout / cutmix / mixup / randaugment）
 ├── rnn.h / rnn.c          RNNCell/RNN、LSTMCell/LSTM、GRUCell/GRU（含 step cache）
 ├── attention.h / .c       MultiHeadAttention / FeedForward / TransformerEncoder / PositionalEncoding / Embedding（含 causal 掩码、滑动窗口、RoPE、GQA/MQA）
@@ -163,6 +165,7 @@ Python 写 -> C 读：  最大差异 0.000e+00  PASS   （含 softmax 输出层�
 ```
 python tools/ffn_reference.py && ./tests/compare_ffn       # 16 用例 104 数组
 python tools/adapt_reference.py && ./tests/compare_adapt   # 28 数组，全部 0.000e+00
+python tools/heads_reference.py && ./tests/compare_heads   # 70 数组，全部 0.000e+00
 python tools/norm_reference.py && ./tests/compare_norm     # 50 项，全部 0.000e+00
 python tools/conv_reference.py && ./tests/compare_conv     # 70 项，全部 0.000e+00
 python tools/llm_reference.py && ./tests/compare_llm      # 6 段，见下
@@ -269,6 +272,7 @@ dilation=2、groups+dilation+stride 叠加）、Conv1d（五种配置：默认�
 
 覆盖：`FeedForward` 的 8 种中间层激活（`ff_create_ex` / `ff_set_activation`，relu 分支逐字保留，非 relu 时缓存激活前的 `z` 供反向取导数；GELU 的 `u = C*(z + 0.044715*z^3)` 与 sigmoid 的 `z>=0` 免溢出分支都照抄 Python）、
 覆盖：`BatchNorm2d`（训练 forward、反向 dx / grad_gamma / grad_beta、running_mean / running_var
+覆盖：`TokenClassificationHead`（训练 forward / loss / dlogits / dx / grad_W / grad_b / predict 与 mask）、`MultiLabelHead`（BCE-with-logits 的平均损失、sigmoid 概率、`predict` 的 `>=` 阈值）、`MoE`（只在 top-k 上做 softmax 的路由、按专家分组的 FFN 前向与反向、门控梯度 `dz = q_k(c_k - Σ q c)`）；70 项数组逐位相同（worst `4.163e-17`；MoE 的 gelu 走 exp/tanh 故容差 1e-12），`tests/test_heads.c` 另加 39 项闭式 + 逐参数差分 + 参数计数验证（`top_k = num_experts` 时门控才有非零梯度）。
 覆盖：LoRA（前向 / dx / grad_A / grad_B / merge）、EMA / SWA / Lookahead 的更新顺序与扁平快照。`numeric.h` 是 header-only（`static inline`），链接时不需要 `numeric.c`；`compare_adapt` 的矩阵-向量内积必须用 `dot_neumaier`（对齐 Python 的 `sum(map(mul, ...))`）。
 更新、mean / inv、x_hat；推理 forward 与「推理不更新 running 统计量」）、`GroupNorm`（forward、
 反向三项、组内 mean / inv、x_hat）、`InstanceNorm`（`groups == channels` 的特例，逐通道标准化闭式）、
