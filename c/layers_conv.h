@@ -63,7 +63,17 @@ typedef struct {
     int sh, sw;
     int ph, pw;
 
-    /* 参数与梯度：W 展平成 [oc][ic][kh][kw]（oc 最外层，b 长度 out_channels），
+    /* 分组与膨胀：对应 Python 的 groups / dilation。
+     * 两者都取 1 时下面的实现走的循环顺序与"没有这两个参数"的旧版完全相同，
+     * 因此逐位一致性不受影响 */
+    int groups;
+    int cg;                 /* = in_channels / groups，每组吃进的输入通道数 */
+    int og;                 /* = out_channels / groups，每组产出的输出通道数 */
+    int dh, dw;             /* 膨胀率 */
+    int kh_eff, kw_eff;     /* 有效感受野 (k-1)*d + 1，输出尺寸按它算 */
+
+    /* 参数与梯度：W 展平成 [oc][ic][kh][kw]（oc 最外层；ic 只遍历 oc 所属组的 cg 个
+     * 输入通道，groups=1 时 cg == in_channels），b 长度 out_channels。
      * 与 Python 的 self.weights / self.biases / self.grad_w / self.grad_b 同序 */
     double *W;
     double *b;
@@ -80,14 +90,15 @@ typedef struct {
     int in_c, in_h, in_w;   /* 输入形状 (C,H,W) */
     int out_h, out_w;       /* 输出空间尺寸 */
     int pad_h, pad_w;       /* 填充后的尺寸 H+2*ph, W+2*pw */
-    double *xpad;           /* (C, Hp, Wp)，零填充后的输入 */
-    double *col;            /* im2col 矩阵 (col_rows, col_cols)，行主序 = Python 的 self.x_col */
-    int col_rows;           /* C*kh*kw */
+    double *xpad;           /* (cg, Hp, Wp)，零填充后的输入；按组复用（groups=1 时即 C） */
+    double *col;            /* im2col 矩阵 (groups*col_rows, col_cols)，按组拼接，行主序；
+                             * groups=1 时即 Python 的 self.x_col */
+    int col_rows;           /* cg*kh*kw（一组），整体长度 = groups*col_rows = C*kh*kw */
     int col_cols;           /* Ho*Wo */
 
     /* 反向缓冲（绑定尺寸时一次性分配，热路径零分配） */
-    double *dcol;           /* (col_rows, col_cols) = Python backward 里的 dcol */
-    double *dxpad;          /* (C, Hp, Wp) = Python 的 dx_padded */
+    double *dcol;           /* (col_rows, col_cols) = Python backward 里"某一组"的 dcol */
+    double *dxpad;          /* (cg, Hp, Wp) = 某一组的 dx_padded */
     double *scratch;        /* 长度 col_rows：前向点积的乘积暂存，见 conv2d_forward 注释 */
 
     int bound;              /* 1 = 已绑定输入尺寸 */
@@ -96,17 +107,28 @@ typedef struct {
 /* 创建一个卷积层：kernel/stride/padding 均为标量（对应 Python 的 int 形式）。
  * 要求 kernel_size >= 1、stride >= 1、padding >= 0，否则报错退出。
  * 与 ai.c 的 mlp_create 一致：参数只做零初始化，需要 He 随机初始化时由调用方
- * 自己调 conv2d_init_he(conv, &seed)（Python 版是在构造函数里直接 He 初始化的） */
+ * 自己调 conv2d_init_he(conv, &seed)（Python 版是在构造函数里直接 He 初始化的）
+ *
+ * conv2d_create() 等价于 conv2d_create_ex(..., groups=1, dilation=1)；带分组或
+ * 膨胀卷积请用后者。groups 必须能同时整除 in_channels 与 out_channels，
+ * dilation 必须 >= 1（对应 Python 的 Conv2d(..., groups=, dilation=)） */
 Conv2d *conv2d_create(int in_channels, int out_channels,
                       int kernel_size, int stride, int padding);
+
+Conv2d *conv2d_create_ex(int in_channels, int out_channels,
+                         int kernel_size, int stride, int padding,
+                         int groups, int dilation);
 void    conv2d_free(Conv2d *self);
 
-/* 绑定输入的空间尺寸并一次性分配 im2col / dcol / dxpad / 暂存缓冲。
+/* 绑定输入的空间尺寸并一次性分配 im2col / dcol / dxpad / 暂存缓冲
+ * （xpad / dxpad / dcol / scratch 只按"一组"分配，组间复用；col 按组拼接，
+ *  总长度 = in_channels*kh*kw*Ho*Wo，与 groups=1 时相同）。
  * 必须在第一次 forward 之前调用（或依赖 forward 的懒绑定）；重复绑定同一形状是空操作，
  * 形状变化时会重新分配——只应在"换输入尺寸"这种冷路径上调用 */
 void conv2d_bind_shape(Conv2d *self, int C, int H, int W);
 
-/* 输出空间尺寸，对应 Python 的 _img_shape：ho = (H + 2*ph - kh)//sh + 1 */
+/* 输出空间尺寸，对应 Python 的 _img_shape：ho = (H + 2*ph - kh_eff)//sh + 1，
+ * 其中 kh_eff = (kh-1)*dh + 1（对应 Python 的 kh_eff） */
 void conv2d_out_shape(const Conv2d *self, int H, int W, int *ho, int *wo);
 
 void conv2d_zero_grad(Conv2d *self);
@@ -115,13 +137,15 @@ void conv2d_backward(Conv2d *self, const Tensor *dout, Tensor *dx);
 int  conv2d_param_count(Conv2d *self);
 
 /* 从外部灌入权重（跨语言等价性验证用）：
- * W 按 Python 的 self.weights[oc][ic][kh][kw] 顺序展平（oc 最外层），长度
- * out_channels*in_channels*kh*kw；b 长度 out_channels。b 可以传 NULL（保持原值） */
+ * W 按 Python 的 self.weights[oc][ic][kh][kw] 顺序展平（oc 最外层，ic 遍历该 oc
+ * 所属组的 cg 个通道），长度 out_channels*cg*kh*kw（groups=1 时即
+ * out_channels*in_channels*kh*kw）；b 长度 out_channels。b 可以传 NULL（保持原值） */
 void conv2d_set_weights(Conv2d *self, const double *W, const double *b);
 /* 取出当前权重（两个目标都可以传 NULL 表示不需要） */
 void conv2d_get_weights(const Conv2d *self, double *W, double *b);
 
-/* He 初始化：std = sqrt(2 / fan_in)，fan_in = in_channels*kh*kw；
+/* He 初始化：std = sqrt(2 / fan_in)，fan_in = cg*kh*kw（与 Python 的
+ * fan_in = cg*kh*kw 一致；groups=1 时即 in_channels*kh*kw）；
  * 与 ai.c 的 he_init 一样用调用方传入的 xorshift 状态（不追求与 Python 逐位一致） */
 void conv2d_init_he(Conv2d *self, unsigned long long *rng_state);
 

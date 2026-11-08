@@ -75,12 +75,18 @@ int main(int argc, char **argv)
         int W = json_int(need(c, "W", "conv"), 0);
         int ho = json_int(need(c, "ho", "conv"), 0);
         int wo = json_int(need(c, "wo", "conv"), 0);
+        /* groups / dilation 是后加的字段：老参考文件里没有时退回默认值 1 */
+        const JsonValue *jg = json_get(c, "groups");
+        const JsonValue *jd = json_get(c, "dilation");
+        int G = jg ? json_int(jg, 1) : 1;
+        int D = jd ? json_int(jd, 1) : 1;
+        int cg = C / G;
 
-        printf("Conv2d[%d] C=%d OC=%d K=%d S=%d P=%d  %dx%d -> %dx%d\n",
-               ci, C, OC, K, S, P, H, W, ho, wo);
+        printf("Conv2d[%d] C=%d OC=%d K=%d S=%d P=%d groups=%d dilation=%d  %dx%d -> %dx%d\n",
+               ci, C, OC, K, S, P, G, D, H, W, ho, wo);
 
-        Conv2d *conv = conv2d_create(C, OC, K, S, P);
-        int nW = OC * C * K * K;
+        Conv2d *conv = conv2d_create_ex(C, OC, K, S, P, G, D);
+        int nW = OC * cg * K * K;
         double *w = malloc((size_t)nW * sizeof(double));
         double *b = malloc((size_t)OC * sizeof(double));
         arr_vals(need(c, "weights", "conv"), w, nW);
@@ -114,10 +120,10 @@ int main(int argc, char **argv)
         {
             int k = 0;
             for (int oc = 0; oc < OC; oc++)
-                for (int ic = 0; ic < C; ic++)
+                for (int ic = 0; ic < cg; ic++)
                     for (int kh = 0; kh < K; kh++)
                         for (int kw = 0; kw < K; kw++)
-                            got_w[k++] = conv->gW[((oc * C + ic) * K + kh) * K + kw];
+                            got_w[k++] = conv->gW[((oc * cg + ic) * K + kh) * K + kw];
         }
         for (int oc = 0; oc < OC; oc++) got_b[oc] = conv->gb[oc];
         arr_vals(need(c, "grad_w", "conv"), want, nW);

@@ -31,12 +31,22 @@ def main():
     rnd = random.Random(20240707)
     cases = []
 
-    # ---------- Conv2d：两种配置 ----------
-    for (C, OC, K, S, P, H, W) in ((1, 2, 2, 1, 0, 5, 5), (2, 3, 3, 2, 1, 6, 6)):
-        conv = Conv2d(C, OC, K, S, P)
-        # 灌入确定权重（按 Python 的 weights[oc][ic][kh][kw] 展平顺序）
+    # ---------- Conv2d：前两条是默认路径，后四条覆盖 groups / dilation ----------
+    # 元组含义：(C, OC, K, S, P, H, W, groups, dilation)
+    conv_cfgs = (
+        (1, 2, 2, 1, 0, 5, 5, 1, 1),
+        (2, 3, 3, 2, 1, 6, 6, 1, 1),
+        (4, 6, 3, 1, 1, 7, 7, 2, 1),     # 分组卷积
+        (4, 4, 3, 1, 1, 6, 6, 4, 1),     # 深度卷积（groups == C）
+        (2, 3, 3, 1, 2, 7, 7, 1, 2),     # 膨胀卷积
+        (4, 6, 3, 2, 2, 9, 9, 2, 2),     # 分组 + 膨胀 + stride
+    )
+    for (C, OC, K, S, P, H, W, G, D) in conv_cfgs:
+        conv = Conv2d(C, OC, K, S, P, groups=G, dilation=D)
+        cg = C // G
+        # 灌入确定权重（按 Python 的 weights[oc][ic][kh][kw] 展平顺序，ic 只到 cg）
         conv.weights = [[[[rnd.uniform(-0.5, 0.5) for _ in range(K)]
-                          for _ in range(K)] for _ in range(C)] for _ in range(OC)]
+                          for _ in range(K)] for _ in range(cg)] for _ in range(OC)]
         conv.biases = [rnd.uniform(-0.2, 0.2) for _ in range(OC)]
 
         x = make_image(C, H, W, rnd)
@@ -46,10 +56,11 @@ def main():
         dx = conv.backward([[ [v for v in row] for row in ch] for ch in dout])
 
         flat_w = [conv.weights[oc][ic][kh][kw]
-                  for oc in range(OC) for ic in range(C)
+                  for oc in range(OC) for ic in range(cg)
                   for kh in range(K) for kw in range(K)]
         cases.append({
             "C": C, "OC": OC, "K": K, "S": S, "P": P, "H": H, "W": W,
+            "groups": G, "dilation": D,
             "ho": ho, "wo": wo,
             # 注意：键名不能叫 "W"——那会和输入宽度 W 撞名（Python dict 后者覆盖前者）
             "weights": flat_w, "b": list(conv.biases),
@@ -58,7 +69,7 @@ def main():
             "dout": [v for ch in dout for row in ch for v in row],
             "dx": [v for ch in dx for row in ch for v in row],
             "grad_w": [conv.grad_w[oc][ic][kh][kw]
-                       for oc in range(OC) for ic in range(C)
+                       for oc in range(OC) for ic in range(cg)
                        for kh in range(K) for kw in range(K)],
             "grad_b": list(conv.grad_b),
         })

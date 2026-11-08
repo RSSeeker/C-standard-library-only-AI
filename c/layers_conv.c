@@ -105,16 +105,16 @@ static double rng_gauss(unsigned long long *s)
 
 /* ============================== Conv2d ============================== */
 
-/* 对应 Python 的 _img_shape：ho = (H + 2*ph - kh)//sh + 1
- * Python 用 // 向下取整；先要求 (H + 2*ph - kh) >= 0，此时 C 的截断除法与
+/* 对应 Python 的 _img_shape：ho = (H + 2*ph - kh_eff)//sh + 1
+ * Python 用 // 向下取整；先要求 (H + 2*ph - kh_eff) >= 0，此时 C 的截断除法与
  * // 结果相同。负数时 Python 会得到 <=0 的输出尺寸（空输出），C 的张量
  * 表示不出这种形状，直接报错退出 */
 static void conv_img_shape(const Conv2d *self, int H, int W, int *ho, int *wo)
 {
-    int dh = H + 2 * self->ph - self->kh;
-    int dw = W + 2 * self->pw - self->kw;
+    int dh = H + 2 * self->ph - self->kh_eff;
+    int dw = W + 2 * self->pw - self->kw_eff;
     if (dh < 0 || dw < 0)
-        die("conv2d", "输入比卷积核还小（H + 2*padding < kernel_size），Python 版此时是空输出");
+        die("conv2d", "输入比有效卷积核还小（H + 2*padding < kh_eff），Python 版此时是空输出");
     *ho = dh / self->sh + 1;
     *wo = dw / self->sw + 1;
 }
@@ -201,11 +201,13 @@ void conv2d_bind_shape(Conv2d *self, int C, int H, int W)
     self->out_h = ho; self->out_w = wo;
     self->pad_h = H + 2 * self->ph;
     self->pad_w = W + 2 * self->pw;
-    self->col_rows = C * self->kh * self->kw;
+    /* col_rows 是"一组"的行数；col 里拼 groups 份，所以 col_n 仍等于
+     * in_channels*kh*kw*P，与 groups=1 时的内存量完全相同 */
+    self->col_rows = self->cg * self->kh * self->kw;
     self->col_cols = ho * wo;
 
-    size_t pad_n = (size_t)C * self->pad_h * self->pad_w;   /* x_pad / dx_padded 的元素数 */
-    size_t col_n = (size_t)self->col_rows * self->col_cols;
+    size_t pad_n = (size_t)self->cg * self->pad_h * self->pad_w;  /* 按组复用的 x_pad / dx_padded */
+    size_t col_n = (size_t)C * self->kh * self->kw * self->col_cols;
 
     /* 这几个缓冲每次 forward/backward 都会先整体写满（memset 或逐元素赋值）再读，
      * 所以用 xmalloc 不做零初始化；权重/Adam 状态那种"必须从 0 开始"的才用 xcalloc */
@@ -217,23 +219,36 @@ void conv2d_bind_shape(Conv2d *self, int C, int H, int W)
     self->bound = 1;
 }
 
-Conv2d *conv2d_create(int in_channels, int out_channels,
-                      int kernel_size, int stride, int padding)
+Conv2d *conv2d_create_ex(int in_channels, int out_channels,
+                         int kernel_size, int stride, int padding,
+                         int groups, int dilation)
 {
     if (in_channels < 1 || out_channels < 1)
         die("conv2d_create", "in_channels / out_channels 必须为正");
     if (kernel_size < 1) die("conv2d_create", "kernel_size 必须 >= 1");
     if (stride < 1)      die("conv2d_create", "stride 必须 >= 1");
     if (padding < 0)     die("conv2d_create", "padding 必须 >= 0");
+    if (groups < 1)      die("conv2d_create", "groups 必须 >= 1");
+    if (in_channels % groups != 0)
+        die("conv2d_create", "in_channels 必须能被 groups 整除");
+    if (out_channels % groups != 0)
+        die("conv2d_create", "out_channels 必须能被 groups 整除");
+    if (dilation < 1)    die("conv2d_create", "dilation 必须 >= 1");
 
     Conv2d *self = xcalloc(1, sizeof(Conv2d));
     self->in_channels = in_channels;
     self->out_channels = out_channels;
+    self->groups = groups;
+    self->cg = in_channels / groups;
+    self->og = out_channels / groups;
     self->kh = self->kw = kernel_size;   /* 只支持方形核（Python 的 int 形式） */
     self->sh = self->sw = stride;
     self->ph = self->pw = padding;
+    self->dh = self->dw = dilation;
+    self->kh_eff = (self->kh - 1) * self->dh + 1;
+    self->kw_eff = (self->kw - 1) * self->dw + 1;
 
-    size_t w_n = (size_t)out_channels * in_channels * kernel_size * kernel_size;
+    size_t w_n = (size_t)out_channels * self->cg * kernel_size * kernel_size;
     self->W  = xcalloc(w_n, sizeof(double));
     self->b  = xcalloc((size_t)out_channels, sizeof(double));
     self->gW = xcalloc(w_n, sizeof(double));
@@ -250,6 +265,12 @@ Conv2d *conv2d_create(int in_channels, int out_channels,
     return self;
 }
 
+Conv2d *conv2d_create(int in_channels, int out_channels,
+                      int kernel_size, int stride, int padding)
+{
+    return conv2d_create_ex(in_channels, out_channels, kernel_size, stride, padding, 1, 1);
+}
+
 void conv2d_free(Conv2d *self)
 {
     if (!self) return;
@@ -260,21 +281,21 @@ void conv2d_free(Conv2d *self)
 void conv2d_zero_grad(Conv2d *self)
 {
     /* 与 Python 的 zero_grad 一致：只清梯度，保留前向缓存 */
-    memset(self->gW, 0, (size_t)self->out_channels * self->in_channels
+    memset(self->gW, 0, (size_t)self->out_channels * self->cg
                         * self->kh * self->kw * sizeof(double));
     memset(self->gb, 0, (size_t)self->out_channels * sizeof(double));
 }
 
 void conv2d_set_weights(Conv2d *self, const double *W, const double *b)
 {
-    size_t w_n = (size_t)self->out_channels * self->in_channels * self->kh * self->kw;
+    size_t w_n = (size_t)self->out_channels * self->cg * self->kh * self->kw;
     if (W) memcpy(self->W, W, w_n * sizeof(double));
     if (b) memcpy(self->b, b, (size_t)self->out_channels * sizeof(double));
 }
 
 void conv2d_get_weights(const Conv2d *self, double *W, double *b)
 {
-    size_t w_n = (size_t)self->out_channels * self->in_channels * self->kh * self->kw;
+    size_t w_n = (size_t)self->out_channels * self->cg * self->kh * self->kw;
     if (W) memcpy(W, self->W, w_n * sizeof(double));
     if (b) memcpy(b, self->b, (size_t)self->out_channels * sizeof(double));
 }
@@ -282,9 +303,9 @@ void conv2d_get_weights(const Conv2d *self, double *W, double *b)
 void conv2d_init_he(Conv2d *self, unsigned long long *rng_state)
 {
     /* 对应 Python __init__ 里的 He 初始化：
-     *   fan_in = in_channels * kh * kw;  std = sqrt(2.0 / fan_in)
+     *   fan_in = cg * kh * kw;  std = sqrt(2.0 / fan_in)
      * 生成顺序也和 Python 的嵌套列表推导一致：oc -> ic -> kh -> kw */
-    int fan_in = self->in_channels * self->kh * self->kw;
+    int fan_in = self->cg * self->kh * self->kw;
     double std = sqrt(2.0 / (double)fan_in);
     size_t w_n = (size_t)self->out_channels * fan_in;
     for (size_t i = 0; i < w_n; i++) self->W[i] = rng_gauss(rng_state) * std;
@@ -310,53 +331,63 @@ void conv2d_forward(Conv2d *self, const Tensor *x, Tensor *out)
 
     const int Ho = self->out_h, Wo = self->out_w;
     const int P = Ho * Wo;             /* = col_cols */
-    const int K = self->col_rows;      /* C*kh*kw */
+    const int Kg = self->col_rows;     /* cg*kh*kw：一组 im2col 的行数 */
     const int Hp = self->pad_h, Wp = self->pad_w;
+    const int CG = self->cg, OG = self->og;
 
     const int want_out[3] = { self->out_channels, Ho, Wo };
     tensor_check_shape(out, 3, want_out, "conv2d_forward(out)");
 
-    /* ---- 1) 零填充：对应 _pad；无 padding 时 Python 直接把 x 当 x_pad 用 ---- */
-    memset(self->xpad, 0, (size_t)C * Hp * Wp * sizeof(double));
-    for (int c = 0; c < C; c++) {
-        for (int h = 0; h < H; h++) {
-            memcpy(self->xpad + ((size_t)c * Hp + h + self->ph) * Wp + self->pw,
-                   x->data + ((size_t)c * H + h) * W,
-                   (size_t)W * sizeof(double));
-        }
-    }
+    /* 每组独立完成 pad -> im2col -> matmul。groups == 1 时循环只跑一次，
+     * 循环体内的顺序、索引表达式与旧版单组实现逐字相同（逐位不变） */
+    for (int g = 0; g < self->groups; g++) {
+        const int c0 = g * CG;          /* 本组第一个输入通道 */
+        const int oc0 = g * OG;         /* 本组第一个输出通道 */
+        double *xg_pad = self->xpad;    /* xpad 只按一组分配，组间复用 */
+        double *xg_col = self->col + (size_t)g * Kg * P;
 
-    /* ---- 2) im2col：逐元素对应 _im2col，行号 = c*kh*kw + kh*kw + kw ---- */
-    for (int c = 0; c < C; c++) {
-        for (int kh = 0; kh < self->kh; kh++) {
-            for (int kw = 0; kw < self->kw; kw++) {
-                int row = c * self->kh * self->kw + kh * self->kw + kw;
-                double *dst = self->col + (size_t)row * P;
-                for (int oh = 0; oh < Ho; oh++) {
-                    for (int ow = 0; ow < Wo; ow++) {
-                        dst[oh * Wo + ow] =
-                            self->xpad[((size_t)c * Hp + oh * self->sh + kh) * Wp
-                                       + ow * self->sw + kw];
+        /* ---- 1) 零填充：对应 _pad；无 padding 时 Python 直接把该组切片当 x_pad 用 ---- */
+        memset(xg_pad, 0, (size_t)CG * Hp * Wp * sizeof(double));
+        for (int c = 0; c < CG; c++) {
+            for (int h = 0; h < H; h++) {
+                memcpy(xg_pad + ((size_t)c * Hp + h + self->ph) * Wp + self->pw,
+                       x->data + ((size_t)(c0 + c) * H + h) * W,
+                       (size_t)W * sizeof(double));
+            }
+        }
+
+        /* ---- 2) im2col：逐元素对应 _im2col，行号 = c*kh*kw + kh*kw + kw
+         * 膨胀体现在读取位置 oh*sh + kh*dh（Python 的 _im2col 同样是 kh*dh） ---- */
+        for (int c = 0; c < CG; c++) {
+            for (int kh = 0; kh < self->kh; kh++) {
+                for (int kw = 0; kw < self->kw; kw++) {
+                    int row = c * self->kh * self->kw + kh * self->kw + kw;
+                    double *dst = xg_col + (size_t)row * P;
+                    for (int oh = 0; oh < Ho; oh++) {
+                        for (int ow = 0; ow < Wo; ow++) {
+                            dst[oh * Wo + ow] =
+                                xg_pad[((size_t)c * Hp + oh * self->sh + kh * self->dh) * Wp
+                                        + ow * self->sw + kw * self->dw];
+                        }
                     }
                 }
             }
         }
-    }
 
-    /* ---- 3) 每个输出通道做一次矩阵乘法：与 Python 的 _matmul(W_row, col) 同序 ----
-     * _matmul 里是 sum(map(_mul, W_row, col_col))，即对 col 的每一列（长度 K）
-     * 与扁平化权重按行号顺序做 Neumaier 点积。
-     * col 是 (K, Ho*Wo) 行主序，同一列的元素跨步，没法把列指针直接交给
-     * numeric.h 的 dot_neumaier；这里先把 K 个乘积按同样的顺序写进 scratch，
-     * 再交给 sum_neumaier —— 乘法顺序与求和顺序都与 Python 完全一致（逐位相同） */
-    for (int oc = 0; oc < self->out_channels; oc++) {
-        const double *wrow = self->W + (size_t)oc * K;
-        const double bias = self->b[oc];
-        double *orow = out->data + (size_t)oc * P;
-        for (int pos = 0; pos < P; pos++) {
-            for (int i = 0; i < K; i++)
-                self->scratch[i] = wrow[i] * self->col[(size_t)i * P + pos];
-            orow[pos] = sum_neumaier(self->scratch, K) + bias;
+        /* ---- 3) 本组的输出通道做一次矩阵乘法：与 Python 的 _matmul(W_row, col) 同序 ----
+         * _matmul 里是 sum(map(_mul, W_row, col_col))，即对 col 的每一列（长度 Kg）
+         * 与扁平化权重按行号顺序做 Neumaier 点积。col 行主序、同一列的元素跨步，
+         * 没法把列指针直接交给 dot_neumaier；先把 Kg 个乘积按同样顺序写进 scratch，
+         * 再交给 sum_neumaier —— 乘法顺序与求和顺序都与 Python 完全一致（逐位相同） */
+        for (int oc = oc0; oc < oc0 + OG; oc++) {
+            const double *wrow = self->W + (size_t)oc * Kg;
+            const double bias = self->b[oc];
+            double *orow = out->data + (size_t)oc * P;
+            for (int pos = 0; pos < P; pos++) {
+                for (int i = 0; i < Kg; i++)
+                    self->scratch[i] = wrow[i] * xg_col[(size_t)i * P + pos];
+                orow[pos] = sum_neumaier(self->scratch, Kg) + bias;
+            }
         }
     }
 }
@@ -378,84 +409,106 @@ void conv2d_backward(Conv2d *self, const Tensor *dout, Tensor *dx)
     const int want_dx[3] = { C, H, W };
     tensor_check_shape(dx, 3, want_dx, "conv2d_backward(dx)");
 
+    const int Kg = K;                  /* 一组 im2col 的行数（cg*kh*kw） */
+    const int CG = self->cg, OG = self->og;
+
     /* Python 先把 dout 展平成 (OC, ho*wo)，而那正是 dout 的行主序布局，
-     * 所以下面直接用 dout->data + oc*P，求和顺序不变 */
+     * 所以下面直接用 dout->data + oc*P，求和顺序不变。
+     *
+     * 每组独立回传：grad_w / grad_b 累加进组内通道，dcol -> col2im -> unpad 得到
+     * 该组的输入梯度，写进 dx 对应的通道切片。groups == 1 时循环只跑一次，
+     * 顺序与旧版单组实现逐字相同（逐位不变） */
+    for (int g = 0; g < self->groups; g++) {
+        const int c0 = g * CG;
+        const int oc0 = g * OG;
+        const double *xg_col = self->col + (size_t)g * Kg * P;
 
-    /* ---- grad_w：对应
-     *   grad_w[oc][ic][kh][kw] += sum(map(_mul, d, x_col[row]))
-     * 求和轴是 ho*wo（Neumaier），累加进 grad_w 用 +=（跨 batch 累积） ---- */
-    for (int oc = 0; oc < OC; oc++) {
-        const double *d = dout->data + (size_t)oc * P;
-        double *grow = self->gW + (size_t)oc * K;
-        for (int ic = 0; ic < self->in_channels; ic++) {
-            for (int kh = 0; kh < self->kh; kh++) {
-                for (int kw = 0; kw < self->kw; kw++) {
-                    int row = ic * self->kh * self->kw + kh * self->kw + kw;
-                    grow[row] += dot_neumaier(d, self->col + (size_t)row * P, P);
-                }
-            }
-        }
-    }
-
-    /* ---- grad_b：对应 grad_b[oc] += sum(dout_flat[oc])（Neumaier） ---- */
-    for (int oc = 0; oc < OC; oc++)
-        self->gb[oc] += sum_neumaier(dout->data + (size_t)oc * P, P);
-
-    /* ---- dcol = W_flat^T × dout_flat：对应
-     *   for oc / for row / for i: drow[i] += w * d[i]
-     * 朴素累加，且每个元素按 oc 升序累加（循环嵌套照抄 Python） ---- */
-    memset(self->dcol, 0, (size_t)K * P * sizeof(double));
-    for (int oc = 0; oc < OC; oc++) {
-        const double *d = dout->data + (size_t)oc * P;
-        const double *wflat = self->W + (size_t)oc * K;
-        for (int row = 0; row < K; row++) {
-            const double w = wflat[row];
-            double *drow = self->dcol + (size_t)row * P;
-            for (int i = 0; i < P; i++) drow[i] += w * d[i];
-        }
-    }
-
-    /* ---- col2im：对应 _col2im，循环嵌套必须是 c/kh/kw/oh/ow（朴素累加） ---- */
-    memset(self->dxpad, 0, (size_t)C * Hp * Wp * sizeof(double));
-    for (int c = 0; c < C; c++) {
-        for (int kh = 0; kh < self->kh; kh++) {
-            for (int kw = 0; kw < self->kw; kw++) {
-                int row = c * self->kh * self->kw + kh * self->kw + kw;
-                const double *drow = self->dcol + (size_t)row * P;
-                for (int oh = 0; oh < Ho; oh++) {
-                    for (int ow = 0; ow < Wo; ow++) {
-                        self->dxpad[((size_t)c * Hp + oh * self->sh + kh) * Wp
-                                    + ow * self->sw + kw] += drow[oh * Wo + ow];
+        /* ---- grad_w：对应
+         *   grad_w[oc][ic][kh][kw] += sum(map(_mul, d, x_col[row]))
+         * 求和轴是 ho*wo（Neumaier），累加进 grad_w 用 +=（跨 batch 累积） ---- */
+        for (int oc = oc0; oc < oc0 + OG; oc++) {
+            const double *d = dout->data + (size_t)oc * P;
+            double *grow = self->gW + (size_t)oc * Kg;
+            for (int ic = 0; ic < CG; ic++) {
+                for (int kh = 0; kh < self->kh; kh++) {
+                    for (int kw = 0; kw < self->kw; kw++) {
+                        int row = ic * self->kh * self->kw + kh * self->kw + kw;
+                        grow[row] += dot_neumaier(d, xg_col + (size_t)row * P, P);
                     }
                 }
             }
         }
-    }
 
-    /* ---- 去掉 padding：对应 _unpad（纯拷贝；dx 是"写入"不是累加） ---- */
-    if (self->ph > 0 || self->pw > 0) {
-        for (int c = 0; c < C; c++) {
-            for (int h = 0; h < H; h++) {
-                memcpy(dx->data + ((size_t)c * H + h) * W,
-                       self->dxpad + ((size_t)c * Hp + h + self->ph) * Wp + self->pw,
-                       (size_t)W * sizeof(double));
+        /* ---- grad_b：对应 grad_b[oc] += sum(dout_flat[oc])（Neumaier） ---- */
+        for (int oc = oc0; oc < oc0 + OG; oc++)
+            self->gb[oc] += sum_neumaier(dout->data + (size_t)oc * P, P);
+
+        /* ---- dcol = W_flat^T × dout_flat：对应
+         *   for oc / for row / for i: drow[i] += w * d[i]
+         * 朴素累加，且每个元素按 oc 升序累加（循环嵌套照抄 Python）。
+         * dcol 只按一组分配，组间复用，所以每组开始前先清零 ---- */
+        memset(self->dcol, 0, (size_t)Kg * P * sizeof(double));
+        for (int oc = oc0; oc < oc0 + OG; oc++) {
+            const double *d = dout->data + (size_t)oc * P;
+            const double *wflat = self->W + (size_t)oc * Kg;
+            for (int row = 0; row < Kg; row++) {
+                const double w = wflat[row];
+                double *drow = self->dcol + (size_t)row * P;
+                for (int i = 0; i < P; i++) drow[i] += w * d[i];
             }
         }
-    } else {
-        memcpy(dx->data, self->dxpad, (size_t)C * H * W * sizeof(double));
+
+        /* ---- col2im：对应 _col2im，循环嵌套必须是 c/kh/kw/oh/ow（朴素累加），
+         * 写入位置 oh*sh + kh*dh / ow*sw + kw*dw（膨胀只在取值上） ---- */
+        memset(self->dxpad, 0, (size_t)CG * Hp * Wp * sizeof(double));
+        for (int c = 0; c < CG; c++) {
+            for (int kh = 0; kh < self->kh; kh++) {
+                for (int kw = 0; kw < self->kw; kw++) {
+                    int row = c * self->kh * self->kw + kh * self->kw + kw;
+                    const double *drow = self->dcol + (size_t)row * P;
+                    for (int oh = 0; oh < Ho; oh++) {
+                        for (int ow = 0; ow < Wo; ow++) {
+                            self->dxpad[((size_t)c * Hp + oh * self->sh + kh * self->dh) * Wp
+                                        + ow * self->sw + kw * self->dw] += drow[oh * Wo + ow];
+                        }
+                    }
+                }
+            }
+        }
+
+        /* ---- 去掉 padding：对应 _unpad（纯拷贝；dx 是"写入"不是累加） ---- */
+        if (self->ph > 0 || self->pw > 0) {
+            for (int c = 0; c < CG; c++) {
+                for (int h = 0; h < H; h++) {
+                    memcpy(dx->data + ((size_t)(c0 + c) * H + h) * W,
+                           self->dxpad + ((size_t)c * Hp + h + self->ph) * Wp + self->pw,
+                           (size_t)W * sizeof(double));
+                }
+            }
+        } else {
+            memcpy(dx->data + (size_t)c0 * H * W, self->dxpad,
+                   (size_t)CG * H * W * sizeof(double));
+        }
     }
 }
 
 int conv2d_param_count(Conv2d *self)
 {
     if (!self) return 0;
-    return self->out_channels * self->in_channels * self->kh * self->kw + self->out_channels;
+    return self->out_channels * self->cg * self->kh * self->kw + self->out_channels;
 }
 
 void conv2d_to_string(const Conv2d *self, char *buf, size_t n)
 {
-    snprintf(buf, n, "Conv2d(in=%d, out=%d, k=%d, s=%d, p=%d)",
-             self->in_channels, self->out_channels, self->kh, self->sh, self->ph);
+    /* 默认配置（groups=1、无膨胀）保持原来的字符串，免得既有输出与测试要改 */
+    if (self->groups == 1 && self->dh == 1 && self->dw == 1) {
+        snprintf(buf, n, "Conv2d(in=%d, out=%d, k=%d, s=%d, p=%d)",
+                 self->in_channels, self->out_channels, self->kh, self->sh, self->ph);
+    } else {
+        snprintf(buf, n, "Conv2d(in=%d, out=%d, k=%d, s=%d, p=%d, groups=%d, dilation=%d)",
+                 self->in_channels, self->out_channels, self->kh, self->sh, self->ph,
+                 self->groups, self->dh);
+    }
 }
 
 Module *conv2d_as_module(Conv2d *self)

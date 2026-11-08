@@ -116,12 +116,14 @@ static double conv_loss(Conv2d *net, const Tensor *x, const Tensor *coef,
 }
 
 static int fd_check_conv(int C, int OC, int K, int S, int P, int H, int W,
-                         unsigned long long seed)
+                         int G, int D, unsigned long long seed)
 {
-    const int fan_in = C * K * K;
+    /* 每组只吃 cg 个输入通道，He 的 fan_in 与权重长度都按 cg 算（与 Python 一致） */
+    const int cg = C / G;
+    const int fan_in = cg * K * K;
     const size_t w_n = (size_t)OC * fan_in;
 
-    Conv2d *net = conv2d_create(C, OC, K, S, P);
+    Conv2d *net = conv2d_create_ex(C, OC, K, S, P, G, D);
 
     /* 参数：测试自己留一份 W/b，逐参数扰动后再灌回层里（等价于 Python 里直接改
      * conv.weights / conv.biases）。He 的 std 与 Python 版一致，b 取非零值以便
@@ -190,9 +192,15 @@ static int fd_check_conv(int C, int OC, int K, int S, int P, int H, int W,
     }
 
     int ok = (worst_w < FD_TOL) && (worst_b < FD_TOL) && (worst_x < FD_TOL);
+    /* 参数量口径要一起对齐：OC*cg*k*k + OC */
+    if (conv2d_param_count(net) != OC * fan_in + OC) {
+        printf("    param_count 不符：%d != %d\n", conv2d_param_count(net), OC * fan_in + OC);
+        ok = 0;
+    }
 
-    printf("  C=%d OC=%d K=%d stride=%d pad=%d  H=%d W=%d  ->  输出 (%d,%d)\n",
-           C, OC, K, S, P, H, W, ho, wo);
+    printf("  C=%d OC=%d K=%d stride=%d pad=%d groups=%d dilation=%d  H=%d W=%d"
+           "  ->  输出 (%d,%d)\n",
+           C, OC, K, S, P, G, D, H, W, ho, wo);
     printf("    grad_w: 最大误差 %.3e   grad_b: %.3e   dx: %.3e   %s\n",
            worst_w, worst_b, worst_x, ok ? "[通过]" : "[失败]");
 
@@ -708,10 +716,15 @@ int main(void)
 
     printf("========== 1) Conv2d 有限差分校验（eps=1e-6, 阈值 1e-5） ==========\n");
     /* 与 AI.py 的 test_ai.py::TestConv2dGradients 同两套配置 */
-    fails += !fd_check_conv(1, 2, 2, 1, 0, 5, 5, 3);          /* seed=3 对齐 Python */
-    fails += !fd_check_conv(2, 2, 3, 2, 1, 6, 6, 7);          /* seed=7 对齐 Python */
+    fails += !fd_check_conv(1, 2, 2, 1, 0, 5, 5, 1, 1, 3);   /* seed=3 对齐 Python */
+    fails += !fd_check_conv(2, 2, 3, 2, 1, 6, 6, 1, 1, 7);   /* seed=7 对齐 Python */
     /* 附加配置：k=3 / stride=3 / pad=2 / C=2，覆盖更大的 padding 与跳步 */
-    fails += !fd_check_conv(2, 3, 3, 3, 2, 7, 7, 11);
+    fails += !fd_check_conv(2, 3, 3, 3, 2, 7, 7, 1, 1, 11);
+    /* groups / dilation：分组、深度卷积、膨胀、以及三者叠加 */
+    fails += !fd_check_conv(4, 6, 3, 1, 1, 7, 7, 2, 1, 13);
+    fails += !fd_check_conv(4, 4, 3, 1, 1, 6, 6, 4, 1, 17);
+    fails += !fd_check_conv(2, 3, 3, 1, 2, 7, 7, 1, 2, 19);
+    fails += !fd_check_conv(4, 6, 3, 2, 2, 9, 9, 2, 2, 23);
 
     printf("\n========== 2) MaxPool2d 校验 ==========\n");
     fails += !check_pool_mask(2, 2, 2, 6, 5, 21);

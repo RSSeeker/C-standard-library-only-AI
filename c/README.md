@@ -28,7 +28,7 @@
 | `Layer` / `MLP` / 四个优化器 / `Model.fit` | `ai.c` | 已完成，逐位一致 + 零分配 |
 | `focal_loss` / `bce_loss` / `bce_with_logits_loss` / `huber_loss` | `losses.c` | 已完成：48 个标量/数组里 47 个逐位相同，仅 1 个 loss 因 `pow` 差 1 ULP（5.551e-17）；`LossKind` 扩到 6 个，训练与验证共用 `trainer_loss_apply` |
 | `confusion_matrix` / `accuracy_score` / `precision_recall_f1` / `matthews_corrcoef` / `top_k_accuracy` / `roc_auc_score` / `mean_absolute_error` / `root_mean_squared_error` / `mean_absolute_percentage_error` / `r2_score` | `metrics.c` | 已完成：参考 JSON 32 个用例 / 141 项检查**全部逐位相同**（容差 0）|
-| `Conv2d` / `MaxPool2d` / `Flatten` | `layers_conv.c` | 已完成，12 项逐位一致 |
+| `Conv2d`（含 `groups` / `dilation`）/ `MaxPool2d` / `Flatten` | `layers_conv.c` | 已完成，30 项逐位一致（6 种卷积配置：默认×2、分组、深度、膨胀、分组+膨胀+stride）|
 | `Dropout` / `BatchNorm1d` / `LayerNorm` | `layers_norm.c` | 已完成，21 项逐位一致 |
 | `RNNCell/RNN` / `LSTMCell/LSTM` / `GRUCell/GRU` + step cache | `rnn.c` | 已完成 |
 | `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成（含 `causal` 因果掩码开关、`mha_set_window` 滑动窗口、`mha_set_rope` 旋转位置编码、`mha_create_gqa` 的 GQA/MQA、`mha_set_alibi` + `tel_set_alibi` / `te_set_alibi` 的 ALiBi 距离偏置、`mha_forward_step` 增量前向、`mha_set_training` + `mha_set_attn_mask` 的注意力权重 dropout） |
@@ -156,7 +156,7 @@ Python 写 -> C 读：  最大差异 0.000e+00  PASS   （含 softmax 输出层�
 
 ```
 python tools/norm_reference.py && ./tests/compare_norm     # 21 项，全部 0.000e+00
-python tools/conv_reference.py && ./tests/compare_conv     # 12 项，全部 0.000e+00
+python tools/conv_reference.py && ./tests/compare_conv     # 30 项，全部 0.000e+00
 python tools/llm_reference.py && ./tests/compare_llm      # 6 段，见下
 python tools/attention_reference.py && ./tests/compare_attention  # 13 个用例，见第 8 节
 ```
@@ -209,10 +209,24 @@ python tools/metrics_reference.py    && ./tests/compare_metrics         # 32 用
   单标签多分类的 micro-F1 恒等于准确率、`k = 类别数` 时 top-k 恒为 1、`k=1` 时 top-k
   等于 argmax 后的准确率、标签翻转后 AUC 镜像成 `1 - AUC`、常数目标下 R² 取 1.0/0.0。
   这些恒等式能抓住「矩阵行列搞反」「并列秩算错」一类不会让单点数值明显偏离的错误。
+- **`Conv2d` 的 `groups` / `dilation`：6 种配置全部逐位相同（容差 0）**。
+  `groups = G` 时权重布局是 `[oc][ic][kh][kw]`，其中 `ic` 只遍历该输出通道所属组的
+  `cg = in_channels / G` 个通道，He 的 `fan_in` 也按 `cg*kh*kw` 算——这与 Python 的
+  `self.weights[oc][ic][kh][kw]`（`ic` 到 `cg`）完全一致，`conv2d_set_weights` 的长度
+  随之为 `out_channels*cg*kh*kw`。膨胀只影响取值位置：`im2col` 读
+  `oh*sh + kh*dh` / `ow*sw + kw*dw`，`col2im` 写同一对坐标，而输出尺寸按
+  有效核 `kh_eff = (kh-1)*dh + 1` 计算。
+  实现上仍然保持热路径零分配：`xpad` / `dxpad` / `dcol` / `scratch` 只按**一组**分配、
+  组间复用，`col` 按组拼接（总长度仍是 `in_channels*kh*kw*Ho*Wo`，与 `groups=1` 时相同）。
+  `groups=1` 且 `dilation=1` 时按组循环只跑一次，循环体内的顺序与旧版单组实现逐字相同，
+  所以既有 12 项比对的结果一个字都没变。`tests/test_conv.c` 对新增的四组配置做
+  逐参数中心差分（`grad_w`/`grad_b`/`dx` 最大误差均 <1.3e-9），并顺带校验
+  `conv2d_param_count == out_channels*cg*kh*kw + out_channels`。
 
 覆盖：BatchNorm1d（训练 forward/反向 dx/grad_gamma/grad_beta/running 统计量/mean/var/inv_std/x_hat、
 推理 forward）、LayerNorm（forward/反向/参数梯度/中间量）、Dropout（灌入 Python 的 mask 后逐位比对）、
-Conv2d（两种配置的 forward/grad_w/grad_b/dx）、MaxPool2d（两种配置）、Flatten。
+Conv2d（六种配置的 forward/grad_w/grad_b/dx：默认 2 组、groups=2、groups=C 的深度卷积、
+dilation=2、groups+dilation+stride 叠加）、MaxPool2d（两种配置）、Flatten。
 
 `compare_llm` 比对 CausalLM 的八段：前向 logits、loss + 19 个梯度块、一步 Adam 后的参数、
 训练 3 轮后的参数与 eval loss（含 perplexity）、贪心生成的 token、top_p 确定性生成、
