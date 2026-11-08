@@ -12,7 +12,7 @@
 
 | 项目 | 状态 |
 |------|------|
-| 数值等价性 | MLP 前向/梯度、Conv2d/Conv1d/ConvTranspose2d/MaxPool2d/Flatten、BatchNorm1d/BatchNorm2d/LayerNorm/GroupNorm/InstanceNorm/DropPath/Dropout、注意力组件、MHA/FFN/TransformerEncoderLayer 前向/反向 **全部与 Python 逐位一致**（0.000e+00，含 window/RoPE/GQA/MQA、ALiBi 与注意力权重 dropout 的注入 mask 对拍，见第 8 节） |
+| 数值等价性 | MLP 前向/梯度、Conv2d/Conv1d/ConvTranspose2d/MaxPool2d/Flatten、BatchNorm1d/BatchNorm2d/LayerNorm/GroupNorm/InstanceNorm/DropPath/Dropout、注意力组件、MHA/FFN（relu 与 gelu/sigmoid/linear/silu/mish/elu/selu）/TransformerEncoderLayer 前向/反向 **全部与 Python 逐位一致**（0.000e+00，含 window/RoPE/GQA/MQA、ALiBi 与注意力权重 dropout 的注入 mask 对拍，见第 8 节） |
 | 训练循环 | **零分配**（预热后 `malloc` 调用次数 = 0，用链接器 `--wrap` 统计，与机器负载无关） |
 | 性能 | MLP[64,256,128,8]、5 万参数、1000 样本 × 5 轮：C 约 1.3 s vs Python 约 77 s（**约 58–68 倍**） |
 | 存档互通 | 与 Python 的 `save_model` / `load_model` **双向互通**，两个方向都逐位一致 |
@@ -29,6 +29,7 @@
 | `focal_loss` / `bce_loss` / `bce_with_logits_loss` / `huber_loss` | `losses.c` | 已完成：48 个标量/数组里 47 个逐位相同，仅 1 个 loss 因 `pow` 差 1 ULP（5.551e-17）；`LossKind` 扩到 6 个，训练与验证共用 `trainer_loss_apply` |
 | `confusion_matrix` / `accuracy_score` / `precision_recall_f1` / `matthews_corrcoef` / `top_k_accuracy` / `roc_auc_score` / `mean_absolute_error` / `root_mean_squared_error` / `mean_absolute_percentage_error` / `r2_score` | `metrics.c` | 已完成：参考 JSON 32 个用例 / 141 项检查**全部逐位相同**（容差 0）|
 | `Conv2d`（含 `groups` / `dilation`）/ `Conv1d` / `ConvTranspose2d`（含 `output_padding`） / `MaxPool2d` / `Flatten` | `layers_conv.c` | 已完成，70 项逐位一致（Conv2d 6 种配置、Conv1d 5 种、ConvTranspose2d 5 种） |
+| `FeedForward`（中间层激活：relu 默认，另支持 gelu / sigmoid / linear / silu / mish / elu / selu） | `attention.c` | 已完成，8 种激活 104 项数组（99 项逐位，其余 1 ULP） |
 | `BatchNorm2d` / `GroupNorm` / `InstanceNorm` / `DropPath` / `Dropout` / `BatchNorm1d` / `LayerNorm` | `layers_norm.c` | 已完成，50 项逐位一致（BN2d 训练 6 项 + 推理 5 项、GroupNorm 4 项、InstanceNorm 4 项、DropPath 3 情形 × 3 项，另含原有 22 项） |
 | `augment_cutmix` / `augment_cutout` / `augment_randaugment` / `mixup` | `augment.c` | 已完成，24 项逐位一致（随机量由参考脚本注入，见下） |
 | `RNNCell/RNN` / `LSTMCell/LSTM` / `GRUCell/GRU` + step cache | `rnn.c` | 已完成 |
@@ -158,6 +159,7 @@ Python 写 -> C 读：  最大差异 0.000e+00  PASS   （含 softmax 输出层�
 ### 5. 逐模块等价性（`tools/*_reference.py` + `tests/compare_*.c`）
 
 ```
+python tools/ffn_reference.py && ./tests/compare_ffn       # 16 用例 104 数组
 python tools/norm_reference.py && ./tests/compare_norm     # 50 项，全部 0.000e+00
 python tools/conv_reference.py && ./tests/compare_conv     # 70 项，全部 0.000e+00
 python tools/llm_reference.py && ./tests/compare_llm      # 6 段，见下
@@ -262,6 +264,7 @@ dilation=2、groups+dilation+stride 叠加）、Conv1d（五种配置：默认�
 > 是同一套做法。`round()` 的差异也在这里踩过：Python 的四舍六入五成双对应 C 的 `rint()` 而不是
 > `round()`（后者五入），裁剪框边长与 Cutout 的洞边长都必须用 `rint()`。
 
+覆盖：`FeedForward` 的 8 种中间层激活（`ff_create_ex` / `ff_set_activation`，relu 分支逐字保留，非 relu 时缓存激活前的 `z` 供反向取导数；GELU 的 `u = C*(z + 0.044715*z^3)` 与 sigmoid 的 `z>=0` 免溢出分支都照抄 Python）、
 覆盖：`BatchNorm2d`（训练 forward、反向 dx / grad_gamma / grad_beta、running_mean / running_var
 更新、mean / inv、x_hat；推理 forward 与「推理不更新 running 统计量」）、`GroupNorm`（forward、
 反向三项、组内 mean / inv、x_hat）、`InstanceNorm`（`groups == channels` 的特例，逐通道标准化闭式）、

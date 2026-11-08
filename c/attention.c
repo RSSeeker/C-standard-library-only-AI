@@ -12,6 +12,7 @@
  * 内存：所有缓冲在 create 时按 max_seq_len 一次分配，forward/backward 热路径零 malloc。
  */
 #include "attention.h"
+#include "activations.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -1004,8 +1005,48 @@ void mha_backward(MultiHeadAttention *m, const Tensor *dout, Tensor *dx)
  *  FeedForward
  * ========================================================================== */
 
+/* per-element activation / derivative: mirrors AI.py FeedForward._act_scalar */
+static double ff_act_apply(int act, double v)
+{
+    switch (act) {
+    case FF_ACT_RELU:    return (v > 0.0) ? v : 0.0;
+    case FF_ACT_GELU:    return gelu_scalar(v);
+    case FF_ACT_SIGMOID: return sigmoid_scalar(v);
+    case FF_ACT_LINEAR:  return v;
+    case FF_ACT_SILU:    return silu_scalar(v);
+    case FF_ACT_MISH:    return mish_scalar(v);
+    case FF_ACT_ELU:     return elu_scalar(v);
+    case FF_ACT_SELU:    return selu_scalar(v);
+    default:             return v;
+    }
+}
+
+static double ff_act_grad(int act, double v)
+{
+    switch (act) {
+    case FF_ACT_RELU:    return (v > 0.0) ? 1.0 : 0.0;
+    case FF_ACT_GELU:    return dgelu_scalar(v);
+    case FF_ACT_SIGMOID: return dsigmoid_scalar(v);
+    case FF_ACT_LINEAR:  return 1.0;
+    case FF_ACT_SILU:    return dsilu_scalar(v);
+    case FF_ACT_MISH:    return dmish_scalar(v);
+    case FF_ACT_ELU:     return delu_scalar(v);
+    case FF_ACT_SELU:    return dselu_scalar(v);
+    default:             return 1.0;
+    }
+}
+
 FeedForward *ff_create(int d_model, int d_ff, int max_seq_len)
 {
+    return ff_create_ex(d_model, d_ff, max_seq_len, FF_ACT_RELU);
+}
+
+FeedForward *ff_create_ex(int d_model, int d_ff, int max_seq_len, int act)
+{
+    if (act < FF_ACT_RELU || act > FF_ACT_SELU) {
+        fprintf(stderr, "ff_create_ex: unknown activation %d (expected 0..7)\n", act);
+        exit(1);
+    }
     if (d_model <= 0 || d_ff <= 0 || max_seq_len <= 0) {
         fprintf(stderr, "ff_create: params非法 (d_model=%d, d_ff=%d, max_seq_len=%d)\n",
                 d_model, d_ff, max_seq_len);
@@ -1031,6 +1072,8 @@ FeedForward *ff_create(int d_model, int d_ff, int max_seq_len)
     f->h = xmalloc(T * d_ff * sizeof(double));
     f->dh = xmalloc(T * d_ff * sizeof(double));
     f->step_h = xmalloc((size_t)d_ff * sizeof(double));
+    f->z = xmalloc(T * d_ff * sizeof(double));
+    f->act = act;
 
     /* 与 Python 一致：W1 ~ N(0, sqrt(2/d_model))，W2 ~ N(0, sqrt(2/d_ff)) */
     unsigned long long rng = 0x13198A2E03707344ULL;
@@ -1057,6 +1100,7 @@ void ff_free(FeedForward *f)
     xfree(f->W1); xfree(f->b1); xfree(f->W2); xfree(f->b2);
     xfree(f->grad_W1); xfree(f->grad_b1); xfree(f->grad_W2); xfree(f->grad_b2);
     xfree(f->x); xfree(f->h); xfree(f->dh); xfree(f->step_h);
+    xfree(f->z);
     xfree(f);
 }
 
@@ -1081,6 +1125,28 @@ void ff_set_params(FeedForward *f, const double *W1, const double *b1,
     memcpy(f->b2, b2, (size_t)f->d_model * sizeof(double));
 }
 
+void ff_set_activation(FeedForward *f, int act)
+{
+    if (!f) {
+        fprintf(stderr, "ff_set_activation: f is NULL\n");
+        exit(1);
+    }
+    if (act < FF_ACT_RELU || act > FF_ACT_SELU) {
+        fprintf(stderr, "ff_set_activation: unknown activation %d (expected 0..7)\n", act);
+        exit(1);
+    }
+    f->act = act;
+}
+
+int ff_activation(const FeedForward *f)
+{
+    if (!f) {
+        fprintf(stderr, "ff_activation: f is NULL\n");
+        exit(1);
+    }
+    return f->act;
+}
+
 int ff_param_count(const FeedForward *f)
 {
     return 2 * f->d_model * f->d_ff + f->d_model + f->d_ff;
@@ -1099,10 +1165,20 @@ void ff_forward(FeedForward *f, const Tensor *x, Tensor *out)
 
     /* h = x @ W1^T，然后 h = max(0, h + b1)（Python 就地覆盖成 ReLU 之后的值） */
     mm_nt(f->x, dm, f->W1, dm, f->h, dff, T, dm, dff);
-    for (int t = 0; t < T; t++) {
-        for (int j = 0; j < dff; j++) {
-            double v = f->h[(size_t)t * dff + j] + f->b1[j];
-            f->h[(size_t)t * dff + j] = (v > 0.0) ? v : 0.0;   /* max(0, v) */
+    if (f->act == FF_ACT_RELU) {
+        for (int t = 0; t < T; t++) {
+            for (int j = 0; j < dff; j++) {
+                double v = f->h[(size_t)t * dff + j] + f->b1[j];
+                f->h[(size_t)t * dff + j] = (v > 0.0) ? v : 0.0;   /* max(0, v) */
+            }
+        }
+    } else {
+        for (int t = 0; t < T; t++) {
+            for (int j = 0; j < dff; j++) {
+                double v = f->h[(size_t)t * dff + j] + f->b1[j];
+                f->z[(size_t)t * dff + j] = v;
+                f->h[(size_t)t * dff + j] = ff_act_apply(f->act, v);
+            }
         }
     }
     /* out = h @ W2^T + b2 */
@@ -1122,7 +1198,8 @@ void ff_forward_step(FeedForward *f, const double *x_t, double *out_t)
     const int dm = f->d_model, dff = f->d_ff;
     for (int j = 0; j < dff; j++) {
         double v = dot_neumaier(x_t, f->W1 + (size_t)j * dm, dm) + f->b1[j];
-        f->step_h[j] = (v > 0.0) ? v : 0.0;
+        f->step_h[j] = (f->act == FF_ACT_RELU) ? ((v > 0.0) ? v : 0.0)
+                                              : ff_act_apply(f->act, v);
     }
     for (int j = 0; j < dm; j++)
         out_t[j] = dot_neumaier(f->step_h, f->W2 + (size_t)j * dff, dff) + f->b2[j];
@@ -1147,9 +1224,15 @@ void ff_backward(FeedForward *f, const Tensor *dout, Tensor *dx)
 
     /* dh = dout @ W2，再过 ReLU 反向（h <= 0 的位置清零，与 Python 的判据一致） */
     mm_nn(dout->data, dm, f->W2, dff, f->dh, dff, T, dm, dff);
-    for (int t = 0; t < T; t++)
-        for (int j = 0; j < dff; j++)
-            if (f->h[(size_t)t * dff + j] <= 0.0) f->dh[(size_t)t * dff + j] = 0.0;
+    if (f->act == FF_ACT_RELU) {
+        for (int t = 0; t < T; t++)
+            for (int j = 0; j < dff; j++)
+                if (f->h[(size_t)t * dff + j] <= 0.0) f->dh[(size_t)t * dff + j] = 0.0;
+    } else {
+        for (int t = 0; t < T; t++)
+            for (int j = 0; j < dff; j++)
+                f->dh[(size_t)t * dff + j] *= ff_act_grad(f->act, f->z[(size_t)t * dff + j]);
+    }
 
     /* grad_W1 = dh^T @ x ；grad_b1[j] = sum_t dh[t][j] ；dx = dh @ W1 */
     mm_tn(f->dh, dff, f->x, dm, f->grad_W1, dm, T, dff, dm, 1);

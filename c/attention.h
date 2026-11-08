@@ -262,9 +262,25 @@ typedef struct {
     double *h;      /* (T, d_ff) 缓存（ReLU 之后的激活，Python 的 self.h） */
     double *dh;     /* (T, d_ff) 反向缓冲 */
     double *step_h; /* (d_ff) 单 token 前向的 ReLU 临时（不碰上面的整段缓存） */
+
+    /* activation (FF_ACT_*); default FF_ACT_RELU keeps the old path bit-identical */
+    int act;
+    double *z;      /* (T, d_ff) pre-activation cache, used by backward for non-relu */
 } FeedForward;
 
+#define FF_ACT_RELU    0
+#define FF_ACT_GELU    1
+#define FF_ACT_SIGMOID 2
+#define FF_ACT_LINEAR  3
+#define FF_ACT_SILU    4
+#define FF_ACT_MISH    5
+#define FF_ACT_ELU     6
+#define FF_ACT_SELU    7
+
 FeedForward *ff_create(int d_model, int d_ff, int max_seq_len);
+FeedForward *ff_create_ex(int d_model, int d_ff, int max_seq_len, int act);
+void ff_set_activation(FeedForward *f, int act);
+int  ff_activation(const FeedForward *f);
 void ff_free(FeedForward *f);
 void ff_zero_grad(FeedForward *f);
 void ff_forward(FeedForward *f, const Tensor *x, Tensor *out);

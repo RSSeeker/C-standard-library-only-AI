@@ -131,3 +131,30 @@ void dselu_vec(const double *z, double *out, int n)
 {
     for (int i = 0; i < n; i++) out[i] = dselu_scalar(z[i]);
 }
+
+double gelu_scalar(double z)
+{
+    const double u = ACT_GELU_C * (z + 0.044715 * z * z * z);
+    return 0.5 * z * (1.0 + tanh(u));
+}
+
+double dgelu_scalar(double z)
+{
+    const double u = ACT_GELU_C * (z + 0.044715 * z * z * z);
+    const double t = tanh(u);
+    const double du = ACT_GELU_C * (1.0 + 3.0 * 0.044715 * z * z);
+    return 0.5 * (1.0 + t) + 0.5 * z * (1.0 - t * t) * du;
+}
+
+double sigmoid_scalar(double z)
+{
+    if (z >= 0.0) return 1.0 / (1.0 + exp(-z));
+    const double e = exp(z);
+    return e / (1.0 + e);
+}
+
+double dsigmoid_scalar(double z)
+{
+    const double s = sigmoid_scalar(z);
+    return s * (1.0 - s);
+}
