@@ -1,5 +1,5 @@
 /*
- * losses.h —— 额外损失函数（W1-A / W1-B 的 A 档 C 移植）
+ * losses.h —— 额外损失函数（A 档 C 移植）
  *
  * 与 Python 版一一对应，逐位一致（参考 c/loss_reference.json）：
  *   AI.focal_loss              -> focal_loss_grad

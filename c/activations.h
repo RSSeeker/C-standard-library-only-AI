@@ -52,7 +52,7 @@ void delu_vec(const double *z, double *out, int n);
 void selu_vec(const double *z, double *out, int n);
 void dselu_vec(const double *z, double *out, int n);
 
-/* ---------- GELU / sigmoid（Transformer FFN 用，W8 之后补） ----------
+/* ---------- GELU / sigmoid（Transformer FFN 用） ----------
  * gelu 与 AI.py 的 _act_scalar 完全同形：
  *   u = _GELU_C * (z + 0.044715*z*z*z);  0.5*z*(1+tanh(u))
  * 注意 tanh 在 msvcrt 与 UCRT 上有 ~0.1% 的值差 1 ULP，逐位对拍时

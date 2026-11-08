@@ -885,7 +885,7 @@ Module *rmsnorm_as_module(RMSNorm *self)
     return wrap_module(&RMSNORM_VT, self);
 }
 
-/* ======================= W11 归一化家族：BatchNorm2d / GroupNorm / DropPath =======================
+/* ======================= 归一化家族：BatchNorm2d / GroupNorm / DropPath =======================
  * 移植自 AI.py：
  *   BatchNorm2d (AI.py:13161) -> bn2d_*
  *   GroupNorm   (AI.py:13332) -> gn_*
