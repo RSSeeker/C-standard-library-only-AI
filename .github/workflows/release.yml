@@ -57,10 +57,9 @@ jobs:
         run: |
           # 引擎是 c/ 下的纯 C 实现（C17），界面与兼容层是 C++。
           # C 源用 gcc 单独编译，再用 g++ 链接，避免把 C 代码当 C++ 编。
-          gcc -std=c17 -O2 -Wall -c -I. -Ic \
-            c/ai.c c/tensor.c c/layers_conv.c c/layers_norm.c c/rnn.c \
-            c/attention.c c/containers.c c/json.c c/model_io.c c/model_high.c \
-            c/text.c c/sched.c
+          # c/ 下除四个程序入口外的所有 .c 都是引擎库源码；用 glob 避免新增模块时漏编译。
+          CORE=$(ls c/*.c | grep -vE '/(demo|bench|compare_python|check_noalloc)[.]c$')
+          gcc -std=c17 -O2 -Wall -c -I. -Ic $CORE
           g++ -std=c++17 -O2 -Wall -mwindows -static -o ai.exe -I. -Ic \
             main.cpp c_model.cpp *.o -lcomctl32 -lcomdlg32
 

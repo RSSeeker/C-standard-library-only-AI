@@ -14,22 +14,17 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 #  check_noalloc.c）与 tests/ 下的自测，它们各自有 main()。
 #  数值上与 Python 版逐位一致，详见 c/README.md。
 # ============================================================
-set(C_ENGINE_SOURCES
-    c/ai.c
-    c/tensor.c
-    c/layers_conv.c
-    c/layers_norm.c
-    c/rnn.c
-    c/attention.c
-    c/containers.c
-    c/json.c
-    c/model_io.c
-    c/model_high.c
-    c/text.c
-    c/optim.c
-    c/activations.c
-    c/sched.c
+# 用 glob 收集核心库：新增 c/ 模块后不需要手工同步这份列表。
+# 排除各程序入口（demo.c / bench.c / compare_python.c / check_noalloc.c）
+# 与 tests/（不在 glob 范围内），它们各自有 main()。
+file(GLOB C_ENGINE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/c/*.c)
+set(C_ENTRY_SOURCES
+    ${CMAKE_SOURCE_DIR}/c/demo.c
+    ${CMAKE_SOURCE_DIR}/c/bench.c
+    ${CMAKE_SOURCE_DIR}/c/compare_python.c
+    ${CMAKE_SOURCE_DIR}/c/check_noalloc.c
 )
+list(REMOVE_ITEM C_ENGINE_SOURCES ${C_ENTRY_SOURCES})
 
 # c_engine.cpp：把 C 引擎桥接给 Win32 界面（唯一包含 c/*.h 的 C++ 编译单元）
 # c_model.cpp ：兼容层，用 C 引擎实现界面原本调用的 Model / make_regressor 等 API
