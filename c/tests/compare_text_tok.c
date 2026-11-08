@@ -230,6 +230,157 @@ static void run_case(const JsonValue *c)
     free(pairs);
 }
 
+/* ====================== WordPiece ====================== */
+
+static char *join_wp_tokens(const WpVocab *v)
+{
+    int n = wp_vocab_size(v), i;
+    size_t cap = 32, len = 0;
+    char *buf = (char *)malloc(cap);
+
+    buf[0] = '\0';
+    for (i = 0; i < n; i++) {
+        const char *tok = wp_token(v, i);
+        size_t sl = strlen(tok);
+        if (len + sl + 2 > cap) {
+            while (len + sl + 2 > cap) cap *= 2;
+            buf = (char *)realloc(buf, cap);
+        }
+        if (i) buf[len++] = '\x1f';
+        memcpy(buf + len, tok, sl);
+        len += sl;
+        buf[len] = '\0';
+    }
+    return buf;
+}
+
+/* 解一段 ids 并比较文本。 */
+static void cmp_decode(const WpVocab *v, const int *ids, int n, const char *want, const char *what)
+{
+    char got[4096];
+    int k = wp_decode(v, ids, n, got, (int)sizeof(got));
+
+    if (k < 0) {
+        report_bits(what, 0, "decode 返回负数");
+        return;
+    }
+    report_bits(what, strcmp(got, want) == 0, got);
+}
+
+static void run_wp_case(const JsonValue *c)
+{
+    const char *name = json_str(json_get(c, "name"), "?");
+    const char *mode = json_str(json_get(c, "mode"), "");
+    const JsonValue *tokens = json_get(c, "tokens");
+    int n_tokens = json_array_len(tokens);
+    char buf[1024];
+    WpVocab *v = NULL;
+    const char **arr;
+    int i;
+
+    printf("  [%s] %s vocab=%d\n", name, mode, n_tokens);
+    arr = (const char **)malloc((size_t)(n_tokens ? n_tokens : 1) * sizeof(char *));
+    for (i = 0; i < n_tokens; i++) arr[i] = json_str(json_at(tokens, i), "");
+
+    if (strcmp(mode, "train") == 0) {
+        const char *text = json_str(json_get(c, "text"), "");
+        int vocab_arg = (int)json_num(json_get(c, "vocab_size_arg"), 512.0);
+        int min_freq = (int)json_num(json_get(c, "min_frequency"), 2.0);
+        char err[256];
+
+        memset(err, 0, sizeof(err));
+        v = wp_train(text, vocab_arg, min_freq, err, sizeof(err));
+        report_bits("wp_train", v != NULL, v ? NULL : err);
+        if (!v) {
+            free(arr);
+            return;
+        }
+    } else {
+        v = wp_create(arr, n_tokens, buf, sizeof(buf));
+        report_bits("wp_create", v != NULL, v ? NULL : buf);
+        if (!v) {
+            free(arr);
+            return;
+        }
+    }
+
+    {
+        char *got = join_wp_tokens(v);
+        char *want = join_json_strings(tokens);
+        report_bits("词表大小", wp_vocab_size(v) == n_tokens, NULL);
+        report_bits("词表内容", strcmp(got, want) == 0, NULL);
+        free(got);
+        free(want);
+    }
+
+    if (strcmp(mode, "train") == 0) {
+        const char *text = json_str(json_get(c, "text"), "");
+        const JsonValue *ids_arr = json_get(c, "ids");
+        const JsonValue *small_arr = json_get(c, "ids_small");
+        int ids[4096], small[4096], n, n_small, diff;
+
+        n = wp_encode(v, text, ids, 4096, 100);
+        if (n < 0) {
+            report_bits("encode", 0, "返回负数");
+        } else {
+            report_bits("encode", ids_equal(ids, n, ids_arr, &diff), NULL);
+            cmp_decode(v, ids, n, json_str(json_get(c, "decoded"), ""), "decode");
+        }
+        n_small = wp_encode(v, text, small, 4096, 2);
+        if (n_small < 0) {
+            report_bits("encode(max_chars=2)", 0, "返回负数");
+        } else {
+            report_bits("encode(max_chars=2)", ids_equal(small, n_small, small_arr, &diff), NULL);
+            cmp_decode(v, small, n_small, json_str(json_get(c, "decoded_small"), ""),
+                       "decode(max_chars=2)");
+        }
+        {
+            const char *second = json_str(json_get(c, "second"), "");
+            int pair_ids[4096];
+            int np = wp_encode_pair(v, text, second, pair_ids, 4096, 100);
+            if (np < 0) {
+                report_bits("encode_pair", 0, "返回负数");
+            } else {
+                report_bits("encode_pair", ids_equal(pair_ids, np, json_get(c, "pair"), &diff), NULL);
+                cmp_decode(v, pair_ids, np, json_str(json_get(c, "pair_decoded"), ""),
+                           "decode(pair)");
+            }
+        }
+        snprintf(buf, sizeof(buf), "C=%d py=%d", v->unk_id,
+                 (int)json_num(json_get(c, "unk_id"), -1.0));
+        report_bits("unk_id", v->unk_id == (int)json_num(json_get(c, "unk_id"), -1.0), buf);
+    } else {
+        const JsonValue *encodes = json_get(c, "encodes");
+        int n_enc = json_array_len(encodes);
+        int ids[4096];
+        int diff;
+
+        for (i = 0; i < n_enc; i++) {
+            const JsonValue *e = json_at(encodes, i);
+            const char *text = json_str(json_get(e, "text"), "");
+            int n = wp_encode(v, text, ids, 4096, 100);
+
+            if (n < 0) {
+                report_bits("encode(probe)", 0, "返回负数");
+                continue;
+            }
+            report_bits("encode(probe)", ids_equal(ids, n, json_get(e, "ids"), &diff), text);
+            cmp_decode(v, ids, n, json_str(json_get(e, "decoded"), ""), "decode(probe)");
+        }
+        {
+            const JsonValue *seq = json_get(c, "decode_ids");
+            int n_seq = json_array_len(seq);
+            int *ids = (int *)malloc((size_t)(n_seq ? n_seq : 1) * sizeof(int));
+            for (i = 0; i < n_seq; i++) ids[i] = (int)json_num(json_at(seq, i), -1.0);
+            cmp_decode(v, ids, n_seq, json_str(json_get(c, "decode_text"), ""), "decode(手写 ids)");
+            free(ids);
+        }
+    }
+
+    wp_free(v);
+    free(arr);
+}
+
 int main(int argc, char **argv)
 {
     const char *path = argc > 1 ? argv[1] : "text_tok_reference.json";
@@ -253,6 +404,14 @@ int main(int argc, char **argv)
     for (i = 0; i < json_array_len(cases); i++) {
         run_case(json_at(cases, i));
     }
+    {
+        const JsonValue *wp = json_get(root, "wordpiece");
+        int n_wp = wp ? json_array_len(wp) : 0;
+        printf("\n[compare_text_tok] WordPiece（Python WordPieceTokenizer）对拍\n");
+        for (i = 0; i < n_wp; i++) {
+            run_wp_case(json_at(wp, i));
+        }
+    }
     json_free(root);
     printf("\n[compare_text_tok] %d 项，%d 项逐位相同，%d 项不一致，worst=%.3e\n",
            g_arrays, g_exact, g_bad, g_worst);
@@ -260,6 +419,6 @@ int main(int argc, char **argv)
         printf("[compare_text_tok] [超出容差]\n");
         return 1;
     }
-    printf("[compare_text_tok] [OK] BPE matches AI.py\n");
+    printf("[compare_text_tok] [OK] BPE + WordPiece match AI.py\n");
     return 0;
 }

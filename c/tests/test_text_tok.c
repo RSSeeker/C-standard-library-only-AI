@@ -214,6 +214,173 @@ static void test_save_load(void)
     if (u) bpe_free(u);
 }
 
+/* ---------------- WordPiece ---------------- */
+
+static char *join_wp(const WpVocab *v)
+{
+    int n = wp_vocab_size(v), i;
+    size_t cap = 16, len = 0;
+    char *buf = (char *)malloc(cap);
+
+    buf[0] = '\0';
+    for (i = 0; i < n; i++) {
+        const char *t = wp_token(v, i);
+        size_t sl = strlen(t);
+        while (len + sl + 2 > cap) cap *= 2;
+        buf = (char *)realloc(buf, cap);
+        if (i) buf[len++] = '\x1f';
+        memcpy(buf + len, t, sl);
+        len += sl;
+        buf[len] = '\0';
+    }
+    return buf;
+}
+
+static void test_wordpiece(void)
+{
+    WpVocab *v, *w;
+    char err[256];
+    int ids[64], n;
+    char out[256];
+
+    printf("[6] WordPiece build / train\n");
+    v = wp_create_default();
+    check("default vocab size 5", wp_vocab_size(v) == 5, NULL);
+    check("default unk_id 1", v->unk_id == 1, NULL);
+    wp_free(v);
+
+    {
+        const char *bad1[] = {"[PAD]", "[UNK]", "[CLS]", "[SEP]"};
+        const char *bad2[] = {"[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "a", "a"};
+        const char *bad3[] = {"[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", ""};
+        const char *bad4[] = {"[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "##"};
+
+        check("missing special rejected", wp_create(bad1, 4, err, sizeof(err)) == NULL, err);
+        check("duplicate token rejected", wp_create(bad2, 7, err, sizeof(err)) == NULL, err);
+        check("empty token rejected", wp_create(bad3, 6, err, sizeof(err)) == NULL, err);
+        check("bare ## rejected", wp_create(bad4, 6, err, sizeof(err)) == NULL, err);
+    }
+
+    memset(err, 0, sizeof(err));
+    v = wp_train("playing played player play plays", 40, 1, err, sizeof(err));
+    check("train returns vocab", v != NULL, err);
+    if (v) {
+        char *a, *b;
+        a = join_wp(v);
+        check("trained vocab size 36", wp_vocab_size(v) == 36, a);
+        check("token 5 is p", strcmp(wp_token(v, 5), "p") == 0, wp_token(v, 5));
+        check("token 12 is space", strcmp(wp_token(v, 12), " ") == 0, wp_token(v, 12));
+        check("token 35 is plays", strcmp(wp_token(v, 35), "plays") == 0, wp_token(v, 35));
+        w = wp_train("playing played player play plays", 40, 1, err, sizeof(err));
+        b = join_wp(w);
+        check("training is deterministic", strcmp(a, b) == 0, NULL);
+        free(a);
+        free(b);
+        wp_free(w);
+
+        n = wp_encode(v, "playing played", ids, 64, 100);
+        check("encode n=3", n == 3, NULL);
+        check("encode ids", n == 3 && ids[0] == 34 && ids[1] == 12 && ids[2] == 32, NULL);
+        n = wp_decode(v, ids, n, out, sizeof(out));
+        check("decode roundtrip", n == 14 && strcmp(out, "playing played") == 0, out);
+
+        n = wp_encode(v, "playing played", ids, 64, 2);
+        check("max_chars=2 all unk", n == 3 && ids[0] == 1 && ids[1] == 12 && ids[2] == 1, NULL);
+        wp_free(v);
+    }
+
+    printf("[7] WordPiece encode / decode\n");
+    {
+        const char *toks[] = {"[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]",
+                              "a", "##b", " ", "!", "ab"};
+        v = wp_create(toks, 10, err, sizeof(err));
+        check("fixed vocab created", v != NULL, err);
+
+        n = wp_encode(v, "ab", ids, 64, 100);
+        check("longest match picks ab", n == 1 && ids[0] == 9, NULL);
+        n = wp_encode(v, "abb", ids, 64, 100);
+        check("abb = ab + ##b", n == 2 && ids[0] == 9 && ids[1] == 6, NULL);
+        n = wp_encode(v, "zz", ids, 64, 100);
+        check("unknown word -> unk", n == 1 && ids[0] == 1, NULL);
+        n = wp_encode(v, "a b", ids, 64, 100);
+        check("space token kept", n == 3 && ids[1] == 7, NULL);
+
+        {
+            int seq[7] = {5, 6, 6, 7, 6, 8, 9};
+            n = wp_decode(v, seq, 7, out, sizeof(out));
+            check("decode hand ids", n == 10 && strcmp(out, "abb b ! ab") == 0, out);
+        }
+        {
+            int seq[2] = {5, 6};
+            n = wp_decode(v, seq, 2, out, sizeof(out));
+            check("decode ## joins", n == 2 && strcmp(out, "ab") == 0, out);
+        }
+        {
+            int seq[3] = {5, 6, 5};
+            n = wp_decode(v, seq, 3, out, sizeof(out));
+            check("decode inserts space", n == 4 && strcmp(out, "ab a") == 0, out);
+        }
+        {
+            int seq[2] = {5, 99};
+            n = wp_decode(v, seq, 2, out, sizeof(out));
+            check("decode bad id -> -1", n == -1, NULL);
+        }
+        {
+            int seq[2] = {5, 6};
+            n = wp_decode(v, seq, 2, out, 2);
+            check("decode cap too small -> -3", n == -3, NULL);
+        }
+
+        n = wp_encode(v, "ab", ids, 0, 100);
+        check("encode cap too small -> -1", n == -1, NULL);
+        n = wp_encode(v, "ab\xff", ids, 64, 100);
+        check("encode bad utf8 -> -2", n == -2, NULL);
+
+        n = wp_encode_pair(v, "ab", "a", ids, 64, 100);
+        check("encode_pair structure", n == 5 && ids[0] == v->cls_id && ids[1] == 9
+              && ids[2] == v->sep_id && ids[3] == 5 && ids[4] == v->sep_id, NULL);
+        n = wp_decode(v, ids, 5, out, sizeof(out));
+        check("pair decode", strcmp(out, "ab a") == 0, out);
+        wp_free(v);
+    }
+
+    printf("[8] WordPiece train edge cases\n");
+    {
+        v = wp_train("aaaa", 6, 1, err, sizeof(err));
+        check("vocab_size too small for merges", v != NULL && wp_vocab_size(v) == 7,
+              v ? NULL : err);
+        wp_free(v);
+
+        v = wp_train("aaaa", 20, 1000, err, sizeof(err));
+        check("high min_frequency stops merging", v != NULL && wp_vocab_size(v) == 7,
+              v ? NULL : err);
+        wp_free(v);
+
+        check("vocab_size 5 rejected", wp_train("x", 5, 1, err, sizeof(err)) == NULL, err);
+        check("min_frequency 0 rejected", wp_train("x", 10, 0, err, sizeof(err)) == NULL, err);
+    }
+
+    printf("[9] WordPiece save / load\n");
+    {
+        const char *path = "tests/zz_wp_save.json";
+        v = wp_train("playing played", 20, 1, err, sizeof(err));
+        check("save ok", wp_save(v, path) == 0, NULL);
+        w = wp_load(path, err, sizeof(err));
+        check("load ok", w != NULL, err);
+        if (w) {
+            char *a = join_wp(v), *b = join_wp(w);
+            check("roundtrip vocab", strcmp(a, b) == 0, NULL);
+            free(a);
+            free(b);
+            wp_free(w);
+        }
+        check("load missing file -> NULL",
+              wp_load("tests/zz_wp_missing.json", err, sizeof(err)) == NULL, NULL);
+        remove(path);
+        wp_free(v);
+    }
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -223,6 +390,7 @@ int main(void)
     test_roundtrip();
     test_validation();
     test_save_load();
+    test_wordpiece();
     printf("\n[test_text_tok] %d checks, %d failures\n", g_checks, g_fails);
     if (g_fails) {
         printf("[test_text_tok] FAILED\n");

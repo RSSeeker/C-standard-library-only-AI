@@ -69,4 +69,51 @@ int bpe_save(const BpeTokenizer *t, const char *path);
 /* 读取；失败返回 NULL 并把原因写进 err（可为 NULL）。 */
 BpeTokenizer *bpe_load(const char *path, char *err, size_t errlen);
 
+/* ======================================================================
+ *  WordPiece（Python `WordPieceTokenizer`）
+ *
+ *  词表是**字符串**列表：前五个固定为 [PAD] [UNK] [CLS] [SEP] [MASK]，
+ *  其余是字符 / 子词；词内非首字符带 `##` 前缀。训练按
+ *  `freq / (left_freq * right_freq)` 打分，编码用最长前缀匹配。
+ * ====================================================================== */
+
+typedef struct {
+    char **tokens;              /* 拥有所有字符串 */
+    int n;
+    int cap;
+    int unk_id, pad_id, cls_id, sep_id, mask_id;
+} WpVocab;
+
+WpVocab *wp_create_default(void);
+/* 用给定词表构造（缺特殊标记 / 有重复 / 空 token 时返回 NULL 并写 err）。 */
+WpVocab *wp_create(const char *const *tokens, int n, char *err, size_t errlen);
+void wp_free(WpVocab *v);
+
+int  wp_vocab_size(const WpVocab *v);
+const char *wp_token(const WpVocab *v, int id);
+/* 查 token 的 id；不存在返回 -1。 */
+int  wp_token_id(const WpVocab *v, const char *token);
+
+/* 切词块（字母数字 / 空白 / 其它），返回块数；失败 -1。 */
+int  wp_split_words(const char *text, char ***out);
+/* 词 -> WordPiece 初始切片（首字符原样，其余 `##` 前缀），返回片数；失败 -1。 */
+int  wp_to_pieces(const char *word, char ***out);
+
+/* 编码：最大词长按**码点**计（与 Python 的 len(str) 一致）。返回 id 数，
+ * 缓冲不足 -1，非法 UTF-8 -2。 */
+int wp_encode(const WpVocab *v, const char *text, int *ids, int cap,
+              int max_chars_per_word);
+/* [CLS] a [SEP] b [SEP]。 */
+int wp_encode_pair(const WpVocab *v, const char *a, const char *b, int *ids, int cap,
+                   int max_chars_per_word);
+/* 解码：返回字节数；id 越界 -1，缓冲不足 -3。 */
+int wp_decode(const WpVocab *v, const int *ids, int n, char *out, int cap);
+
+/* 训练并返回新词表；失败返回 NULL 并写 err。 */
+WpVocab *wp_train(const char *text, int vocab_size, int min_frequency,
+                  char *err, size_t errlen);
+
+int  wp_save(const WpVocab *v, const char *path);
+WpVocab *wp_load(const char *path, char *err, size_t errlen);
+
 #endif /* AI_TEXT_TOK_H */

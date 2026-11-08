@@ -664,3 +664,709 @@ BpeTokenizer *bpe_load(const char *path, char *err, size_t errlen)
     tok_rebuild(t);
     return t;
 }
+
+/*
+ * wp_block.c —— WordPiece 实现的片段，追加到 text_tok.c 末尾
+ */
+
+/* ---------- 字符串 -> int 的哈希表（token 频率 / 词表反查） ---------- */
+
+typedef struct {
+    const char **keys;
+    int *vals;
+    int cap;
+    int size;
+} StrMap;
+
+static unsigned long long str_key(const char *s)
+{
+    unsigned long long h = 1469598103934665603ULL;
+    while (*s) {
+        h ^= (unsigned long long)(unsigned char)*s++;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static void sm_rehash(StrMap *m, int cap)
+{
+    const char **keys = (const char **)tk_calloc((size_t)cap, sizeof(char *));
+    int *vals = (int *)tk_calloc((size_t)cap, sizeof(int));
+    int i;
+
+    for (i = 0; i < m->cap; i++) {
+        if (m->keys[i]) {
+            unsigned long long k = str_key(m->keys[i]);
+            int idx = (int)(k & (unsigned long long)(cap - 1));
+            while (keys[idx]) idx = (idx + 1) & (cap - 1);
+            keys[idx] = m->keys[i];
+            vals[idx] = m->vals[i];
+        }
+    }
+    free(m->keys);
+    free(m->vals);
+    m->keys = keys;
+    m->vals = vals;
+    m->cap = cap;
+}
+
+static int sm_get(const StrMap *m, const char *key)
+{
+    unsigned long long k;
+    int idx;
+
+    if (!m->cap) return -1;
+    k = str_key(key);
+    idx = (int)(k & (unsigned long long)(m->cap - 1));
+    while (m->keys[idx]) {
+        if (strcmp(m->keys[idx], key) == 0) return m->vals[idx];
+        idx = (idx + 1) & (m->cap - 1);
+    }
+    return -1;
+}
+
+/* 插入或覆盖；key 由调用方拥有（本表不复制）。 */
+static void sm_set(StrMap *m, const char *key, int val)
+{
+    unsigned long long k;
+    int idx;
+
+    if (m->cap == 0) sm_rehash(m, 64);
+    if ((m->size + 1) * 10 >= m->cap * 7) sm_rehash(m, m->cap * 2);
+    k = str_key(key);
+    idx = (int)(k & (unsigned long long)(m->cap - 1));
+    while (m->keys[idx]) {
+        if (strcmp(m->keys[idx], key) == 0) {
+            m->vals[idx] = val;
+            return;
+        }
+        idx = (idx + 1) & (m->cap - 1);
+    }
+    m->keys[idx] = key;
+    m->vals[idx] = val;
+    m->size += 1;
+}
+
+static void sm_free(StrMap *m)
+{
+    free(m->keys);
+    free(m->vals);
+    m->keys = NULL;
+    m->vals = NULL;
+    m->cap = m->size = 0;
+}
+
+/* ---------- 词表 ---------- */
+
+static const char *const WP_SPECIALS[5] = {"[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"};
+#define WP_CONT "##"
+
+static int wp_is_special(const char *tok)
+{
+    int i;
+    for (i = 0; i < 5; i++) {
+        if (strcmp(tok, WP_SPECIALS[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+static void wp_push_token(WpVocab *v, const char *tok)
+{
+    if (v->n == v->cap) {
+        int cap = v->cap ? v->cap * 2 : 32;
+        char **nt = (char **)tk_malloc((size_t)cap * sizeof(char *));
+        if (v->n) memcpy(nt, v->tokens, (size_t)v->n * sizeof(char *));
+        free(v->tokens);
+        v->tokens = nt;
+        v->cap = cap;
+    }
+    v->tokens[v->n++] = tk_strdup(tok);
+}
+
+WpVocab *wp_create(const char *const *tokens, int n, char *err, size_t errlen)
+{
+    WpVocab *v;
+    StrMap seen;
+    int i;
+
+    if (!tokens || n <= 0) {
+        if (err && errlen) snprintf(err, errlen, "wp_create: 词表为空");
+        return NULL;
+    }
+    memset(&seen, 0, sizeof(seen));
+    v = (WpVocab *)tk_calloc(1, sizeof(WpVocab));
+    for (i = 0; i < n; i++) {
+        const char *tok = tokens[i];
+        if (!tok || !*tok) {
+            if (err && errlen) snprintf(err, errlen, "wp_create: 第 %d 个 token 是空字符串", i);
+            sm_free(&seen);
+            wp_free(v);
+            return NULL;
+        }
+        if (strcmp(tok, WP_CONT) == 0) {
+            if (err && errlen) snprintf(err, errlen, "wp_create: 第 %d 个 token 只有 ## 前缀", i);
+            sm_free(&seen);
+            wp_free(v);
+            return NULL;
+        }
+        if (sm_get(&seen, tok) >= 0) {
+            if (err && errlen) snprintf(err, errlen, "wp_create: token %s 重复", tok);
+            sm_free(&seen);
+            wp_free(v);
+            return NULL;
+        }
+        wp_push_token(v, tok);
+        sm_set(&seen, v->tokens[v->n - 1], i);
+    }
+    sm_free(&seen);
+    v->pad_id = wp_token_id(v, "[PAD]");
+    v->unk_id = wp_token_id(v, "[UNK]");
+    v->cls_id = wp_token_id(v, "[CLS]");
+    v->sep_id = wp_token_id(v, "[SEP]");
+    v->mask_id = wp_token_id(v, "[MASK]");
+    if (v->pad_id < 0 || v->unk_id < 0 || v->cls_id < 0 || v->sep_id < 0 || v->mask_id < 0) {
+        if (err && errlen) snprintf(err, errlen, "wp_create: 词表缺少特殊标记");
+        wp_free(v);
+        return NULL;
+    }
+    return v;
+}
+
+WpVocab *wp_create_default(void)
+{
+    char err[128];
+    return wp_create(WP_SPECIALS, 5, err, sizeof(err));
+}
+
+void wp_free(WpVocab *v)
+{
+    int i;
+    if (!v) return;
+    for (i = 0; i < v->n; i++) free(v->tokens[i]);
+    free(v->tokens);
+    free(v);
+}
+
+int wp_vocab_size(const WpVocab *v) { return v ? v->n : 0; }
+
+const char *wp_token(const WpVocab *v, int id)
+{
+    if (!v || id < 0 || id >= v->n) return NULL;
+    return v->tokens[id];
+}
+
+int wp_token_id(const WpVocab *v, const char *token)
+{
+    int i;
+
+    if (!v || !token) return -1;
+    for (i = 0; i < v->n; i++) {
+        if (strcmp(v->tokens[i], token) == 0) return i;
+    }
+    return -1;
+}
+
+int wp_split_words(const char *text, char ***out)
+{
+    /* 与 BPE 的 pretokenize 完全相同（字母数字 / 空白 / 其它 三类连写） */
+    return bpe_pretokenize(text, out);
+}
+
+int wp_to_pieces(const char *word, char ***out)
+{
+    StrVec sv;
+    const unsigned char *p = (const unsigned char *)word;
+    int k = 0;
+
+    if (!word || !out) return -1;
+    memset(&sv, 0, sizeof(sv));
+    while (*p) {
+        unsigned int cp = 0;
+        int len = u8_decode(p, &cp);
+        char *piece;
+        size_t blen;
+
+        if (len <= 0) {
+            sv_free(&sv);
+            return -1;
+        }
+        blen = (size_t)len;
+        piece = (char *)tk_malloc(blen + (k ? 3 : 1));
+        if (k) {
+            memcpy(piece, WP_CONT, 2);
+            memcpy(piece + 2, p, blen);
+            piece[2 + blen] = '\0';
+        } else {
+            memcpy(piece, p, blen);
+            piece[blen] = '\0';
+        }
+        sv_push(&sv, piece);
+        p += len;
+        k += 1;
+    }
+    *out = sv.items;
+    return sv.n;
+}
+
+/* 词里有多少个码点（Python 的 len(str)）。 */
+static int wp_cp_count(const char *word)
+{
+    const unsigned char *p = (const unsigned char *)word;
+    int n = 0;
+
+    while (*p) {
+        unsigned int cp = 0;
+        int len = u8_decode(p, &cp);
+        if (len <= 0) return -1;
+        p += len;
+        n += 1;
+    }
+    return n;
+}
+
+/* right 去掉 ## 前缀后的正文。 */
+static const char *wp_body(const char *tok)
+{
+    if (strncmp(tok, WP_CONT, 2) == 0) return tok + 2;
+    return tok;
+}
+
+/* 把 words[*] 里所有相邻 (left, right) 替换成 merged。 */
+static void wp_apply_merge(StrVec *words, int n_words, const char *left, const char *right,
+                           const char *merged)
+{
+    int w;
+
+    for (w = 0; w < n_words; w++) {
+        StrVec out;
+        int i = 0;
+
+        memset(&out, 0, sizeof(out));
+        while (i < words[w].n) {
+            if (i + 1 < words[w].n
+                && strcmp(words[w].items[i], left) == 0
+                && strcmp(words[w].items[i + 1], right) == 0) {
+                sv_push(&out, tk_strdup(merged));
+                i += 2;
+            } else {
+                sv_push(&out, tk_strdup(words[w].items[i]));
+                i += 1;
+            }
+        }
+        sv_free(&words[w]);
+        words[w] = out;
+    }
+}
+
+/* 词块 -> 初始切片列表；失败返回 -1。 */
+static int wp_words_from_text(const char *text, StrVec **out_words, int *out_n)
+{
+    char **pieces = NULL;
+    int n_pieces, i;
+    StrVec *words;
+
+    n_pieces = wp_split_words(text, &pieces);
+    if (n_pieces < 0) return -1;
+    words = (StrVec *)tk_calloc((size_t)(n_pieces ? n_pieces : 1), sizeof(StrVec));
+    for (i = 0; i < n_pieces; i++) {
+        char **pcs = NULL;
+        int np = wp_to_pieces(pieces[i], &pcs);
+        int k;
+
+        if (np < 0) {
+            int j;
+            for (j = 0; j < i; j++) sv_free(&words[j]);
+            free(words);
+            bpe_pretokenize_free(pieces, n_pieces);
+            return -1;
+        }
+        /* 片字符串的所有权转给 words[i]，这里只能释放数组本身 */
+        for (k = 0; k < np; k++) sv_push(&words[i], pcs[k]);
+        free(pcs);
+    }
+    bpe_pretokenize_free(pieces, n_pieces);
+    *out_words = words;
+    *out_n = n_pieces;
+    return 0;
+}
+
+WpVocab *wp_train(const char *text, int vocab_size, int min_frequency, char *err, size_t errlen)
+{
+    StrVec *words = NULL;
+    int n_words = 0, i, w;
+    StrVec tokens;
+    StrMap seen;
+    WpVocab *v;
+
+    if (!text) {
+        if (err && errlen) snprintf(err, errlen, "wp_train: text 为空指针");
+        return NULL;
+    }
+    if (vocab_size < 6) {
+        if (err && errlen) snprintf(err, errlen, "wp_train: vocab_size 至少 6");
+        return NULL;
+    }
+    if (min_frequency < 1) {
+        if (err && errlen) snprintf(err, errlen, "wp_train: min_frequency 必须 >= 1");
+        return NULL;
+    }
+    if (wp_words_from_text(text, &words, &n_words) < 0) {
+        if (err && errlen) snprintf(err, errlen, "wp_train: 文本不是合法 UTF-8");
+        return NULL;
+    }
+
+    memset(&tokens, 0, sizeof(tokens));
+    memset(&seen, 0, sizeof(seen));
+    for (i = 0; i < 5; i++) {
+        sv_push(&tokens, tk_strdup(WP_SPECIALS[i]));
+        sm_set(&seen, tokens.items[tokens.n - 1], i);
+    }
+    /* 初始切片：未出现过的都进词表（Python 的顺序：按词序、按片序） */
+    for (w = 0; w < n_words; w++) {
+        for (i = 0; i < words[w].n; i++) {
+            if (sm_get(&seen, words[w].items[i]) < 0) {
+                sv_push(&tokens, tk_strdup(words[w].items[i]));
+                sm_set(&seen, tokens.items[tokens.n - 1], tokens.n - 1);
+            }
+        }
+    }
+
+    while (tokens.n < vocab_size) {
+        StrMap token_freq, pair_index;
+        char **pair_left = NULL, **pair_right = NULL, **pair_key = NULL;
+        int *pair_count = NULL;
+        int n_pairs = 0, pair_cap = 0;
+        int best = -1;
+        double best_score = -1.0;
+        char *merged = NULL;
+
+        memset(&token_freq, 0, sizeof(token_freq));
+        memset(&pair_index, 0, sizeof(pair_index));
+        for (w = 0; w < n_words; w++) {
+            int k;
+            for (k = 0; k < words[w].n; k++) {
+                int cur = sm_get(&token_freq, words[w].items[k]);
+                sm_set(&token_freq, words[w].items[k], cur < 0 ? 1 : cur + 1);
+            }
+            for (k = 0; k + 1 < words[w].n; k++) {
+                const char *l = words[w].items[k];
+                const char *r = words[w].items[k + 1];
+                size_t ll = strlen(l), rl = strlen(r);
+                char *key = (char *)tk_malloc(ll + rl + 2);
+                int idx;
+
+                memcpy(key, l, ll);
+                key[ll] = '\x1f';
+                memcpy(key + ll + 1, r, rl);
+                key[ll + 1 + rl] = '\0';
+                idx = sm_get(&pair_index, key);
+                if (idx < 0) {
+                    if (n_pairs == pair_cap) {
+                        int cap = pair_cap ? pair_cap * 2 : 32;
+                        char **nl = (char **)tk_malloc((size_t)cap * sizeof(char *));
+                        char **nr = (char **)tk_malloc((size_t)cap * sizeof(char *));
+                        char **nk = (char **)tk_malloc((size_t)cap * sizeof(char *));
+                        int *nc = (int *)tk_malloc((size_t)cap * sizeof(int));
+                        if (n_pairs) {
+                            memcpy(nl, pair_left, (size_t)n_pairs * sizeof(char *));
+                            memcpy(nr, pair_right, (size_t)n_pairs * sizeof(char *));
+                            memcpy(nk, pair_key, (size_t)n_pairs * sizeof(char *));
+                            memcpy(nc, pair_count, (size_t)n_pairs * sizeof(int));
+                        }
+                        free(pair_left);
+                        free(pair_right);
+                        free(pair_key);
+                        free(pair_count);
+                        pair_left = nl;
+                        pair_right = nr;
+                        pair_key = nk;
+                        pair_count = nc;
+                        pair_cap = cap;
+                    }
+                    pair_left[n_pairs] = tk_strdup(l);
+                    pair_right[n_pairs] = tk_strdup(r);
+                    pair_key[n_pairs] = key;
+                    pair_count[n_pairs] = 1;
+                    sm_set(&pair_index, key, n_pairs);
+                    n_pairs += 1;
+                } else {
+                    pair_count[idx] += 1;
+                    free(key);
+                }
+            }
+        }
+
+        for (i = 0; i < n_pairs; i++) {
+            int freq = pair_count[i];
+            int lf, rf, cmp;
+            double score;
+
+            if (freq < min_frequency) continue;
+            lf = sm_get(&token_freq, pair_left[i]);
+            rf = sm_get(&token_freq, pair_right[i]);
+            if (lf <= 0 || rf <= 0) continue;
+            score = (double)freq / (double)(lf * rf);
+            if (score > best_score) {
+                best = i;
+                best_score = score;
+                continue;
+            }
+            if (score == best_score) {
+                /* 并列时取 (left, right) 字典序更小者（Python 的元组比较） */
+                cmp = strcmp(pair_left[i], pair_left[best]);
+                if (cmp < 0 || (cmp == 0 && strcmp(pair_right[i], pair_right[best]) < 0)) {
+                    best = i;
+                }
+            }
+        }
+
+        if (best >= 0) {
+            const char *left = pair_left[best];
+            const char *right = pair_right[best];
+            const char *body = wp_body(right);
+            size_t ll = strlen(left), bl = strlen(body);
+
+            merged = (char *)tk_malloc(ll + bl + 1);
+            memcpy(merged, left, ll);
+            memcpy(merged + ll, body, bl);
+            merged[ll + bl] = '\0';
+            if (sm_get(&seen, merged) >= 0) {
+                free(merged);
+                merged = NULL;
+            } else {
+                sv_push(&tokens, merged);
+                sm_set(&seen, merged, tokens.n - 1);
+                wp_apply_merge(words, n_words, left, right, merged);
+            }
+        }
+
+        for (i = 0; i < n_pairs; i++) {
+            free(pair_left[i]);
+            free(pair_right[i]);
+            free(pair_key[i]);
+        }
+        free(pair_left);
+        free(pair_right);
+        free(pair_key);
+        free(pair_count);
+        sm_free(&token_freq);
+        sm_free(&pair_index);
+
+        if (best < 0 || !merged) break;      /* 没有可合并的对了 / 已经合过 */
+    }
+
+    for (w = 0; w < n_words; w++) sv_free(&words[w]);
+    free(words);
+    sm_free(&seen);
+
+    v = wp_create((const char **)tokens.items, tokens.n, err, errlen);
+    for (i = 0; i < tokens.n; i++) free(tokens.items[i]);
+    free(tokens.items);
+    return v;
+}
+
+int wp_encode(const WpVocab *v, const char *text, int *ids, int cap, int max_chars_per_word)
+{
+    char **pieces = NULL;
+    int n_pieces, i, written = 0;
+
+    if (!v || !text || !ids) return -1;
+    if (max_chars_per_word < 1) return -1;
+    n_pieces = wp_split_words(text, &pieces);
+    if (n_pieces < 0) return -2;
+    for (i = 0; i < n_pieces; i++) {
+        const char *word = pieces[i];
+        int n_cp = wp_cp_count(word);
+        int start = 0, len = (int)strlen(word);
+        IntVec word_ids;
+        int failed = 0;
+
+        memset(&word_ids, 0, sizeof(word_ids));
+        if (n_cp < 0) {
+            bpe_pretokenize_free(pieces, n_pieces);
+            return -2;
+        }
+        if (n_cp > max_chars_per_word) {
+            iv_push(&word_ids, v->unk_id);
+        } else {
+            while (start < len && !failed) {
+                int end = len, found = -1;
+                while (start < end) {
+                    size_t plen = (size_t)(end - start);
+                    char *piece = (char *)tk_malloc(plen + (start > 0 ? 3 : 1));
+                    int id;
+                    if (start > 0) {
+                        memcpy(piece, WP_CONT, 2);
+                        memcpy(piece + 2, word + start, plen);
+                        piece[2 + plen] = '\0';
+                    } else {
+                        memcpy(piece, word + start, plen);
+                        piece[plen] = '\0';
+                    }
+                    id = wp_token_id(v, piece);
+                    free(piece);
+                    if (id >= 0) {
+                        found = id;
+                        break;
+                    }
+                    end -= 1;
+                }
+                if (found < 0) {
+                    failed = 1;
+                } else {
+                    iv_push(&word_ids, found);
+                    start = end;
+                }
+            }
+            if (failed) {
+                free(word_ids.v);
+                memset(&word_ids, 0, sizeof(word_ids));
+                iv_push(&word_ids, v->unk_id);
+            }
+        }
+        if (written + word_ids.n > cap) {
+            free(word_ids.v);
+            bpe_pretokenize_free(pieces, n_pieces);
+            return -1;
+        }
+        memcpy(ids + written, word_ids.v, (size_t)word_ids.n * sizeof(int));
+        written += word_ids.n;
+        free(word_ids.v);
+    }
+    bpe_pretokenize_free(pieces, n_pieces);
+    return written;
+}
+
+int wp_encode_pair(const WpVocab *v, const char *a, const char *b, int *ids, int cap,
+                   int max_chars_per_word)
+{
+    int n = 0, k;
+
+    if (!v || !ids) return -1;
+    if (n + 1 > cap) return -1;
+    ids[n++] = v->cls_id;
+    k = wp_encode(v, a, ids + n, cap - n, max_chars_per_word);
+    if (k < 0) return k;
+    n += k;
+    if (n + 1 > cap) return -1;
+    ids[n++] = v->sep_id;
+    k = wp_encode(v, b, ids + n, cap - n, max_chars_per_word);
+    if (k < 0) return k;
+    n += k;
+    if (n + 1 > cap) return -1;
+    ids[n++] = v->sep_id;
+    return n;
+}
+
+int wp_decode(const WpVocab *v, const int *ids, int n, char *out, int cap)
+{
+    size_t len = 0;
+    int i;
+
+    if (!v || !out || cap <= 0) return -3;
+    out[0] = '\0';
+    for (i = 0; i < n; i++) {
+        int id = ids[i];
+        const char *tok;
+        const char *add;
+        int need_space;
+
+        if (id < 0 || id >= v->n) return -1;
+        tok = v->tokens[id];
+        if (wp_is_special(tok)) continue;
+        if (strncmp(tok, WP_CONT, 2) == 0) {
+            add = tok + 2;
+            need_space = 0;
+        } else {
+            int all_space = 1;
+            const unsigned char *p = (const unsigned char *)tok;
+            while (*p) {
+                unsigned int cp = 0;
+                int l = u8_decode(p, &cp);
+                if (l <= 0) { all_space = 0; break; }
+                if (cp_class(cp) != 2) { all_space = 0; break; }
+                p += l;
+            }
+            add = tok;
+            if (all_space) {
+                need_space = 0;
+            } else if (len > 0 && out[len - 1] != ' ' && out[len - 1] != '\t'
+                       && out[len - 1] != '\n') {
+                need_space = 1;
+            } else {
+                need_space = 0;
+            }
+        }
+        if (need_space) {
+            if (len + 2 > (size_t)cap) return -3;
+            out[len++] = ' ';
+            out[len] = '\0';
+        }
+        {
+            size_t al = strlen(add);
+            if (len + al + 1 > (size_t)cap) return -3;
+            memcpy(out + len, add, al);
+            len += al;
+            out[len] = '\0';
+        }
+    }
+    return (int)len;
+}
+
+int wp_save(const WpVocab *v, const char *path)
+{
+    JsonWriter w;
+    int i;
+
+    if (!v || !path) return -1;
+    jw_init(&w, 0);
+    jw_begin_object(&w);
+    jw_key(&w, "format");
+    jw_string(&w, "ai_wordpiece_v1");
+    jw_key(&w, "tokens");
+    jw_begin_array(&w);
+    for (i = 0; i < v->n; i++) {
+        if (i) jw_comma(&w);
+        jw_string(&w, v->tokens[i]);
+    }
+    jw_end_array(&w);
+    jw_end_object(&w);
+    i = jw_write_file(&w, path);
+    jw_free(&w);
+    return i;
+}
+
+WpVocab *wp_load(const char *path, char *err, size_t errlen)
+{
+    JsonValue *root;
+    const JsonValue *tokens;
+    const char **arr;
+    WpVocab *v;
+    int n, i;
+
+    if (!path) return NULL;
+    root = json_parse_file(path, err, errlen);
+    if (!root) return NULL;
+    if (root->kind != JSON_OBJECT
+        || !(tokens = json_get(root, "tokens")) || tokens->kind != JSON_ARRAY) {
+        if (err && errlen) snprintf(err, errlen, "wp_load: 缺少 tokens 数组");
+        json_free(root);
+        return NULL;
+    }
+    n = json_array_len(tokens);
+    arr = (const char **)tk_calloc((size_t)(n ? n : 1), sizeof(char *));
+    for (i = 0; i < n; i++) {
+        const JsonValue *t = json_at(tokens, i);
+        if (t->kind != JSON_STRING) {
+            if (err && errlen) snprintf(err, errlen, "wp_load: 第 %d 个 token 不是字符串", i);
+            free(arr);
+            json_free(root);
+            return NULL;
+        }
+        arr[i] = t->str;
+    }
+    v = wp_create(arr, n, err, errlen);
+    free(arr);
+    json_free(root);
+    return v;
+}

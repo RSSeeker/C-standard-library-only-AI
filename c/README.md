@@ -34,7 +34,7 @@
 | `augment_cutmix` / `augment_cutout` / `augment_randaugment` / `mixup` | `augment.c` | 已完成，24 项逐位一致（随机量由参考脚本注入，见下） |
 | `LoRA` / `EMA` / `SWA` / `Lookahead` | `adapt.c` | 已完成，28 个数组逐位一致（LoRA 的 forward / dx / grad_A / grad_B / merge / 合并后的 forward 与 dx；EMA / SWA / Lookahead 的更新顺序） |
 | `TokenClassificationHead` / `MultiLabelHead` / `MoE` | `heads.c` | 已完成，70 项数组逐位相同 + 39 项闭式与差分自测 |
-| `BytePairTokenizer`（字节级 BPE） | `text_tok.c` | 已完成，112 项逐位相同（8 组语料：ASCII / 标点 / CJK / 希腊·西里尔 / emoji / 空白 / 单字符 / 无可合并） |
+| `BytePairTokenizer`（字节级 BPE）/ `WordPieceTokenizer` | `text_tok.c` | 已完成，166 项逐位相同（BPE 112 项、8 组语料：ASCII / 标点 / CJK / 希腊-西里尔 / emoji / 空白 / 单字符 / 不合并；WordPiece 54 项、4 组训练语料 + 1 组手写词表） |
 | `RNNCell/RNN` / `LSTMCell/LSTM` / `GRUCell/GRU` + step cache | `rnn.c` | 已完成 |
 | `MultiHeadAttention` / `FeedForward` / `TransformerEncoder(Layer)` / `PositionalEncoding` / `Embedding` | `attention.c` | 已完成（含 `causal` 因果掩码开关、`mha_set_window` 滑动窗口、`mha_set_rope` 旋转位置编码、`mha_create_gqa` 的 GQA/MQA、`mha_set_alibi` + `tel_set_alibi` / `te_set_alibi` 的 ALiBi 距离偏置、`mha_forward_step` 增量前向、`mha_set_training` + `mha_set_attn_mask` 的注意力权重 dropout） |
 | `MultiHeadAttention(causal=True)` / `CausalLM`（LLM） | `attention.c` + `llm.c` | 已完成：因果掩码、teacher forcing 训练、自回归生成、`llm_generate_p`（nucleus 采样）、`llm_generate_ex` / `llm_generate_cached_ex`（min_p + repetition/presence/frequency 罚分 + no_repeat_ngram）、`llm_perplexity` |
@@ -106,7 +106,7 @@ c/
 ├── model_io.h / .c        与 Python 的 save_model/load_model 格式互通
 ├── model_high.h / .c      make_classifier / make_regressor / quick_train
 ├── text.h / text.c        TextProcessor / generate_text / softmax_with_temp / sample_index
-├── text_tok.h / text_tok.c   BytePairTokenizer（字节级 BPE）
+├── text_tok.h / text_tok.c   BytePairTokenizer（字节级 BPE）/ WordPieceTokenizer
 ├── sched.h / sched.c      梯度裁剪 + StepLR / ExponentialLR / CosineAnnealingLR
 ├── demo.c                 对应 README 快速开始的示例
 ├── bench.c                性能基准
@@ -168,7 +168,7 @@ Python 写 -> C 读：  最大差异 0.000e+00  PASS   （含 softmax 输出层�
 python tools/ffn_reference.py && ./tests/compare_ffn       # 16 用例 104 数组
 python tools/adapt_reference.py && ./tests/compare_adapt   # 28 数组，全部 0.000e+00
 python tools/heads_reference.py && ./tests/compare_heads   # 70 数组，全部 0.000e+00
-python tools/text_tok_reference.py && ./tests/compare_text_tok   # 112 项，全部逐位
+python tools/text_tok_reference.py && ./tests/compare_text_tok   # 166 项，全部逐位
 python tools/norm_reference.py && ./tests/compare_norm     # 50 项，全部 0.000e+00
 python tools/conv_reference.py && ./tests/compare_conv     # 70 项，全部 0.000e+00
 python tools/llm_reference.py && ./tests/compare_llm      # 6 段，见下
@@ -276,6 +276,7 @@ dilation=2、groups+dilation+stride 叠加）、Conv1d（五种配置：默认�
 覆盖：`FeedForward` 的 8 种中间层激活（`ff_create_ex` / `ff_set_activation`，relu 分支逐字保留，非 relu 时缓存激活前的 `z` 供反向取导数；GELU 的 `u = C*(z + 0.044715*z^3)` 与 sigmoid 的 `z>=0` 免溢出分支都照抄 Python）、
 覆盖：`BatchNorm2d`（训练 forward、反向 dx / grad_gamma / grad_beta、running_mean / running_var
 覆盖：`BytePairTokenizer`（`bpe_pretokenize` 的三类切块、`bpe_train` 的挑对次序「次数降序再按 (a,b) 升序」与 `min_frequency` 提前停止、`bpe_create_from_merges` 的「只能引用已定义 id」校验、`bpe_encode` 的 rank 最小优先替换、`bpe_decode` 的 UTF-8 严格校验、`bpe_save` / `bpe_load` 的 JSON 往返）；8 组语料 112 项全部逐位相同，`tests/test_text_tok.c` 另加 35 项切块/确定性/往返/非法输入自测。**已知差异**：Python 的 `str.isalnum()` 是完整 Unicode 判定，C 侧只用一张拉丁/希腊/西里尔/CJK/假名/谚文子表，表外码点（含表外字母）按「其它符号」处理，因此这些脚本的切块边界可能与 Python 不同；对拍语料里的字符都在子表内或两边同为「其它」。
+覆盖（WordPiece）：`wp_create` 的词表校验（缺特殊标记 / 重复 / 空 token / 只有 `##` 前缀）、`wp_train` 的初始切片顺序与「频次 / (左频次 × 右频次)」打分（并列按 (left, right) 字典序，`merged` 已存在则停）、最长前缀匹配（`ab` 优先于 `a`+`##b`）、`max_chars_per_word` 按**码点**截断到 `[UNK]`、`encode_pair` 的 `[CLS] a [SEP] b [SEP]`、`decode` 的三条空规则（`##xx` 直接接 / 全空白 token 原样 / 词首 token 仅在当前不在空白处才补空格）、`wp_save` / `wp_load` 往返。已知差异同 BPE：C 的 `isalnum` 用 Unicode 子表，表外码点按「其它」。
 覆盖：`TokenClassificationHead`（训练 forward / loss / dlogits / dx / grad_W / grad_b / predict 与 mask）、`MultiLabelHead`（BCE-with-logits 的平均损失、sigmoid 概率、`predict` 的 `>=` 阈值）、`MoE`（只在 top-k 上做 softmax 的路由、按专家分组的 FFN 前向与反向、门控梯度 `dz = q_k(c_k - Σ q c)`）；70 项数组逐位相同（worst `4.163e-17`；MoE 的 gelu 走 exp/tanh 故容差 1e-12），`tests/test_heads.c` 另加 39 项闭式 + 逐参数差分 + 参数计数验证（`top_k = num_experts` 时门控才有非零梯度）。
 覆盖：LoRA（前向 / dx / grad_A / grad_B / merge）、EMA / SWA / Lookahead 的更新顺序与扁平快照。`numeric.h` 是 header-only（`static inline`），链接时不需要 `numeric.c`；`compare_adapt` 的矩阵-向量内积必须用 `dot_neumaier`（对齐 Python 的 `sum(map(mul, ...))`）。
 更新、mean / inv、x_hat；推理 forward 与「推理不更新 running 统计量」）、`GroupNorm`（forward、
