@@ -144,6 +144,17 @@ auto model = ai::quick_train(X, y, "regression", {32}, 200);
 
 所有函数返回 0 表示成功、-1 表示参数非法；参考数据由 `tools/gan_variants_reference.py` 从 Python 侧生成，`tests/compare_gan_variants.c` 逐项对拍（容差 1e-12）。
 
+### StyleGAN（映射网络 + AdaIN，前向）
+
+`stylegan.*` 提供简化 StyleGAN 生成器 `StyleGanGenerator` 的单向推理：
+
+- `z` 经两层 Mapping MLP（`relu -> linear`）得到 `w`；
+- 常数 `4×4×base` 特征 `conv1 -> AdaIN(style1) -> ReLU -> 最近邻上采样 8×8`；
+- `conv2 -> AdaIN(style2) -> ReLU -> 上采样 16×16`；
+- `to_rgb` 后 `tanh` 到 `[-1, 1]`。
+
+API：`sg_create(latent_dim, d_model, base, out_channels)`、`sg_free`、`sg_param_count`、`sg_forward(g, z, out)`、`sg_average_w(g, zs, n, out_w)`、`sg_last_w`。对拍参考由 `tools/stylegan_reference.py` 生成（`StyleGANGenerator(latent_dim=8, d_model=8, base=4)`，参数量 685），`tests/compare_stylegan.c` 比较前向输出与平均 `w`（容差 1e-12）；训练/反向未移植（README 边界）。
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -212,7 +223,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例等）
 ```
 
 ---
@@ -301,7 +312,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（73 个文件，约 25,500 行）
+├── c/                  # 纯 C17 引擎（75 个文件，约 25,800 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -318,6 +329,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── tts.*            #   语音合成（TextToMel 前向 / Griffin-Lim / Mel 反演）
 │   ├── pix2pix.*       #   图像到图像 Pix2Pix（PatchGAN + 卷积/转置卷积生成器）
 │   ├── gan_variants.*  #   GAN 辅助：淡入/逐阶段/AdaIN/截断/循环损失/R1-R2
+│   ├── stylegan.*      #   简化 StyleGAN 生成器前向（映射网络 + AdaIN）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
