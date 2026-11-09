@@ -320,6 +320,28 @@ void mlp_backward(MLP *m, const double *dout)
     }
 }
 
+void mlp_backward_with_input(MLP *m, const double *dout, double *dinput)
+{
+    int last = m->n_layers - 1;
+    int n = m->layers[last].fan_out;
+
+    /* 与 mlp_backward 相同的乒乓策略；差别是输入层也写 next delta，
+     * 循环结束时 nxt 正好是输入梯度。 */
+    double *cur = m->scratch_a;
+    double *nxt = m->scratch_b;
+    memcpy(cur, dout, (size_t)n * sizeof(double));
+
+    for (int i = last; i >= 0; i--) {
+        Layer *l = &m->layers[i];
+        layer_backward(l, cur, nxt);
+        if (i == 0) {
+            memcpy(dinput, nxt, (size_t)l->fan_in * sizeof(double));
+            return;
+        }
+        double *tmp = cur; cur = nxt; nxt = tmp;
+    }
+}
+
 /* ============================ 损失 ============================ */
 
 double mse_loss(const double *pred, const double *target, int n)

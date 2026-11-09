@@ -152,6 +152,9 @@ void  mlp_zero_grad(MLP *m);
 void  mlp_forward(MLP *m, const double *x, double *out);
 /* 把 dout 往回传，梯度累积到各层 gW/gb（调用前需 mlp_zero_grad 或在 batch 内累积） */
 void  mlp_backward(MLP *m, const double *dout);
+/* 同 mlp_backward，同时把输入梯度写入 dinput（长度 = 第一层 fan_in）。
+ * 供等变网络 / 自编码器等需要输入梯度的场景使用。 */
+void  mlp_backward_with_input(MLP *m, const double *dout, double *dinput);
 
 /* ================= 损失 ================= */
 double mse_loss(const double *pred, const double *target, int n);
