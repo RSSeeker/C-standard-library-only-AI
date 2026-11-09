@@ -125,6 +125,25 @@ auto model = ai::quick_train(X, y, "regression", {32}, 200);
 - **对拍**: `p2p_disc_set_weights` / `p2p_gen_set_weights` 可从外部灌入权重（跨语言逐位比对）
 - 边界：只支持 H/W 为偶数且能被 4 整除的方形输入；无 U-Net skip / InstanceNorm / 多尺度 PatchGAN；训练收敛不保证
 
+### GAN 变体辅助函数（Progressive / AdaIN / 循环损失 / R1·R2）
+
+`gan_variants.*` 把 GAN 变体族的纯数值构件集中到一处（图像按 `k*H*W + i*W + j` 展平）：
+
+| 函数 | 说明 |
+|------|------|
+| `gv_fade_in(low, high, c, lh, lw, alpha, out)` | Progressive growing 淡入：`(1-alpha)*upsample2x(low) + alpha*high` |
+| `gv_progressive_alpha(step, total, &alpha)` | 阶段系数 `min(1, max(0, step/total))` |
+| `gv_progressive_stages(...)` | 把递增分辨率展开成 `(low, high, alpha)` 调度 |
+| `gv_adain_style(features, c, h, w, style, eps, out, mean, std)` | 逐通道 AdaIN，`style` 长度 `2C` |
+| `gv_truncation_trick(w, w_avg, n, psi, out)` | StyleGAN 截断 `w_avg + psi*(w-w_avg)` |
+| `gv_cycle_consistency_loss(...)` | CycleGAN 循环一致性损失与两侧梯度 |
+| `gv_identity_mapping_loss(...)` | CycleGAN identity 映射损失 |
+| `gv_patchgan_targets(h, w, real, out)` | PatchGAN 全 1/全 0 目标网格 |
+| `gv_pix2pix_g_loss(...)` | Pix2Pix 生成器损失 `BCE(D(fake),1) + λ·L1` |
+| `gv_r1_penalty` / `gv_r2_penalty` | R1/R2 梯度罚项诊断量 `0.5*lam*mean(||g||²)` |
+
+所有函数返回 0 表示成功、-1 表示参数非法；参考数据由 `tools/gan_variants_reference.py` 从 Python 侧生成，`tests/compare_gan_variants.c` 逐项对拍（容差 1e-12）。
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -193,7 +212,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例等）
 ```
 
 ---
@@ -282,7 +301,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（71 个文件，约 25,100 行）
+├── c/                  # 纯 C17 引擎（73 个文件，约 25,500 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -298,6 +317,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── flowmatching.*   #   Flow Matching（整流流速度场 + Euler/Heun 采样）
 │   ├── tts.*            #   语音合成（TextToMel 前向 / Griffin-Lim / Mel 反演）
 │   ├── pix2pix.*       #   图像到图像 Pix2Pix（PatchGAN + 卷积/转置卷积生成器）
+│   ├── gan_variants.*  #   GAN 辅助：淡入/逐阶段/AdaIN/截断/循环损失/R1-R2
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
