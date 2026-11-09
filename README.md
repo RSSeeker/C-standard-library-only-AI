@@ -186,6 +186,23 @@ API：`pg_create(latent_dim, channels, n_stages, base, out_channels)`、`pg_free
 
 对拍参考由 `tools/clip_reference.py` 生成（`image_dim=3, text_dim=4, embed_dim=5, temperature=0.07`，参数 45），`tests/compare_clip.c` 比较投影、损失、梯度、SGD 更新后权重、相似度、clip_loss 梯度与检索率（容差 1e-12，实测 147/147 逐位级一致）。边界：只做线性投影头，无图像/文本编码器与预训练权重。
 
+### 分布式训练与低精度数值模拟
+
+`parallel.*` 对应 Python 的分布式训练模拟：
+
+- `par_split_ranges` / `par_fsdp_shard_flat` / `par_fsdp_all_gather`：连续分片与 all-gather；
+- `par_zero_step`：ZeRO-1 式「每 rank 只更新自己分片」；
+- `par_fsdp_reduce_scatter`：各 rank 梯度求平均后按分片切回；
+- `par_tensor_parallel`：Megatron 式列并行 / 行并行线性层前向（mode=0 列切、mode=1 行切）；
+- `par_sequence_parallel_layer_norm`：逐 token LayerNorm（序列并行数值对照）。
+
+`quant.*` 对应 Python 的低精度舍入：
+
+- `quant_fp16_round` / `quant_bf16_round` / `quant_fp8_round`（e4m3 / e5m2，饱和处理）；
+- `quant_fake_quantize`：对称均匀伪量化（可选自动算 scale，round-half-even）。
+
+对拍参考由 `tools/train_sim_reference.py` 生成，`tests/compare_train_sim.c` 比较分片/更新/并行前向/LayerNorm 与四种舍入及伪量化（容差 1e-12，实测 126/126 逐位相同）。
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -254,7 +271,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例 + 训练模拟 1 例等）
 ```
 
 ---
@@ -343,7 +360,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（81 个文件，约 27,000 行）
+├── c/                  # 纯 C17 引擎（85 个文件，约 27,700 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -364,6 +381,8 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── progressive.*   #   ProGAN 风格逐阶段增长生成器前向（fade_in）
 │   ├── cyclegan.*      #   CycleGAN 一步训练（循环一致性 + identity）
 │   ├── clip.*          #   CLIP 双塔相似度 / 对称 InfoNCE / 线性投影头
+│   ├── parallel.*      #   分布式训练数值模拟（FSDP / ZeRO / 张量并行 / 序列并行）
+│   ├── quant.*         #   fp16 / bf16 / fp8 舍入与对称伪量化
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
