@@ -155,6 +155,16 @@ auto model = ai::quick_train(X, y, "regression", {32}, 200);
 
 API：`sg_create(latent_dim, d_model, base, out_channels)`、`sg_free`、`sg_param_count`、`sg_forward(g, z, out)`、`sg_average_w(g, zs, n, out_w)`、`sg_last_w`。对拍参考由 `tools/stylegan_reference.py` 生成（`StyleGANGenerator(latent_dim=8, d_model=8, base=4)`，参数量 685），`tests/compare_stylegan.c` 比较前向输出与平均 `w`（容差 1e-12）；训练/反向未移植（README 边界）。
 
+### Progressive Growing（逐阶段增长，前向）
+
+`progressive.*` 提供 ProGAN 风格生成器 `ProgressiveGenerator` 的单向推理：
+
+- 阶段 0：`z -> fc(relu) -> (c0, base, base)`，再用 1×1 卷积得到低分辨率 RGB；
+- 每次 `pg_grow()` 追加一组 `ConvTranspose2d(k=4, s=2, p=1) + ReLU + 1×1 RGB 头`（分辨率翻倍）；
+- `pg_forward(g, z, alpha, out)` 中 `alpha<1` 时按 `fade_in(上一阶段 RGB, 当前 RGB, alpha)` 平滑混合，最后 `tanh`。
+
+API：`pg_create(latent_dim, channels, n_stages, base, out_channels)`、`pg_free`、`pg_out_shape`、`pg_grow`、`pg_param_count`、`pg_forward`。对拍参考由 `tools/progressive_reference.py` 生成（`latent_dim=8, channels=(8,4), base=2`；参数 818，grow 后 1083），`tests/compare_progressive.c` 比较 base/grow 前向与淡入（容差 1e-12，实测 11/11 逐位相同）；训练/反向未移植。
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -223,7 +233,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例等）
 ```
 
 ---
@@ -312,7 +322,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（75 个文件，约 25,800 行）
+├── c/                  # 纯 C17 引擎（77 个文件，约 26,100 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -330,6 +340,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── pix2pix.*       #   图像到图像 Pix2Pix（PatchGAN + 卷积/转置卷积生成器）
 │   ├── gan_variants.*  #   GAN 辅助：淡入/逐阶段/AdaIN/截断/循环损失/R1-R2
 │   ├── stylegan.*      #   简化 StyleGAN 生成器前向（映射网络 + AdaIN）
+│   ├── progressive.*   #   ProGAN 风格逐阶段增长生成器前向（fade_in）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
