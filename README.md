@@ -44,6 +44,10 @@ C++ 侧（`c_model.cpp/hpp`）提供与旧版一致的面向对象封装。同�
 - **STOI**: `am_stoi_score`（梅尔频带包络相关系数，返回 [0,1]，1 = 完全相同）
 - **PESQ 轻量代理**: `am_pesq_score`（频带对数谱失真 + 帧能量包络相关，返回 [1.0,4.5]）
 
+### 感知 / 视频指标
+- **LPIPS 轻量代理**: `vm_lpips_lite`（多尺度池化灰色梯度特征 + 单位化 RMSE，越小越相似）
+- **FVD 轻量代理**: `vm_fvd_lite`（默认帧表征的对角协方差 Fréchet 距离，越小分布越近）
+
 ### 高层 API（sklearn 风格）
 ```cpp
 // 分类
@@ -134,7 +138,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本指标 41 例 + 音频指标 15 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例等）
 ```
 
 ---
@@ -223,7 +227,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（51 个文件，约 19,600 行）
+├── c/                  # 纯 C17 引擎（53 个文件，约 20,000 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -235,6 +239,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── text.*          #   文本处理与生成
 │   ├── text_metrics.*  #   文本指标（METEOR / chrF / WER / CER）
 │   ├── audio_metrics.* #   音频指标（STOI / PESQ 轻量代理）
+│   ├── visual_metrics.*#   感知指标（LPIPS / FVD 轻量代理）
 │   ├── sched.*         #   学习率调度
 │   ├── tests/          #   有限差分梯度校验、跨语言逐位比对、零分配验证
 │   └── tools/          #   与 Python 版对拍的参考实现导出脚本
