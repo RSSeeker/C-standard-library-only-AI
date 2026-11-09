@@ -1007,6 +1007,13 @@ int llm_min_p_candidates(const double *logits, int n, double min_p)
     return kept;
 }
 
+const double *llm_hidden(const CausalLM *m, int *T_out)
+{
+    if (!m) return NULL;
+    if (T_out) *T_out = m->seq_len;
+    return m->h_buf ? m->h_buf->data : NULL;
+}
+
 int llm_param_count(const CausalLM *m)
 {
     int total = 0;

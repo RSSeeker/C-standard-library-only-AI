@@ -92,6 +92,12 @@ auto model = ai::quick_train(X, y, "regression", {32}, 200);
 - **模型**: `egnn_model_create(d_model, num_layers, d_ff)` / `egnn_model_loss_and_backward`（均值池化 readout，MSE 标量输出）
 - **边界**: 全连接边（n² 对），仅支持三维坐标；旋转/平移/置换等变由结构与反向公式保证，`tests/compare_egnn.c` 同时校验等变性与梯度。
 
+### 投机解码（Medusa / EAGLE）
+- **Medusa**: `medusa_heads_create` / `medusa_heads_forward` / `medusa_heads_loss_and_backward` / `medusa_decode`（K 个 linear 头同时猜未来 K 个 token，再交给目标模型整段前向验证）
+- **EAGLE**: `eagle_drafter_create` / `eagle_drafter_forward` / `eagle_decode`（隐藏状态 + 上一 token 词嵌入 → 草稿链，逐 token 贪心验证）
+- **统计**: `SpecStats` 记录 drafted / accepted / target_calls / accept_rate；`llm_hidden` 返回最近一次前向的隐藏状态供草稿器使用
+- 边界：草稿器随机初始化、未训练；验证严格按目标模型贪心一致；EAGLE 草稿器只做特征级预测、无反传
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -160,7 +166,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例等）
 ```
 
 ---
@@ -249,7 +255,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（61 个文件，约 22,700 行）
+├── c/                  # 纯 C17 引擎（63 个文件，约 23,300 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -260,6 +266,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── onnx_mlp.*      #   MLP ↔ ONNX（手写 protobuf 子集：导出/解析/执行）
 │   ├── offline_rl.*    #   IQL / CQL 离线强化学习（离散动作，手写反向）
 │   ├── egnn.*          #   E(3) 等变图神经网络 EGNN（三张 MLP + 坐标更新）
+│   ├── medusa.*        #   Medusa 多头 / EAGLE 特征草稿投机解码
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成

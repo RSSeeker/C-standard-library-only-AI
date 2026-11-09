@@ -185,6 +185,10 @@ int llm_generate_cached_ex(CausalLM *m, const int *prompt, int prompt_len, int m
                            double frequency_penalty, int no_repeat_ngram_size,
                            int *out, unsigned long long seed);
 
+/* 诊断 / 投机解码用：最近一次 llm_forward / kv 前向的隐藏状态 h（T 行 × d_model，行主序）。
+ * 返回内部缓冲，指针在下一次前向之前有效；未前向时返回 NULL。 */
+const double *llm_hidden(const CausalLM *m, int *T_out);
+
 /* 诊断 / 跨语言对拍用：把 min_p 截尾作用在一行 logits（长度 n，不修改原数组），
  * 返回保留的候选数。语义与 Python 的 _mask_min_p 相同（min_p <= 0 时返回 n）。 */
 int llm_min_p_candidates(const double *logits, int n, double min_p);
