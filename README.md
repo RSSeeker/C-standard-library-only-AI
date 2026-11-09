@@ -35,6 +35,11 @@ C++ 侧（`c_model.cpp/hpp`）提供与旧版一致的面向对象封装。同�
 - **学习率调度**: StepLR / ExponentialLR / CosineAnnealingLR
 - **Early Stopping** + 数据划分 + DataLoader
 
+### 文本评估指标
+- **METEOR 完整版**: `tm_meteor_score` / `tm_meteor_score_full`（精确→词干→同义词贪心对齐、chunk 双连续惩罚）
+- **chrF**: `tm_chrf_score` / `tm_chrf_score_tokens`（字符 n-gram F-beta，按有效 n 平均）
+- **错误率**: `tm_word_error_rate` / `tm_character_error_rate`（Levenshtein 编辑距离，含 tokens 版本）
+
 ### 高层 API（sklearn 风格）
 ```cpp
 // 分类
@@ -125,6 +130,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
+cd c && make check        # 与 Python 版逐位对拍（含文本指标的 41 例 METEOR / chrF / WER / CER）
 ```
 
 ---
@@ -213,7 +219,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（48 个文件，约 11400 行）
+├── c/                  # 纯 C17 引擎（49 个文件，约 19,100 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -223,6 +229,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
+│   ├── text_metrics.*  #   文本指标（METEOR / chrF / WER / CER）
 │   ├── sched.*         #   学习率调度
 │   ├── tests/          #   有限差分梯度校验、跨语言逐位比对、零分配验证
 │   └── tools/          #   与 Python 版对拍的参考实现导出脚本

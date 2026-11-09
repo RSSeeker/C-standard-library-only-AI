@@ -1,0 +1,565 @@
+{
+  "cases": [
+    {
+      "name": "meteor_identical",
+      "func": "meteor",
+      "tol": 0.0,
+      "value": 0.9976851851851852,
+      "pred": [
+        "the",
+        "cat",
+        "sat",
+        "on",
+        "the",
+        "mat"
+      ],
+      "ref": [
+        "the",
+        "cat",
+        "sat",
+        "on",
+        "the",
+        "mat"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5
+    },
+    {
+      "name": "meteor_one_add",
+      "func": "meteor",
+      "tol": 0.0,
+      "value": 0.6465517241379309,
+      "pred": [
+        "the",
+        "cat"
+      ],
+      "ref": [
+        "the",
+        "cat",
+        "sat"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5
+    },
+    {
+      "name": "meteor_reordered",
+      "func": "meteor",
+      "tol": 0.0,
+      "value": 0.9814814814814815,
+      "pred": [
+        "a",
+        "b",
+        "c"
+      ],
+      "ref": [
+        "c",
+        "b",
+        "a"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5
+    },
+    {
+      "name": "meteor_case_diff",
+      "func": "meteor",
+      "tol": 0.0,
+      "value": 0.0,
+      "pred": [
+        "The",
+        "Cat"
+      ],
+      "ref": [
+        "the",
+        "cat"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5
+    },
+    {
+      "name": "meteor_subset",
+      "func": "meteor",
+      "tol": 0.0,
+      "value": 0.754985754985755,
+      "pred": [
+        "a",
+        "b",
+        "c"
+      ],
+      "ref": [
+        "a",
+        "x",
+        "b",
+        "c"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5
+    },
+    {
+      "name": "meteor_no_match",
+      "func": "meteor",
+      "tol": 0.0,
+      "value": 0.0,
+      "pred": [
+        "x",
+        "y"
+      ],
+      "ref": [
+        "a",
+        "b"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5
+    },
+    {
+      "name": "meteor_empty_pred",
+      "func": "meteor",
+      "tol": 0.0,
+      "value": 0.0,
+      "pred": [],
+      "ref": [
+        "a"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5
+    },
+    {
+      "name": "meteor_stem_on",
+      "func": "meteor_full",
+      "tol": 0.0,
+      "value": 0.25,
+      "pred": [
+        "running",
+        "dogs"
+      ],
+      "ref": [
+        "runs",
+        "dog"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5,
+      "synonyms": null,
+      "use_stem": 1
+    },
+    {
+      "name": "meteor_stem_off",
+      "func": "meteor_full",
+      "tol": 0.0,
+      "value": 0.0,
+      "pred": [
+        "running",
+        "dogs"
+      ],
+      "ref": [
+        "runs",
+        "dog"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5,
+      "synonyms": null,
+      "use_stem": 0
+    },
+    {
+      "name": "meteor_synonyms",
+      "func": "meteor_full",
+      "tol": 0.0,
+      "value": 0.5,
+      "pred": [
+        "car"
+      ],
+      "ref": [
+        "automobile"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5,
+      "synonyms": [
+        [
+          "car",
+          "automobile",
+          "vehicle"
+        ]
+      ],
+      "use_stem": 1
+    },
+    {
+      "name": "meteor_synonyms_none",
+      "func": "meteor_full",
+      "tol": 0.0,
+      "value": 0.0,
+      "pred": [
+        "car"
+      ],
+      "ref": [
+        "automobile"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5,
+      "synonyms": null,
+      "use_stem": 1
+    },
+    {
+      "name": "meteor_mixed_synonyms",
+      "func": "meteor_full",
+      "tol": 0.0,
+      "value": 0.3448275862068965,
+      "pred": [
+        "a",
+        "b"
+      ],
+      "ref": [
+        "a",
+        "automobile",
+        "b"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5,
+      "synonyms": [
+        [
+          "car",
+          "automobile"
+        ]
+      ],
+      "use_stem": 1
+    },
+    {
+      "name": "meteor_full_chinese",
+      "func": "meteor_full",
+      "tol": 0.0,
+      "value": 0.9921875,
+      "pred": [
+        "你",
+        "好",
+        "世",
+        "界"
+      ],
+      "ref": [
+        "你",
+        "好",
+        "世",
+        "界"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5,
+      "synonyms": null,
+      "use_stem": 1
+    },
+    {
+      "name": "meteor_full_order",
+      "func": "meteor_full",
+      "tol": 0.0,
+      "value": 0.5,
+      "pred": [
+        "c",
+        "b",
+        "a"
+      ],
+      "ref": [
+        "a",
+        "b",
+        "c"
+      ],
+      "alpha": 0.9,
+      "beta": 3.0,
+      "gamma": 0.5,
+      "synonyms": null,
+      "use_stem": 1
+    },
+    {
+      "name": "meteor_full_alpha",
+      "func": "meteor_full",
+      "tol": 0.0,
+      "value": 0.9375,
+      "pred": [
+        "the",
+        "cat"
+      ],
+      "ref": [
+        "the",
+        "cat"
+      ],
+      "alpha": 0.5,
+      "beta": 3.0,
+      "gamma": 0.5,
+      "synonyms": null,
+      "use_stem": 1
+    },
+    {
+      "name": "chrf_identical",
+      "func": "chrf",
+      "tol": 0.0,
+      "value": 1.0,
+      "pred": "the cat sat on the mat",
+      "ref": "the cat sat on the mat",
+      "max_n": 6,
+      "beta": 2.0
+    },
+    {
+      "name": "chrf_case",
+      "func": "chrf",
+      "tol": 0.0,
+      "value": 1.0,
+      "pred": "The Cat",
+      "ref": "the cat",
+      "max_n": 6,
+      "beta": 2.0
+    },
+    {
+      "name": "chrf_ws",
+      "func": "chrf",
+      "tol": 0.0,
+      "value": 1.0,
+      "pred": "a  b\tc",
+      "ref": "a b c",
+      "max_n": 6,
+      "beta": 2.0
+    },
+    {
+      "name": "chrf_chinese",
+      "func": "chrf",
+      "tol": 0.0,
+      "value": 1.0,
+      "pred": "你好世界",
+      "ref": "你好世界",
+      "max_n": 6,
+      "beta": 2.0
+    },
+    {
+      "name": "chrf_chinese_partial",
+      "func": "chrf",
+      "tol": 0.0,
+      "value": 0.7738095238095238,
+      "pred": "你好世界",
+      "ref": "你好",
+      "max_n": 6,
+      "beta": 2.0
+    },
+    {
+      "name": "chrf_short_ref",
+      "func": "chrf",
+      "tol": 0.0,
+      "value": 0.31135531135531136,
+      "pred": "ab",
+      "ref": "abcdef",
+      "max_n": 3,
+      "beta": 2.0
+    },
+    {
+      "name": "chrf_max2",
+      "func": "chrf",
+      "tol": 0.0,
+      "value": 1.0,
+      "pred": "the cat sat",
+      "ref": "the cat sat",
+      "max_n": 2,
+      "beta": 2.0
+    },
+    {
+      "name": "chrf_beta1",
+      "func": "chrf",
+      "tol": 0.0,
+      "value": 0.4013648388648388,
+      "pred": "hello world",
+      "ref": "hello there",
+      "max_n": 6,
+      "beta": 1.0
+    },
+    {
+      "name": "chrf_tok_case",
+      "func": "chrf_tokens",
+      "tol": 0.0,
+      "value": 1.0,
+      "pred": [
+        "Hello",
+        "World"
+      ],
+      "ref": [
+        "hello",
+        "world"
+      ],
+      "max_n": 6,
+      "beta": 2.0
+    },
+    {
+      "name": "chrf_tok_partial",
+      "func": "chrf_tokens",
+      "tol": 0.0,
+      "value": 0.8099906629318395,
+      "pred": [
+        "a",
+        "b",
+        "c"
+      ],
+      "ref": [
+        "a",
+        "b"
+      ],
+      "max_n": 6,
+      "beta": 2.0
+    },
+    {
+      "name": "chrf_tok_empty",
+      "func": "chrf_tokens",
+      "tol": 0.0,
+      "value": 0.0,
+      "pred": [],
+      "ref": [
+        "a"
+      ],
+      "max_n": 6,
+      "beta": 2.0
+    },
+    {
+      "name": "wer_identical",
+      "func": "wer",
+      "tol": 0.0,
+      "value": 0.0,
+      "ref": "the cat sat",
+      "hyp": "the cat sat"
+    },
+    {
+      "name": "wer_sub",
+      "func": "wer",
+      "tol": 0.0,
+      "value": 0.3333333333333333,
+      "ref": "a b c",
+      "hyp": "a x c"
+    },
+    {
+      "name": "wer_ins",
+      "func": "wer",
+      "tol": 0.0,
+      "value": 0.5,
+      "ref": "a b",
+      "hyp": "a b c"
+    },
+    {
+      "name": "wer_del",
+      "func": "wer",
+      "tol": 0.0,
+      "value": 0.6666666666666666,
+      "ref": "a b c",
+      "hyp": "a"
+    },
+    {
+      "name": "wer_all",
+      "func": "wer",
+      "tol": 0.0,
+      "value": 1.0,
+      "ref": "a b c",
+      "hyp": "x y z"
+    },
+    {
+      "name": "wer_multi_space",
+      "func": "wer",
+      "tol": 0.0,
+      "value": 0.0,
+      "ref": "a   b\tc",
+      "hyp": "a b c"
+    },
+    {
+      "name": "wer_chinese",
+      "func": "wer",
+      "tol": 0.0,
+      "value": 0.0,
+      "ref": "你好 世界",
+      "hyp": "你好 世界"
+    },
+    {
+      "name": "wer_tok_case",
+      "func": "wer_tokens",
+      "tol": 0.0,
+      "value": 1.0,
+      "ref": [
+        "The",
+        "Cat"
+      ],
+      "hyp": [
+        "the",
+        "cat"
+      ]
+    },
+    {
+      "name": "wer_tok_sub",
+      "func": "wer_tokens",
+      "tol": 0.0,
+      "value": 0.3333333333333333,
+      "ref": [
+        "a",
+        "b",
+        "c"
+      ],
+      "hyp": [
+        "a",
+        "x",
+        "c"
+      ]
+    },
+    {
+      "name": "cer_identical",
+      "func": "cer",
+      "tol": 0.0,
+      "value": 0.0,
+      "ref": "你好世界",
+      "hyp": "你好世界"
+    },
+    {
+      "name": "cer_sub",
+      "func": "cer",
+      "tol": 0.0,
+      "value": 0.25,
+      "ref": "你好世界",
+      "hyp": "你好世"
+    },
+    {
+      "name": "cer_ins",
+      "func": "cer",
+      "tol": 0.0,
+      "value": 0.5,
+      "ref": "你好",
+      "hyp": "你们好"
+    },
+    {
+      "name": "cer_empty_hyp",
+      "func": "cer",
+      "tol": 0.0,
+      "value": 1.0,
+      "ref": "abc",
+      "hyp": ""
+    },
+    {
+      "name": "cer_english",
+      "func": "cer",
+      "tol": 0.0,
+      "value": 0.14285714285714285,
+      "ref": "the cat",
+      "hyp": "the kat"
+    },
+    {
+      "name": "cer_tok_sub",
+      "func": "cer_tokens",
+      "tol": 0.0,
+      "value": 0.6666666666666666,
+      "ref": [
+        "a",
+        "b",
+        "c"
+      ],
+      "hyp": [
+        "a",
+        "x"
+      ]
+    }
+  ]
+}
