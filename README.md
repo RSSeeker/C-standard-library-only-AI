@@ -175,6 +175,17 @@ API：`pg_create(latent_dim, channels, n_stages, base, out_channels)`、`pg_free
 
 对拍参考由 `tools/cyclegan_reference.py` 生成（两个 `Pix2PixGenerator` + 两个 `PatchDiscriminator`、8×8 图像、一步训练），`tests/compare_cyclegan.c` 比较五项损失、四个网络更新后的全部权重与更新后 fake 输出（容差 1e-9，实测 38/38 逐位相同）。`fit_cyclegan` 的多步循环与随机采样未移植（由调用方组织。
 
+### CLIP 双塔（相似度 / 对称 InfoNCE / 检索 / 线性投影头）
+
+`clip.*` 移植 Python 的多模态双塔组件：
+
+- `cm_clip_similarity(imgs,n,d,txts,n_txt,d2,sim)`：行归一化后的余弦相似度矩阵；
+- `cm_clip_loss(imgs,n,d,txts,d2,temperature,g_img,g_txt)`：对称 InfoNCE（第 i 对为正样本），返回损失并可回填两侧梯度（含归一化反向）；
+- `cm_clip_retrieval_accuracy(...)`：图文检索 i2t / t2i 命中率；
+- `cm_projector_create/free/param_count/set_weights/project/loss/loss_and_grads/apply_sgd`：`ClipProjector` 两个线性投影头（温度、权重布局 `[embed][输入维]`）。
+
+对拍参考由 `tools/clip_reference.py` 生成（`image_dim=3, text_dim=4, embed_dim=5, temperature=0.07`，参数 45），`tests/compare_clip.c` 比较投影、损失、梯度、SGD 更新后权重、相似度、clip_loss 梯度与检索率（容差 1e-12，实测 147/147 逐位级一致）。边界：只做线性投影头，无图像/文本编码器与预训练权重。
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -243,7 +254,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例等）
 ```
 
 ---
@@ -332,7 +343,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（79 个文件，约 26,500 行）
+├── c/                  # 纯 C17 引擎（81 个文件，约 27,000 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -352,6 +363,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── stylegan.*      #   简化 StyleGAN 生成器前向（映射网络 + AdaIN）
 │   ├── progressive.*   #   ProGAN 风格逐阶段增长生成器前向（fade_in）
 │   ├── cyclegan.*      #   CycleGAN 一步训练（循环一致性 + identity）
+│   ├── clip.*          #   CLIP 双塔相似度 / 对称 InfoNCE / 线性投影头
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
