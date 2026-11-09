@@ -77,6 +77,8 @@ check: compare_python
 	$(MAKE) tests/compare_audio_metrics && ./tests/compare_audio_metrics audio_metrics_reference.json
 	python tools/visual_metrics_reference.py visual_metrics_reference.json
 	$(MAKE) tests/compare_visual_metrics && ./tests/compare_visual_metrics visual_metrics_reference.json
+	python tools/ctc_beam_reference.py ctc_beam_reference.json
+	$(MAKE) tests/compare_ctc_beam && ./tests/compare_ctc_beam ctc_beam_reference.json
 	python tools/conv_reference.py conv_reference.json
 	$(MAKE) tests/compare_conv && ./tests/compare_conv conv_reference.json
 	python tools/llm_reference.py llm_reference.json
@@ -99,6 +101,6 @@ clean:
 	      norm_reference.json conv_reference.json llm_reference.json \
 	      adamw_reference.json lion_reference.json adafactor_reference.json \
 	      sched_extra_reference.json rmsnorm_reference.json activations_reference.json \
-	      loss_reference.json metrics_reference.json augment_reference.json ffn_reference.json adapt_reference.json heads_reference.json text_tok_reference.json text_metrics_reference.json audio_metrics_reference.json visual_metrics_reference.json
+	      loss_reference.json metrics_reference.json augment_reference.json ffn_reference.json adapt_reference.json heads_reference.json text_tok_reference.json text_metrics_reference.json audio_metrics_reference.json visual_metrics_reference.json ctc_beam_reference.json
 
 .PHONY: all test check clean

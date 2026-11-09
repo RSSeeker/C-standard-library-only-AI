@@ -48,6 +48,10 @@ C++ 侧（`c_model.cpp/hpp`）提供与旧版一致的面向对象封装。同�
 - **LPIPS 轻量代理**: `vm_lpips_lite`（多尺度池化灰色梯度特征 + 单位化 RMSE，越小越相似）
 - **FVD 轻量代理**: `vm_fvd_lite`（默认帧表征的对角协方差 Fréchet 距离，越小分布越近）
 
+### ASR 解码
+- **CTC 前缀 beam search**: `ctc_prefix_beam_search`（Graves 的 p_blank / p_nonblank 合并，可注入字符级 LM 与长度惩罚）
+- **logits 入口**: `ctc_beam_decode`（内部逐帧 log_softmax 后调用上面的搜索）
+
 ### 高层 API（sklearn 风格）
 ```cpp
 // 分类
@@ -138,7 +142,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例等）
 ```
 
 ---
@@ -227,13 +231,14 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（53 个文件，约 20,000 行）
+├── c/                  # 纯 C17 引擎（55 个文件，约 20,400 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
 │   ├── layers_norm.*   #   BatchNorm1d / LayerNorm / Dropout
 │   ├── rnn.*           #   RNN / LSTM / GRU（完整 BPTT）
 │   ├── attention.*     #   多头注意力 / Transformer
+│   ├── ctc_beam.*      #   CTC 前缀 beam search / LM 浅融合解码
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
