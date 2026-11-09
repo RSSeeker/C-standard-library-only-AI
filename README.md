@@ -105,6 +105,13 @@ auto model = ai::quick_train(X, y, "regression", {32}, 200);
 - **一致性模型**: `consistency_training_loss`（student 对齐 teacher 两步 Euler 目标）、`consistency_sampler`
 - 边界：纯数值采样器，不依赖模型结构；sigma 调度与步数由调用方给定
 
+### Flow Matching（整流流）
+- **模型**: `flowmatching_create` / `flowmatching_free` / `flowmatching_param_count`（三层 MLP，时间特征 sin/cos）
+- **路径**: `flowmatching_interpolate`（直线插值）、`flowmatching_target`（目标速度 noise-x0）
+- **训练**: `flowmatching_velocity` 前向 + `flowmatching_train_step`（显式 t/noise，累积梯度）、`flowmatching_zero_grad` / `flowmatching_sgd_step`
+- **采样**: `flowmatching_sample`（给定初值，Euler / Heun 两种积分器）
+- 边界：只移植确定性的前向/反向/采样，RNG 由调用方提供初值（与 Python 的随机采样入口不同）
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -173,7 +180,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例等）
 ```
 
 ---
@@ -262,7 +269,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（65 个文件，约 23,700 行）
+├── c/                  # 纯 C17 引擎（67 个文件，约 23,800 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -275,6 +282,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── egnn.*          #   E(3) 等变图神经网络 EGNN（三张 MLP + 坐标更新）
 │   ├── medusa.*        #   Medusa 多头 / EAGLE 特征草稿投机解码
 │   ├── diffusion.*      #   EDM / DPM-Solver / Consistency 纯数值采样器
+│   ├── flowmatching.*   #   Flow Matching（整流流速度场 + Euler/Heun 采样）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
