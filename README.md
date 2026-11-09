@@ -403,6 +403,19 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ---
 
+## 与 Python 仓库的同步范围
+
+本项目是 `D:scode\Python-standard-library-only-AI-main` 的 C17 移植版，按 AGENTS.md 分批同步并在 `make check` 中逐位对拍（无法逐位一致的浮点仅因 libm 差异，按 JSON 中声明的容差判定）。已同步的能力：
+
+- **指标族**：文本 METEOR 完整版/chrF/WER/CER；音频 STOI/PESQ；视觉 LPIPS/FVD；CLIP 双塔相似度/对称 InfoNCE/检索/线性投影头；
+- **解码与导出**：CTC 前缀 beam search；MLP → ONNX 导出/解析/执行；Medusa 多头 / EAGLE 特征草稿投机解码；
+- **训练与 RL**：IQL/CQL 离线强化学习；E(3) 等变图神经网络（EGNN）；EDM/DPM-Solver/Consistency 扩散采样；Flow Matching 整流流；
+- **生成模型**：Pix2Pix 生成器/判别器与训练步；CycleGAN 一步训练；StyleGAN 前向；Progressive Growing 前向；GAN 变体辅助函数与 R1/R2 罚项；
+- **训练技术**：FSDP/ZeRO/张量并行/序列并行数值模拟；fp16/bf16/fp8 舍入与对称伪量化；
+- **语音**：TextToMel 前向、Griffin-Lim 声码器、Mel 反演（含 Python `random.Random` 兼容 MT19937）。
+
+尚未逐位移植的部分（C 侧按需扩展，不阻塞现有功能）：LLaMA/T5/BERT/ViT/Mamba/RWKV/RetNet/xLSTM/DeBERTa/ELECTRA/DETR 等大型模型类、真实分布式执行框架、PEFT 包装类（LoRA 等）与实验追踪/GUI 附属组件；C 侧已有的 GPT/LLM 推理（采样、KV cache、约束解码）与训练循环不在本表重复列出。
+
 ## 许可证
 
 MIT License
