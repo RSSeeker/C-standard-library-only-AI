@@ -165,6 +165,16 @@ API：`sg_create(latent_dim, d_model, base, out_channels)`、`sg_free`、`sg_par
 
 API：`pg_create(latent_dim, channels, n_stages, base, out_channels)`、`pg_free`、`pg_out_shape`、`pg_grow`、`pg_param_count`、`pg_forward`。对拍参考由 `tools/progressive_reference.py` 生成（`latent_dim=8, channels=(8,4), base=2`；参数 818，grow 后 1083），`tests/compare_progressive.c` 比较 base/grow 前向与淡入（容差 1e-12，实测 11/11 逐位相同）；训练/反向未移植。
 
+### CycleGAN（双向循环一致性训练步）
+
+`cyclegan.*` 复用 Pix2Pix 的生成器/判别器，实现一步 CycleGAN 训练：
+
+- 判别器阶段：`D_A` 对 `real_a` 目标 1、对 `fake_a` 目标 0；`D_B` 对 `real_b` 目标 1、对 `fake_b` 目标 0；各自 SGD 更新；
+- 生成器阶段：对抗（`D_A(fake_a)`、`D_B(fake_b)` 目标 1）+ 循环一致（`G_BA(G_AB(a))≈a`、`G_AB(G_BA(b))≈b`，权重 `lambda_cycle`）+ identity（`G_AB(b)≈b`、`G_BA(a)≈a`，权重 `lambda_identity`）；
+- 参数：`cyclegan_train_step(g_ab, g_ba, d_a, d_b, real_a, real_b, C, H, W, lambda_cycle, lambda_identity, lr_g, lr_d, &step)`，`CycleGanStep` 返回 `d_loss/g_loss/adv_loss/cycle_loss/identity_loss`。
+
+对拍参考由 `tools/cyclegan_reference.py` 生成（两个 `Pix2PixGenerator` + 两个 `PatchDiscriminator`、8×8 图像、一步训练），`tests/compare_cyclegan.c` 比较五项损失、四个网络更新后的全部权重与更新后 fake 输出（容差 1e-9，实测 38/38 逐位相同）。`fit_cyclegan` 的多步循环与随机采样未移植（由调用方组织。
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -233,7 +243,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例等）
 ```
 
 ---
@@ -322,7 +332,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（77 个文件，约 26,100 行）
+├── c/                  # 纯 C17 引擎（79 个文件，约 26,500 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -341,6 +351,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── gan_variants.*  #   GAN 辅助：淡入/逐阶段/AdaIN/截断/循环损失/R1-R2
 │   ├── stylegan.*      #   简化 StyleGAN 生成器前向（映射网络 + AdaIN）
 │   ├── progressive.*   #   ProGAN 风格逐阶段增长生成器前向（fade_in）
+│   ├── cyclegan.*      #   CycleGAN 一步训练（循环一致性 + identity）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成

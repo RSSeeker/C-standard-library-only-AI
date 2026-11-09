@@ -57,6 +57,10 @@ typedef struct {
 
     /* 输入尺寸（backward 反推 dx 尺寸用） */
     int in_h, in_w;
+
+    /* 输入梯度（backward 时保存，供 CycleGAN 这类多网络串联读取） */
+    double *dx;
+    int dx_n, dx_c, dx_h, dx_w;
 } Pix2PixGenerator;
 
 PatchDiscriminator *p2p_disc_create(int in_channels, int base);
@@ -86,6 +90,8 @@ int p2p_gen_forward(Pix2PixGenerator *g, const double *image,
 /* dy: out_channels x yh x yw；反向累积各层梯度。成功 0。 */
 int p2p_gen_backward(Pix2PixGenerator *g, const double *dy,
                      int C, int H, int W);
+/* 取生成器输入梯度（backward 之后调用；调用方 free） */
+int p2p_gen_input_grad(const Pix2PixGenerator *g, double **dx, int *n);
 
 /* 从外部灌入权重（跨语言对拍用）。
  * disc W1/W2/W3 按 [oc][ic][kh][kw] 展平；gen enc 同 Conv2d 布局，

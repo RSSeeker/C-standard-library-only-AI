@@ -241,7 +241,9 @@ int p2p_disc_backward(PatchDiscriminator *d, const double *dscores, int sh, int 
 int p2p_disc_input_grad(const PatchDiscriminator *d, double **dx, int *n)
 {
     if (!d || !d->dx || !dx) return -1;
-    *dx = d->dx;
+    *dx = (double *)malloc((size_t)d->dx_n * sizeof(double));
+    if (!*dx) return -1;
+    memcpy(*dx, d->dx, (size_t)d->dx_n * sizeof(double));
     if (n) *n = d->dx_n;
     return 0;
 }
@@ -282,6 +284,7 @@ Pix2PixGenerator *p2p_gen_create(int in_channels, int out_channels, int base)
 void p2p_gen_free(Pix2PixGenerator *g)
 {
     if (!g) return;
+    free(g->dx);
     conv2d_free(as_conv(g->enc1));
     conv2d_free(as_conv(g->enc2));
     convt2d_free(as_convt(g->dec1));
@@ -391,9 +394,33 @@ int p2p_gen_backward(Pix2PixGenerator *g, const double *dy, int C, int H, int W)
     for (int i = 0; i < d_a1->size; i++) d_o1->data[i] = d_a1->data[i] * g->m1[i];
     conv2d_backward(as_conv(g->enc1), d_o1, dx);
 
+    free(g->dx);
+    g->dx = (double *)malloc((size_t)dx->size * sizeof(double));
+    if (!g->dx) {
+        tensor_free(d_z); tensor_free(d_a3); tensor_free(d_o3);
+        tensor_free(d_a2); tensor_free(d_o2); tensor_free(d_a1);
+        tensor_free(d_o1); tensor_free(dx);
+        return -1;
+    }
+    memcpy(g->dx, dx->data, (size_t)dx->size * sizeof(double));
+    g->dx_n = (int)dx->size;
+    g->dx_c = g->in_channels;
+    g->dx_h = g->in_h;
+    g->dx_w = g->in_w;
+
     tensor_free(d_z); tensor_free(d_a3); tensor_free(d_o3);
     tensor_free(d_a2); tensor_free(d_o2); tensor_free(d_a1);
     tensor_free(d_o1); tensor_free(dx);
+    return 0;
+}
+
+int p2p_gen_input_grad(const Pix2PixGenerator *g, double **dx, int *n)
+{
+    if (!g || !g->dx || !dx || !n) return -1;
+    *dx = (double *)malloc((size_t)g->dx_n * sizeof(double));
+    if (!*dx) return -1;
+    memcpy(*dx, g->dx, (size_t)g->dx_n * sizeof(double));
+    *n = g->dx_n;
     return 0;
 }
 
