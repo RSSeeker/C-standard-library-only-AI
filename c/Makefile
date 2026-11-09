@@ -87,6 +87,8 @@ check: compare_python
 	$(MAKE) tests/compare_egnn && ./tests/compare_egnn egnn_reference.json
 	python tools/spec_decode_reference.py spec_decode_reference.json
 	$(MAKE) tests/compare_spec_decode && ./tests/compare_spec_decode spec_decode_reference.json
+	python tools/diffusion_reference.py diffusion_reference.json
+	$(MAKE) tests/compare_diffusion && ./tests/compare_diffusion diffusion_reference.json
 	python tools/conv_reference.py conv_reference.json
 	$(MAKE) tests/compare_conv && ./tests/compare_conv conv_reference.json
 	python tools/llm_reference.py llm_reference.json
@@ -109,6 +111,6 @@ clean:
 	      norm_reference.json conv_reference.json llm_reference.json \
 	      adamw_reference.json lion_reference.json adafactor_reference.json \
 	      sched_extra_reference.json rmsnorm_reference.json activations_reference.json \
-	      loss_reference.json metrics_reference.json augment_reference.json ffn_reference.json adapt_reference.json heads_reference.json text_tok_reference.json text_metrics_reference.json audio_metrics_reference.json visual_metrics_reference.json ctc_beam_reference.json onnx_mlp_reference.json offline_rl_reference.json egnn_reference.json spec_decode_reference.json
+	      loss_reference.json metrics_reference.json augment_reference.json ffn_reference.json adapt_reference.json heads_reference.json text_tok_reference.json text_metrics_reference.json audio_metrics_reference.json visual_metrics_reference.json ctc_beam_reference.json onnx_mlp_reference.json offline_rl_reference.json egnn_reference.json spec_decode_reference.json diffusion_reference.json
 
 .PHONY: all test check clean

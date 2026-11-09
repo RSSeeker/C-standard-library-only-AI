@@ -1,0 +1,334 @@
+{
+  "tol": 1e-12,
+  "cases": [
+    {
+      "name": "sigmas_basic",
+      "func": "sigmas",
+      "steps": 5,
+      "sigma_min": 0.01,
+      "sigma_max": 10.0,
+      "rho": 3.0,
+      "expected": [
+        10.000000000000002,
+        4.65484375,
+        1.66375,
+        0.34328125,
+        0.009999999999999995,
+        0.0
+      ]
+    },
+    {
+      "name": "sigmas_one_step",
+      "func": "sigmas",
+      "steps": 2,
+      "sigma_min": 0.002,
+      "sigma_max": 80.0,
+      "rho": 7.0,
+      "expected": [
+        80.0,
+        0.002000000000000003,
+        0.0
+      ]
+    },
+    {
+      "name": "sigmas_high_rho",
+      "func": "sigmas",
+      "steps": 7,
+      "sigma_min": 0.1,
+      "sigma_max": 50.0,
+      "rho": 12.5,
+      "expected": [
+        50.00000000000006,
+        21.499176228009485,
+        8.696016261387214,
+        3.2772976974288714,
+        1.1371112357036062,
+        0.35770787226739115,
+        0.09999999999999994,
+        0.0
+      ]
+    },
+    {
+      "name": "euler_basic",
+      "func": "edm_euler_sampler",
+      "x": [
+        0.5,
+        -1.0,
+        0.25
+      ],
+      "steps": 4,
+      "sigma_min": 0.01,
+      "sigma_max": 5.0,
+      "rho": 2.0,
+      "scale": 0.85,
+      "bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "expected": [
+        0.2803277197926758,
+        -0.5606554395853516,
+        0.1401638598963379
+      ]
+    },
+    {
+      "name": "euler_short",
+      "func": "edm_euler_sampler",
+      "x": [
+        1.0,
+        0.0
+      ],
+      "steps": 2,
+      "sigma_min": 0.05,
+      "sigma_max": 20.0,
+      "rho": 3.0,
+      "scale": 1.0,
+      "bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "expected": [
+        0.24261904761904765,
+        -0.39
+      ]
+    },
+    {
+      "name": "heun_basic",
+      "func": "edm_heun_sampler",
+      "x": [
+        0.5,
+        -1.0,
+        0.25
+      ],
+      "steps": 5,
+      "sigma_min": 0.01,
+      "sigma_max": 5.0,
+      "rho": 2.0,
+      "scale": 0.85,
+      "bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "expected": [
+        1.2902319991493196,
+        -2.5804639982986393,
+        0.6451159995746598
+      ]
+    },
+    {
+      "name": "heun_zero_bias",
+      "func": "edm_heun_sampler",
+      "x": [
+        0.3,
+        -0.7
+      ],
+      "steps": 3,
+      "sigma_min": 0.02,
+      "sigma_max": 8.0,
+      "rho": 4.0,
+      "scale": 0.6,
+      "bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "expected": [
+        0.7592693968731935,
+        -1.492422414419557
+      ]
+    },
+    {
+      "name": "dpm_basic",
+      "func": "dpm_solver_sampler",
+      "x": [
+        0.5,
+        -1.0,
+        0.25
+      ],
+      "steps": 6,
+      "sigma_min": 0.01,
+      "sigma_max": 5.0,
+      "rho": 2.0,
+      "scale": 0.85,
+      "bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "expected": [
+        0.3049668024041019,
+        -0.6099336048082038,
+        0.15248340120205095
+      ]
+    },
+    {
+      "name": "dpm_short",
+      "func": "dpm_solver_sampler",
+      "x": [
+        0.9
+      ],
+      "steps": 2,
+      "sigma_min": 0.1,
+      "sigma_max": 10.0,
+      "rho": 5.0,
+      "scale": 0.5,
+      "bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "expected": [
+        0.16749999999999998
+      ]
+    },
+    {
+      "name": "cd_loss_positive_next",
+      "func": "consistency_training_loss",
+      "x": [
+        0.5,
+        -1.0,
+        0.25
+      ],
+      "sigma": 2.0,
+      "sigma_next": 0.5,
+      "student_scale": 0.9,
+      "teacher_scale": 0.7,
+      "student_bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "teacher_bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "expected": [
+        0.00043871527777777805
+      ]
+    },
+    {
+      "name": "cd_loss_zero_next",
+      "func": "consistency_training_loss",
+      "x": [
+        0.5,
+        -1.0,
+        0.25
+      ],
+      "sigma": 1.5,
+      "sigma_next": 0.0,
+      "student_scale": 0.6,
+      "teacher_scale": 0.8,
+      "student_bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "teacher_bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "expected": [
+        0.0028000000000000017
+      ]
+    },
+    {
+      "name": "cd_loss_small_gap",
+      "func": "consistency_training_loss",
+      "x": [
+        0.2,
+        0.4
+      ],
+      "sigma": 0.8,
+      "sigma_next": 0.79,
+      "student_scale": 1.0,
+      "teacher_scale": 0.9,
+      "student_bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "teacher_bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "expected": [
+        0.00033460263682218877
+      ]
+    },
+    {
+      "name": "consistency_basic",
+      "func": "consistency_sampler",
+      "x": [
+        0.5,
+        -1.0,
+        0.25
+      ],
+      "steps": 4,
+      "sigma_min": 0.02,
+      "sigma_max": 40.0,
+      "rho": 7.0,
+      "scale": 0.75,
+      "bias": [
+        0.1,
+        -0.2,
+        0.05
+      ],
+      "expected": [
+        0.21312646839028687,
+        -0.42625293678057374,
+        0.10656323419514344
+      ]
+    },
+    {
+      "name": "error_sigmas_steps",
+      "func": "error",
+      "target": "sigmas",
+      "steps": 1
+    },
+    {
+      "name": "error_sigmas_order",
+      "func": "error",
+      "target": "sigmas",
+      "steps": 5,
+      "sigma_min": 10.0,
+      "sigma_max": 0.01
+    },
+    {
+      "name": "error_euler_params",
+      "func": "error",
+      "target": "edm_euler_sampler",
+      "steps": 4,
+      "sigma_min": -1.0,
+      "sigma_max": 5.0,
+      "scale": 0.8
+    },
+    {
+      "name": "error_cd_next",
+      "func": "error",
+      "target": "consistency_training_loss",
+      "sigma": 1.0,
+      "sigma_next": 1.0
+    }
+  ]
+}
