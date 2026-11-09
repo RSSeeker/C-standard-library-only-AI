@@ -112,6 +112,12 @@ auto model = ai::quick_train(X, y, "regression", {32}, 200);
 - **采样**: `flowmatching_sample`（给定初值，Euler / Heun 两种积分器）
 - 边界：只移植确定性的前向/反向/采样，RNG 由调用方提供初值（与 Python 的随机采样入口不同）
 
+### 语音合成（TextToMel + Griffin-Lim 声码器）
+- **Griffin-Lim**: `tts_griffin_lim`（由幅度谱迭代估计相位还原波形，窗平方和归一化；`tts_wave_free` 释放）；RNG 为与 Python `random.Random(seed)` 逐位一致的 MT19937
+- **Mel 反演**: `tts_mel_to_linear`（Mel 滤波器组的最小二乘逆，负值截零）
+- **声学模型**: `text_to_mel_create` / `text_to_mel_forward` / `text_to_mel_param_count`（Embedding + 两次 same-padding Conv1d + ReLU + 线性输出，按 duration 展开 token）
+- 边界：TextToMel 只移植推理前向，不移植训练反向；Griffin-Lim 为纯数值算法，不依赖模型结构
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -180,7 +186,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例等）
 ```
 
 ---
@@ -269,7 +275,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（67 个文件，约 23,800 行）
+├── c/                  # 纯 C17 引擎（69 个文件，约 24,500 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -283,6 +289,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── medusa.*        #   Medusa 多头 / EAGLE 特征草稿投机解码
 │   ├── diffusion.*      #   EDM / DPM-Solver / Consistency 纯数值采样器
 │   ├── flowmatching.*   #   Flow Matching（整流流速度场 + Euler/Heun 采样）
+│   ├── tts.*            #   语音合成（TextToMel 前向 / Griffin-Lim / Mel 反演）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
