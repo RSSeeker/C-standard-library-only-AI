@@ -76,6 +76,12 @@ auto model = ai::quick_train(X, y, "regression", {32}, 200);
 - **执行**: `onnx_mlp_forward`（纯 C 解释执行导出的计算图，不需要 onnxruntime）
 - 边界：导出只覆盖 C 的四种激活（linear/relu/leaky_relu/softmax）；解析/执行额外识别 Tanh/Sigmoid 节点
 
+### 离线强化学习（IQL / CQL）
+- **IQL**: `iql_create` / `iql_update` / `iql_act` / `iql_param_count`（expectile 回归 V + 无 max 的 Q 回归 + AWR 策略提取）
+- **CQL**: `cql_create` / `cql_update` / `cql_act`（TD 损失 + `alpha*(logsumexp Q - Q(s,a))` 保守项 + AWR）
+- **对拍辅助**: `iql_net_q` / `iql_net_v` / `iql_net_policy` / `cql_net_q` / `cql_net_policy` 可直接载入参考权重
+- 边界：离散动作；批次由调用方提供（无 ReplayBuffer）；目标网络按 target_tau 软更新
+
 ---
 
 ## 编译与运行
@@ -148,7 +154,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例等）
 ```
 
 ---
@@ -237,7 +243,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（57 个文件，约 21,500 行）
+├── c/                  # 纯 C17 引擎（59 个文件，约 22,100 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -246,6 +252,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── attention.*     #   多头注意力 / Transformer
 │   ├── ctc_beam.*      #   CTC 前缀 beam search / LM 浅融合解码
 │   ├── onnx_mlp.*      #   MLP ↔ ONNX（手写 protobuf 子集：导出/解析/执行）
+│   ├── offline_rl.*    #   IQL / CQL 离线强化学习（离散动作，手写反向）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
