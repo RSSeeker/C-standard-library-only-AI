@@ -118,6 +118,13 @@ auto model = ai::quick_train(X, y, "regression", {32}, 200);
 - **声学模型**: `text_to_mel_create` / `text_to_mel_forward` / `text_to_mel_param_count`（Embedding + 两次 same-padding Conv1d + ReLU + 线性输出，按 duration 展开 token）
 - 边界：TextToMel 只移植推理前向，不移植训练反向；Griffin-Lim 为纯数值算法，不依赖模型结构
 
+### Pix2Pix（可训练图像到图像）
+- **判别器**: `p2p_disc_create` / `p2p_disc_forward`（三层 PatchGAN，LeakyReLU(0.2)）/ `p2p_disc_backward`（返回输入图像梯度）/ `p2p_disc_sgd_step`
+- **生成器**: `p2p_gen_create` / `p2p_gen_forward`（两次 stride-2 卷积编码 + 两次转置卷积解码，ReLU + tanh）/ `p2p_gen_backward` / `p2p_gen_sgd_step`
+- **训练**: `p2p_train_step`（先判别器真图目标 1 / 假图目标 0，再生成器 BCE + λ·L1）
+- **对拍**: `p2p_disc_set_weights` / `p2p_gen_set_weights` 可从外部灌入权重（跨语言逐位比对）
+- 边界：只支持 H/W 为偶数且能被 4 整除的方形输入；无 U-Net skip / InstanceNorm / 多尺度 PatchGAN；训练收敛不保证
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -186,7 +193,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例等）
 ```
 
 ---
@@ -275,7 +282,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（69 个文件，约 24,500 行）
+├── c/                  # 纯 C17 引擎（71 个文件，约 25,100 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -290,6 +297,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── diffusion.*      #   EDM / DPM-Solver / Consistency 纯数值采样器
 │   ├── flowmatching.*   #   Flow Matching（整流流速度场 + Euler/Heun 采样）
 │   ├── tts.*            #   语音合成（TextToMel 前向 / Griffin-Lim / Mel 反演）
+│   ├── pix2pix.*       #   图像到图像 Pix2Pix（PatchGAN + 卷积/转置卷积生成器）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
