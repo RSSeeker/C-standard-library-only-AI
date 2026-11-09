@@ -40,6 +40,10 @@ C++ 侧（`c_model.cpp/hpp`）提供与旧版一致的面向对象封装。同�
 - **chrF**: `tm_chrf_score` / `tm_chrf_score_tokens`（字符 n-gram F-beta，按有效 n 平均）
 - **错误率**: `tm_word_error_rate` / `tm_character_error_rate`（Levenshtein 编辑距离，含 tokens 版本）
 
+### 音频质量指标
+- **STOI**: `am_stoi_score`（梅尔频带包络相关系数，返回 [0,1]，1 = 完全相同）
+- **PESQ 轻量代理**: `am_pesq_score`（频带对数谱失真 + 帧能量包络相关，返回 [1.0,4.5]）
+
 ### 高层 API（sklearn 风格）
 ```cpp
 // 分类
@@ -130,7 +134,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（含文本指标的 41 例 METEOR / chrF / WER / CER）
+cd c && make check        # 与 Python 版逐位对拍（文本指标 41 例 + 音频指标 15 例等）
 ```
 
 ---
@@ -219,7 +223,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（49 个文件，约 19,100 行）
+├── c/                  # 纯 C17 引擎（51 个文件，约 19,600 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -230,6 +234,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
 │   ├── text_metrics.*  #   文本指标（METEOR / chrF / WER / CER）
+│   ├── audio_metrics.* #   音频指标（STOI / PESQ 轻量代理）
 │   ├── sched.*         #   学习率调度
 │   ├── tests/          #   有限差分梯度校验、跨语言逐位比对、零分配验证
 │   └── tools/          #   与 Python 版对拍的参考实现导出脚本
