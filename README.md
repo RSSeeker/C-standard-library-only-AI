@@ -203,6 +203,18 @@ API：`pg_create(latent_dim, channels, n_stages, base, out_channels)`、`pg_free
 
 对拍参考由 `tools/train_sim_reference.py` 生成，`tests/compare_train_sim.c` 比较分片/更新/并行前向/LayerNorm 与四种舍入及伪量化（容差 1e-12，实测 126/126 逐位相同）。
 
+### LLaMA 式模型（前向）
+
+`llama.*` 把 C 侧既有构件拼成 LLaMA 解码器：
+
+- `LlamaBlock`：`RMSNorm → GQA 因果注意力（RoPE 内置）→ 残差 → RMSNorm → SwiGLU → 残差`（pre-norm）；
+- `LlamaModel`：`Embedding → N × LlamaBlock → RMSNorm → 词表头`；
+- SwiGLU 单独暴露：`out = (silu(xWg)+bg) ⊙ (xW1+b1) 后接 W2`。
+
+API：`llama_create / llama_free / llama_param_count / llama_forward`；`llama_emb / llama_block / llama_norm / llama_set_head` 用于灌入跨语言权重；`swiglu_create / swiglu_set_params / swiglu_forward / swiglu_param_count`。对拍参考由 `tools/llama_reference.py` 生成（`vocab=6, d_model=8, heads=2, kv_heads=1, d_ff=12, layers=2, max_len=8, rope=True`，参数 1214），`tests/compare_llama.c` 灌入同一组权重后比较前向 logits（容差 1e-12，实测 maxdiff 1.1e-15）。
+
+边界：只移植前向推理，不含反向、Adam 与生成循环；dropout 固定 0；不提供权重初始化等价性（跨语言对拍必须用访问器灌权重）。
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -360,7 +372,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（85 个文件，约 27,700 行）
+├── c/                  # 纯 C17 引擎（87 个文件，约 28,000 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -383,6 +395,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── clip.*          #   CLIP 双塔相似度 / 对称 InfoNCE / 线性投影头
 │   ├── parallel.*      #   分布式训练数值模拟（FSDP / ZeRO / 张量并行 / 序列并行）
 │   ├── quant.*         #   fp16 / bf16 / fp8 舍入与对称伪量化
+│   ├── llama.*         #   LLaMA 式模型前向（RMSNorm + GQA/RoPE + SwiGLU）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
