@@ -227,6 +227,18 @@ API：`llama_create / llama_free / llama_param_count / llama_forward`；`llama_e
 
 边界：只移植前向推理；无反向、无训练循环；dropout 固定 0；不包含 SQuAD 等下游任务头。
 
+### ViT 式视觉 Transformer（前向）
+
+`vit.*` 把 C 侧构件拼成视觉 Transformer：
+
+- `PatchEmbedding`：kernel=stride=patch_size 的 Conv2d，把 `(C,H,W)` 切成 `(d_model, gh, gw)` 再按行优先摊平成 token；
+- 前置可学习 `cls` + `pos`（num_patches+1 行）；
+- `TransformerEncoder` 编码后，仅取 CLS 位置做 LayerNorm，再接线性分类头。
+
+API：`vit_create / vit_free / vit_param_count / vit_forward`；`vit_patch_conv / vit_encoder / vit_norm` 用于灌入跨语言权重，`vit_set_cls_pos / vit_set_head` 设置前置向量与分类头。对拍参考由 `tools/vit_reference.py` 生成（`in_channels=1, image_size=8, patch_size=4, d_model=8, heads=2, d_ff=12, layers=1, num_classes=3`，参数 759），`tests/compare_vit.c` 灌权重后比较 logits（容差 1e-12，实测 maxdiff 8.3e-17）。
+
+边界：只移植前向；无反向、训练与 MAE 预训练；dropout 固定 0；`image_size` 必须能被 `patch_size` 整除。
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -384,7 +396,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（89 个文件，约 28,222 行）
+├── c/                  # 纯 C17 引擎（91 个文件，约 28,448 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -409,6 +421,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── quant.*         #   fp16 / bf16 / fp8 舍入与对称伪量化
 │   ├── llama.*         #   LLaMA 式模型前向（RMSNorm + GQA/RoPE + SwiGLU）
 │   ├── bert.*          #   BERT 式模型前向（MLM / NSP 双头）
+│   ├── vit.*           #   ViT 式视觉 Transformer 前向
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
