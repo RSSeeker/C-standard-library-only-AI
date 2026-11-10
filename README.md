@@ -307,6 +307,24 @@ C 侧 LayerNorm 用 Neumaier 补偿求和）。
 
 边界：只移植前向；门只由当前输入计算（不拼接 h_{t-1}）；无反向/训练/生成；dropout 固定 0。
 
+### Mamba 式模型（前向）
+
+`mamba.*` 移植 Mamba 语言模型的单向推理（Embedding → N×MambaBlock → 词表头）：
+
+- block：`in_proj` 投影出 x/z 两路；x 经 `_CausalConv1d`（权重 `[O][C][k]`、左补 `k-1`）与 SiLU 得 u；
+- `delta = softplus(u @ delta_proj)`、`B = u @ b_proj`、`C = u @ c_proj`，选择性扫描逐时刻递推
+  `h_t = exp(delta_t ⊙ A) ⊙ h_{t-1} + (delta_t ⊙ B_t) ⊙ u_t`、`y_t = C_t · h_t + D ⊙ u_t`；
+- 输出 `x + out_proj(y ⊙ SiLU(z))`。
+
+API：`mamba_create(vocab_size, d_model, d_state, d_conv, expand, num_layers, max_len, seed)`、
+`mamba_free`、`mamba_param_count`、`mamba_forward(ids, T, logits)`（结构与权重数组公开）。对拍参考
+（`MambaModel(vocab=6, d=8, d_state=4, d_conv=4, expand=2, layers=1, max_len=8, seed=3)`，参数 2054）由
+`tools/mamba_reference.py` 生成，`tests/compare_mamba.c` 比较 logits（容差 1e-12；
+C 侧卷积求和顺序与 Python 略有差异）。
+
+边界：只移植前向；`A` 直接作为参数（不做 `-exp(A_log)` 参数化）；顺序递推而非并行扫描；
+无反向/训练/生成；dropout 固定 0。
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -375,7 +393,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例 + 训练模拟 1 例 + LLaMA 1 例 + BERT 1 例 + ViT 1 例 + ELECTRA 1 例 + RWKV 1 例 + RetNet 1 例 + xLSTM 1 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例 + 训练模拟 1 例 + LLaMA 1 例 + BERT 1 例 + ViT 1 例 + ELECTRA 1 例 + RWKV 1 例 + RetNet 1 例 + xLSTM 1 例 + Mamba 1 例等）
 ```
 
 ---
@@ -464,7 +482,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（99 个文件，约 29,700 行）
+├── c/                  # 纯 C17 引擎（101 个文件，约 30,000 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -494,6 +512,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── rwkv.*          #   RWKV 式模型前向（时间混合 + 通道混合）
 │   ├── retnet.*        #   RetNet 式模型前向（多尺度保留 + FFN）
 │   ├── xlstm.*         #   xLSTM 式模型前向（sLSTM 记忆 + FFN）
+│   ├── mamba.*         #   Mamba 式模型前向（选择性扫描）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
@@ -525,7 +544,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 - **训练技术**：FSDP/ZeRO/张量并行/序列并行数值模拟；fp16/bf16/fp8 舍入与对称伪量化；
 - **语音**：TextToMel 前向、Griffin-Lim 声码器、Mel 反演（含 Python `random.Random` 兼容 MT19937）。
 
-尚未逐位移植的部分（C 侧按需扩展，不阻塞现有功能）：LLaMA/T5/BERT/ViT/Mamba/RWKV/RetNet/xLSTM/DeBERTa/ELECTRA/DETR 等大型模型类、真实分布式执行框架、PEFT 包装类（LoRA 等）与实验追踪/GUI 附属组件；C 侧已有的 GPT/LLM 推理（采样、KV cache、约束解码）与训练循环不在本表重复列出。
+尚未逐位移植的部分（C 侧按需扩展，不阻塞现有功能）：T5/DeBERTa/DETR 等大型模型类、真实分布式执行框架、PEFT 包装类（LoRA 等）与实验追踪/GUI 附属组件；C 侧已有的 GPT/LLM 推理（采样、KV cache、约束解码）与训练循环不在本表重复列出。
 
 ## 许可证
 
