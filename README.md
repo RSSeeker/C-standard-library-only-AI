@@ -239,6 +239,21 @@ API：`vit_create / vit_free / vit_param_count / vit_forward`；`vit_patch_conv 
 
 边界：只移植前向；无反向、训练与 MAE 预训练；dropout 固定 0；`image_size` 必须能被 `patch_size` 整除。
 
+### ELECTRA 判别器（前向）
+
+`electra.*` 移植 ELECTRA 判别器的前向：Embedding 词表为 `vocab_size+1`（多一行 mask token），
+`PositionalEncoding → TransformerEncoder`，最后用两个输出的差值做逐位置二分类打分：
+
+- `score[t] = (b_d[1]-b_d[0]) + Σ_j (W_d[1][j]-W_d[0][j]) * h[t][j]`；
+- `prob[t] = sigmoid(score[t])`。
+
+API：`electra_disc_create / electra_disc_free / electra_disc_param_count / electra_disc_forward`；
+`electra_disc_embedding / positional / encoder` 与 `electra_disc_set_head` 用于灌入跨语言权重。
+对拍参考由 `tools/electra_reference.py` 生成（vocab=6, d=8, heads=2, d_ff=12, layers=2, max_len=8；
+参数 1138；输入含 mask token id=6），`tests/compare_electra.c` 比较 score/prob（逐位相同）。
+
+边界：只移植判别器前向；生成器（MaskedLM）训练、BCE 反向与预训练流程未移植；dropout 固定 0。
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -396,7 +411,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（91 个文件，约 28,448 行）
+├── c/                  # 纯 C17 引擎（93 个文件，约 28,611 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -422,6 +437,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── llama.*         #   LLaMA 式模型前向（RMSNorm + GQA/RoPE + SwiGLU）
 │   ├── bert.*          #   BERT 式模型前向（MLM / NSP 双头）
 │   ├── vit.*           #   ViT 式视觉 Transformer 前向
+│   ├── electra.*       #   ELECTRA 判别器前向（逐位置二分类）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
