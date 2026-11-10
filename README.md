@@ -290,6 +290,23 @@ C 侧 LayerNorm 用 Neumaier 补偿求和）。
 
 边界：只移植前向；无反向、训练与生成；dropout 固定 0；序列长度不能超过 `max_len`。
 
+### xLSTM 式模型（前向）
+
+`xlstm.*` 移植 xLSTM 语言模型的单向推理（Embedding → N×XLSTMBlock → LayerNorm → 词表头）：
+
+- sLSTM cell（简化版）：`Wg` 投影出 i/f/z/o 四组门；
+  `i = exp(clamp(i_pre,-10,5))`、`f = sigmoid(f_pre)`、`z = tanh(z_pre)`、`o = sigmoid(o_pre)`；
+  逐通道记忆 `c_t = f*c_prev + i*z`、`n_t = f*n_prev + i`、`h_t = o*c_t/max(|n_t|,eps)`；
+- block：`ln1 → sLSTM → 残差`，再 `ln2 → W1(relu) → W2 → 残差`。
+
+API：`xlstm_create(vocab_size, d_model, d_ff, num_layers, max_len, seed)`、`xlstm_free`、
+`xlstm_param_count`、`xlstm_forward(ids, T, logits)`（结构与权重数组公开）。对拍参考
+（`XLSTMModel(vocab=6, d=8, d_ff=12, layers=1, max_len=8, seed=3)`，参数 722）由
+`tools/xlstm_reference.py` 生成，`tests/compare_xlstm.c` 比较 logits（容差 1e-12；
+C 侧 LayerNorm 用 Neumaier 补偿求和）。
+
+边界：只移植前向；门只由当前输入计算（不拼接 h_{t-1}）；无反向/训练/生成；dropout 固定 0。
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -358,7 +375,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例 + 训练模拟 1 例 + LLaMA 1 例 + BERT 1 例 + ViT 1 例 + ELECTRA 1 例 + RWKV 1 例 + RetNet 1 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例 + 训练模拟 1 例 + LLaMA 1 例 + BERT 1 例 + ViT 1 例 + ELECTRA 1 例 + RWKV 1 例 + RetNet 1 例 + xLSTM 1 例等）
 ```
 
 ---
@@ -447,7 +464,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（97 个文件，约 29,300 行）
+├── c/                  # 纯 C17 引擎（99 个文件，约 29,700 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -476,6 +493,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── electra.*       #   ELECTRA 判别器前向（逐位置二分类）
 │   ├── rwkv.*          #   RWKV 式模型前向（时间混合 + 通道混合）
 │   ├── retnet.*        #   RetNet 式模型前向（多尺度保留 + FFN）
+│   ├── xlstm.*         #   xLSTM 式模型前向（sLSTM 记忆 + FFN）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
