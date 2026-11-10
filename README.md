@@ -254,6 +254,24 @@ API：`electra_disc_create / electra_disc_free / electra_disc_param_count / elec
 
 边界：只移植判别器前向；生成器（MaskedLM）训练、BCE 反向与预训练流程未移植；dropout 固定 0。
 
+### RWKV 式模型（前向）
+
+`rwkv.*` 移植 RWKV 语言模型的单向推理（Embedding → N×RWKVBlock → LayerNorm → 词表头）：
+
+- time-mixing：`ln1` 后投影出 r/k/v；逐通道状态 `state = decay*state + k*v`（`decay = exp(-exp(w_raw))`），
+  输出 `y = r*(state + u*v)`，再经 `Wo` 加残差；
+- channel-mixing：`ln2` 后投影到 `d_ff`，`y2 = r2*relu(k2)^2*v2`，经 `Wo2` 加残差；
+- 末尾 `LayerNorm + W_out` 得到 logits。
+
+API：`rwkv_create(vocab_size, d_model, d_ff, num_layers, max_len, seed)`、`rwkv_free`、
+`rwkv_param_count`、`rwkv_forward(ids, T, logits)`（`RwkvModel`/`RwkvBlock` 结构体与权重数组公开，
+便于灌入 `tools/rwkv_reference.py` 导出的 Python 权重）。对拍参考
+（`RWKVModel(vocab=6, d=8, d_ff=12, layers=1, max_len=8, seed=3)`，参数 882）由
+`tools/rwkv_reference.py` 生成，`tests/compare_rwkv.c` 灌权重后比较 logits（容差 1e-12；
+C 侧 LayerNorm 用 Neumaier 补偿求和，与 Python 普通求和最多差几个 1e-15）。
+
+边界：只移植前向；无反向、训练与生成；dropout 固定 0；序列长度不能超过 `max_len`。
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -322,7 +340,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例 + 训练模拟 1 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例 + 训练模拟 1 例 + LLaMA 1 例 + BERT 1 例 + ViT 1 例 + ELECTRA 1 例 + RWKV 1 例等）
 ```
 
 ---
@@ -411,7 +429,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（93 个文件，约 28,611 行）
+├── c/                  # 纯 C17 引擎（95 个文件，约 28,900 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -438,6 +456,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── bert.*          #   BERT 式模型前向（MLM / NSP 双头）
 │   ├── vit.*           #   ViT 式视觉 Transformer 前向
 │   ├── electra.*       #   ELECTRA 判别器前向（逐位置二分类）
+│   ├── rwkv.*          #   RWKV 式模型前向（时间混合 + 通道混合）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
