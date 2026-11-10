@@ -1,5 +1,5 @@
 /*
- * llm.h —— 因果语言模型 CausalLM（移植自 AI.py 的 CausalLM）
+ * llm.h —— 因果语言模型 CausalLM（对应 Python 版 AI.py 的 CausalLM）
  *
  * 结构（与 Python 逐项对应）：
  *     Embedding(词表) → PositionalEncoding → TransformerEncoder(causal=True)
@@ -16,7 +16,7 @@
  *   - 随机数源不同（C 用 splitmix64，Python 用 Mersenne Twister），所以 p>0 的
  *     dropout 无法逐位对齐；p=0 时可完全对齐。构造权重同理：C 自己的初始化只保证
  *     分布一致，要与 Python 比对必须用 llm_param_blocks 灌入同一组权重。
- *   - 注意力权重 dropout 尚未移植（Python 已实现），本文件只把 p 传给两层 Dropout。
+ *   - 注意力权重 dropout 尚未实现（Python 已实现），本文件只把 p 传给两层 Dropout。
  * 热路径零 malloc：forward / backward / adam_step 只用 create 时预分配的缓冲。
  */
 #ifndef AI_LLM_H

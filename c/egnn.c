@@ -1,5 +1,5 @@
 /*
- * egnn.c —— E(3) 等变图神经网络（EGNN）的 C 移植
+ * egnn.c —— E(3) 等变图神经网络（EGNN）的 C 实现
  *
  * 与 Python 版 AI.py 逐项对应：
  *   边特征 e_ij = phi_e([h_i, h_j, ||x_i - x_j||^2])

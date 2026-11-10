@@ -1,5 +1,5 @@
 /*
- * attention.h —— Transformer 组件（移植自 AI.py）
+ * attention.h —— Transformer 组件（对应 Python 版 AI.py）
  *
  * 与 Python 版的对应关系：
  *   MultiHeadAttention     -> MultiHeadAttention

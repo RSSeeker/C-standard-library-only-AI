@@ -180,7 +180,7 @@ int cyclegan_train_step(Pix2PixGenerator *g_ab, Pix2PixGenerator *g_ba,
     if (cg_gen_forward(g_ba, real_b, C, H, W, &fake_a, &fac, &fah, &faw) != 0)
         goto done;
 
-    /* ---------- 1) 判别器阶段 ---------- */
+    /* ---------- 1) 更新判别器 ---------- */
     p2p_disc_zero_grad(d_a);
     loss_d_real_a = cg_disc_step(d_a, real_a, C, H, W, 1.0);
     if (loss_d_real_a < 0.0) goto done;
@@ -195,7 +195,7 @@ int cyclegan_train_step(Pix2PixGenerator *g_ab, Pix2PixGenerator *g_ba,
     if (loss_d_fake_b < 0.0) goto done;
     p2p_disc_sgd_step(d_b, lr_d);
 
-    /* ---------- 2) 生成器阶段 ---------- */
+    /* ---------- 2) 更新生成器 ---------- */
     p2p_gen_zero_grad(g_ab);
     p2p_gen_zero_grad(g_ba);
 

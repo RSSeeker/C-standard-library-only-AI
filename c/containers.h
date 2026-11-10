@@ -1,5 +1,5 @@
 /*
- * containers.h —— 通用容器：Sequential / ResidualBlock（移植自 AI.py）
+ * containers.h —— 通用容器：Sequential / ResidualBlock（对应 Python 版 AI.py）
  *
  * 与 Python 版的关键差异（有意为之的简化）：
  *

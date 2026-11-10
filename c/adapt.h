@@ -1,5 +1,5 @@
 /*
- * adapt.h — 低秩适配（LoRA）与权重平均（EMA / SWA / Lookahead）的 C17 移植
+ * adapt.h — 低秩适配（LoRA）与权重平均（EMA / SWA / Lookahead）的 C17 实现
  *
  * 与 AI.py 的对应关系：
  *   LoRA       -> 21190 附近的 class LoRA

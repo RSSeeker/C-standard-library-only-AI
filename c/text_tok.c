@@ -1,5 +1,5 @@
 /*
- * text_tok.c —— 字节级 BPE（Python `BytePairTokenizer` 的 C17 移植）
+ * text_tok.c —— 字节级 BPE（Python `BytePairTokenizer` 的 C17 实现）
  *
  * 关键点（与 Python 逐位对齐的地方）：
  *   - 合并规则的 id 分配：第 k 条（从 0 数）合并产生 id 256 + k；

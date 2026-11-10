@@ -1,5 +1,5 @@
 /* BERT 式模型前向（token + segment embedding → 正弦位置编码 → TransformerEncoder
- * → MLM / NSP 两个线性头）。对应 Python 的 AI.BertModel（只移植前向，无反向/训练）。
+ * → MLM / NSP 两个线性头）。对应 Python 的 AI.BertModel（只提供前向，无反向/训练）。
  *
  * 设计约定：
  *   - 输入是 (T) 的 int token id 与 0/1 segment id；输出 hidden 是 (T, d_model) 张量。

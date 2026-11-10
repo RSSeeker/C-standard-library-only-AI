@@ -1,5 +1,5 @@
 /* xLSTM 风格语言模型前向：Embedding → N×XLSTMBlock → LayerNorm → 词表头。
- * 对应 Python 的 AI.XLSTMModel（只移植前向）。
+ * 对应 Python 的 AI.XLSTMModel（只提供前向）。
  *
  * XLSTMBlock：pre-norm sLSTM 残差 + pre-norm FFN 残差
  *   sLSTM cell：Wg(d→4d) 得到 i/f/z/o 四组 pre-activation：

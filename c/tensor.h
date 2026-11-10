@@ -3,7 +3,7 @@
  *
  * 为什么需要它：Python 版的 CNN / RNN / 注意力涉及多维数据（C×H×W、(T, D) 等），
  * 而 ai.h 里的 MLP 用的是扁平数组。这里提供一个最小张量类型，
- * 让后续模块（Conv2d / MaxPool2d / BatchNorm / RNN / Attention…）有统一的数据载体。
+ * 为 Conv2d / MaxPool2d / BatchNorm / RNN / Attention 等模块提供统一的数据载体。
  *
  * 约定（与 Python 版一致的地方会特别注明）：
  *   - 一律行主序、double、连续内存

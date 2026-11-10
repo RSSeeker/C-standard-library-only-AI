@@ -1,7 +1,7 @@
 /*
  * rnn.h —— RNN / LSTM / GRU 家族（含 BPTT 用的 step cache 机制）
  *
- * 移植自 AI.py 的 RNN 部分：
+ * 对应 Python 版 AI.py 的 RNN 部分：
  *     _StepCacheMixin  -> RNNStepCache + xxx_cell_cache_snapshot / xxx_restore_cache
  *     RNNCell  / RNN   -> RNNCell  / RNN
  *     LSTMCell / LSTM  -> LSTMCell / LSTM

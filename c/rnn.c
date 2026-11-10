@@ -1,7 +1,7 @@
 /*
  * rnn.c —— RNN / LSTM / GRU 家族（含 BPTT 用的 step cache 机制）
  *
- * 移植自 AI.py 的 RNNCell / RNN、LSTMCell / LSTM、GRUCell / GRU。
+ * 对应 Python 版 AI.py 的 RNNCell / RNN、LSTMCell / LSTM、GRUCell / GRU。
  * 数值上逐条对齐 Python 的运算顺序（详见 rnn.h 顶部的约定）：
  *   - 前向预激活从偏置开始累加，再按 i 升序累加 W_ih 行 / W_hh 行；
  *   - GRU 的 _linear 分段（z_ih / z_hh 各自从偏置起累加，最后才相加）；

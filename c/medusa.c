@@ -1,9 +1,9 @@
 /*
- * medusa.c —— Medusa 多头草稿 / EAGLE 特征草稿与贪心验证解码（C17 移植）
+ * medusa.c —— Medusa 多头草稿 / EAGLE 特征草稿与贪心验证解码（C17 实现）
  *
  * 与 Python 版 AI.py 的对应关系见 medusa.h 顶部注释。所有数值运算顺序
  * 与 Python 版逐项一致：softmax（减 max 再 exp/sum）、交叉熵梯度
- * (probs - onehot) / (num_heads * n_rows)，验证阶段用目标模型整段前向。
+ * (probs - onehot) / (num_heads * n_rows)，验证时用目标模型整段前向。
  */
 #include "medusa.h"
 

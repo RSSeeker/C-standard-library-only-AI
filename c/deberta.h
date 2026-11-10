@@ -1,5 +1,5 @@
 /* DeBERTa 风格语言模型前向（单头解耦相对注意力，教学简化版）。
- * 对应 Python 的 AI.DeBERTaModel / AI.DeBERTaBlock（只移植前向）。
+ * 对应 Python 的 AI.DeBERTaModel / AI.DeBERTaBlock（只提供前向）。
  *
  * 注意力分数（因果，j <= t）：
  *   s(t, j) = scale · ( q_t·k_j + q_t·Rk[d] + k_j·Rq[d] ),  d = min(t-j, max_rel)

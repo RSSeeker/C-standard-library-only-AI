@@ -1,5 +1,5 @@
 /* RWKV 风格语言模型前向：Embedding → N×RWKVBlock → LayerNorm → 词表头。
- * 对应 Python 的 AI.RWKVModel（只移植前向，无反向/训练/生成）。
+ * 对应 Python 的 AI.RWKVModel（只提供前向，无反向/训练/生成）。
  *
  * 每个 block（与 Python 一致的简化 RWKV-4）：
  *   time-mixing：ln1 → r/k/v 线性 → 逐通道状态 state=decay*state+k*v →

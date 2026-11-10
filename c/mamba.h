@@ -1,5 +1,5 @@
 /* Mamba 风格语言模型前向：Embedding → N×MambaBlock → 词表头。
- * 对应 Python 的 AI.MambaModel（只移植前向）。
+ * 对应 Python 的 AI.MambaModel（只提供前向）。
  *
  * MambaBlock（简化版，与 Python 一致）：
  *   in_proj → 拆成 x/z → 因果一维卷积（左补 k-1）→ SiLU 得 u；

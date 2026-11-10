@@ -1,5 +1,5 @@
 /* ============================================================================
- *  augment.h —— 数据增广内核的 C17 移植（增广族；ROADMAP §7.4 A 档）
+ *  augment.h —— 数据增广内核的 C17 实现（增广族；ROADMAP §7.4 A 档）
  *
  *  对齐 Python：`AI.augment_cutmix` / `augment_cutout` / `augment_randaugment`
  *  与 `AI.mixup`，以及它们的内部助手 `_aug_brightness` / `_aug_contrast` /

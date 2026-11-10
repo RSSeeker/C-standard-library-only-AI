@@ -1,5 +1,5 @@
 /*
- * ai.h —— Python 版神经网络工具箱的 C 移植（核心数值路径）
+ * ai.h —— Python 版神经网络工具箱的 C 实现（核心数值路径）
  *
  * 与 Python 版 AI.py 的对应关系：
  *   Layer / MLP        -> Layer / MLP

@@ -1,7 +1,7 @@
 /*
  * ai.c —— Python 版神经网络工具箱的 C 实现（核心数值路径）
  *
- * 移植自 AI.py，数值上刻意对齐 Python 的运算顺序与求和方式：
+ * 对应 Python 版 AI.py，数值上刻意对齐 Python 的运算顺序与求和方式：
  *   - 点积 / MSE 求和使用 Neumaier 补偿求和，对齐 CPython 3.12+ 的 sum()
  *   - Adam 的偏差修正、梯度累加顺序与 Model.fit 完全一致
  *   - softmax 输出层的反向沿用 softmax+CE 联合梯度约定

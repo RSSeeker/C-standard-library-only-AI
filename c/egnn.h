@@ -1,5 +1,5 @@
 /*
- * egnn.h —— E(3) 等变图神经网络（EGNN）的 C 移植
+ * egnn.h —— E(3) 等变图神经网络（EGNN）的 C 实现
  *
  * 与 Python 版 AI.py 的对应关系：
  *   EGNNLayer -> EgnnLayer：phi_e / phi_x / phi_h 三张 MLP

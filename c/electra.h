@@ -1,5 +1,5 @@
 /* ELECTRA 判别器前向：双向 Transformer 编码 + 逐位置二分类打分。
- * 对应 Python 的 AI.ElectraDiscriminator（只移植前向）。
+ * 对应 Python 的 AI.ElectraDiscriminator（只提供前向）。
  *
  * 打分定义（与 Python 一致）：score[t] = (b_d[1]-b_d[0]) +
  *   Σ_j (W_d[1][j]-W_d[0][j]) * h[t][j]；probabilities = sigmoid(score)。

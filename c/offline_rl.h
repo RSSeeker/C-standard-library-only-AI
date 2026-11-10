@@ -45,7 +45,7 @@ IqlAgent *iql_create(int state_dim, int num_actions, const int *hidden,
 void iql_free(IqlAgent *a);
 
 /* 对一批转移做一次更新；losses[0..2] 写入 q_loss / v_loss / policy_loss。
- * 返回 0 成功，-1 表示参数非法（批次为空、动作越界、NaN 等）。 */
+ * 返回 0 成功，-1 表示参数非法（数据为空、动作越界、NaN 等）。 */
 int iql_update(IqlAgent *a, const double *states, const int *actions,
                const double *rewards, const double *next_states,
                const int *dones, int n, double losses[3]);

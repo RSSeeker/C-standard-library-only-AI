@@ -5,11 +5,11 @@
 #include "layers_conv.h"
 #include "tensor.h"
 
-/* ProGAN 风格逐阶段增长生成器（前向推理，与 Python AI.ProgressiveGenerator 对齐）
+/* ProGAN 风格逐分辨率增长生成器（前向推理，与 Python AI.ProgressiveGenerator 对齐）
  *
- * 阶段 0：z -> fc(relu) -> (c0, base, base) -> 1x1 RGB 头；
- * 之后每阶段：ConvTranspose2d(k=4,s=2,p=1) -> ReLU -> 1x1 RGB 头。
- * `alpha<1` 时只用 `fade_in(上一阶段 RGB, 当前阶段 RGB, alpha)` 混合。
+ * 初始分辨率：z -> fc(relu) -> (c0, base, base) -> 1x1 RGB 头；
+ * 此后每次 grow：ConvTranspose2d(k=4,s=2,p=1) -> ReLU -> 1x1 RGB 头。
+ * `alpha<1` 时只用 `fade_in(上一分辨率输出, 当前分辨率输出, alpha)` 混合。
  */
 typedef struct {
     int latent_dim;
@@ -32,7 +32,7 @@ void pg_free(ProgressiveGenerator *g);
 /* 输出形状：out_channels, side, side（side = base * 2^(n_stages-1)） */
 void pg_out_shape(const ProgressiveGenerator *g, int *c, int *side);
 
-/* 追加一个阶段（分辨率翻倍，通道数沿用最后一阶）；返回新的 side。 */
+/* 追加一个分辨率块（分辨率翻倍，通道数沿用最后一阶）；返回新的 side。 */
 int pg_grow(ProgressiveGenerator *g);
 
 int pg_param_count(const ProgressiveGenerator *g);

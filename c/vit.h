@@ -1,5 +1,5 @@
 /* ViT 式视觉 Transformer 前向（patch embedding → CLS + 位置编码 → TransformerEncoder
- * → LayerNorm(CLS) → 线性分类头）。对应 Python 的 AI.ViT（只移植前向）。
+ * → LayerNorm(CLS) → 线性分类头）。对应 Python 的 AI.ViT（只提供前向）。
  *
  * 设计约定：
  *   - 图像输入 (C, H, W) 展平成 double 数组，行主序 c*H*W + r*W + col；

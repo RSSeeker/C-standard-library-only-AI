@@ -1,6 +1,6 @@
 /*
  * layers_norm.h —— Dropout / BatchNorm1d / LayerNorm / RMSNorm /
- *                  BatchNorm2d / GroupNorm / InstanceNorm / DropPath 的 C17 移植
+ *                  BatchNorm2d / GroupNorm / InstanceNorm / DropPath 的 C17 实现
  *
  * 对应 AI.py：
  *   Dropout      (AI.py:457)  -> Dropout

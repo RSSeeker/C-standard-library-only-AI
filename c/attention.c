@@ -1,5 +1,5 @@
 /*
- * attention.c —— Transformer 组件（移植自 AI.py）
+ * attention.c —— Transformer 组件（对应 Python 版 AI.py）
  *
  * 本文件的核心原则是「逐行照抄 Python 的运算顺序」，而不是重写成等价的矩阵形式：
  *   - Python 的 _matmul(A, B) 内部是 sum(map(_mul, row, col))，即沿 k 升序做点积；

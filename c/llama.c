@@ -1,5 +1,5 @@
 /*
- * llama.c —— LLaMA 式因果语言模型（前向推理）的 C 移植
+ * llama.c —— LLaMA 式因果语言模型（前向推理）的 C 实现
  *
  * 与 Python 版（AI.py 的 LlamaBlock / LlamaModel）逐项对应，全部前向运算走
  * attention.h / layers_norm.h 的现有构件：
@@ -8,7 +8,7 @@
  *   SwiGLU（本文件实现：h1 = xW1+b1，g = silu(xWg)+bg，h = h1⊙g，out = hW2+b2）
  *   Embedding
  *
- * 本批只做前向；不实现反向、Adam 与生成循环（README 与头注释已声明边界）。
+ * 本实现只做前向；不实现反向、Adam 与生成循环（README 与头注释已声明边界）。
  */
 #include "llama.h"
 

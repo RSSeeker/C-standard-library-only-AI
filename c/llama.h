@@ -1,5 +1,5 @@
 /*
- * llama.h —— LLaMA 式因果语言模型（前向推理，移植自 AI.py 的 LlamaBlock / LlamaModel）
+ * llama.h —— LLaMA 式因果语言模型（前向推理，对应 Python 版 AI.py 的 LlamaBlock / LlamaModel）
  *
  * 结构（与 Python 逐项对应）：
  *   Embedding → N × LlamaBlock → RMSNorm → 词表头（W_out / b_out）
@@ -10,8 +10,8 @@
  *   h2 = RMSNorm2(x)
  *   out = x + SwiGLU(h2)
  *
- * 与 Python 的差异（本批只移植前向）：
- *   - 不实现 backward / 训练；反向与 Adam 留给后续批次。
+ * 与 Python 的差异（本实现只提供前向）：
+ *   - 不实现 backward / 训练；反向与 Adam 本文件只提供前向推理。
  *   - dropout 固定为 0（Python 默认值也是 0）。
  *   - 权重初始化用 gauss(splitmix64) 只保证分布一致；跨语言对拍必须用
  *     llama_model_set_* 系列函数灌入 Python 导出的同一组权重。

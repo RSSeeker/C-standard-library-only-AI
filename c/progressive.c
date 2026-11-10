@@ -210,7 +210,7 @@ int pg_forward(ProgressiveGenerator *g, const double *z, double alpha, double *o
         return -1;
     }
 
-    /* 阶段 0：1x1 RGB 头 */
+    /* 初始分辨率：1x1 RGB 头 */
     {
         int rshape[3] = {oc, h, h};
         Tensor *rgb = tensor_new(3, rshape);

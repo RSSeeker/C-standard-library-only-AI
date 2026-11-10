@@ -1,5 +1,5 @@
 /* RetNet 风格语言模型前向：Embedding → N×RetNetBlock → LayerNorm → 词表头。
- * 对应 Python 的 AI.RetNetModel（只移植前向）。
+ * 对应 Python 的 AI.RetNetModel（只提供前向）。
  *
  * 每个 block：pre-norm 两残差
  *   retention：ln1 → Wq/Wk/Wv ∈ R^{d×d} → 逐头（gamma_h = 1 - 2^(-5-h)）

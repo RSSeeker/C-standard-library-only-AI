@@ -1,5 +1,5 @@
 /*
- * layers_conv.c —— Conv2d / ConvTranspose2d / Conv1d / MaxPool2d / Flatten 的 C17 移植
+ * layers_conv.c —— Conv2d / ConvTranspose2d / Conv1d / MaxPool2d / Flatten 的 C17 实现
  *
  * 逐段对照 AI.py（当前版本）：
  *   Conv2d.__init__ / zero_grad / _img_shape / _pad / _im2col / _col2im

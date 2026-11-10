@@ -42,8 +42,8 @@ int tts_mel_to_linear(const double *mel, int n_frames, int n_mels,
 
 /* ============================ TextToMel 声学模型（推理） ============================
  *
- * 只移植前向推理（Embedding -> 两次 same-padding Conv1d + ReLU -> 线性输出），
- * 不移植训练反向；参数计数与 Python 的 TextToMel.param_count 一致。
+ * 只提供前向推理（Embedding -> 两次 same-padding Conv1d + ReLU -> 线性输出），
+ * 不实现训练反向；参数计数与 Python 的 TextToMel.param_count 一致。
  */
 typedef struct {
     int vocab_size;

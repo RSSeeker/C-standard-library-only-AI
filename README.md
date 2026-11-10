@@ -80,7 +80,7 @@ auto model = ai::quick_train(X, y, "regression", {32}, 200);
 - **IQL**: `iql_create` / `iql_update` / `iql_act` / `iql_param_count`（expectile 回归 V + 无 max 的 Q 回归 + AWR 策略提取）
 - **CQL**: `cql_create` / `cql_update` / `cql_act`（TD 损失 + `alpha*(logsumexp Q - Q(s,a))` 保守项 + AWR）
 - **对拍辅助**: `iql_net_q` / `iql_net_v` / `iql_net_policy` / `cql_net_q` / `cql_net_policy` 可直接载入参考权重
-- 边界：离散动作；批次由调用方提供（无 ReplayBuffer）；目标网络按 target_tau 软更新
+- 边界：离散动作；训练数据由调用方提供（无 ReplayBuffer）；目标网络按 target_tau 软更新
 
 ---
 
@@ -110,13 +110,13 @@ auto model = ai::quick_train(X, y, "regression", {32}, 200);
 - **路径**: `flowmatching_interpolate`（直线插值）、`flowmatching_target`（目标速度 noise-x0）
 - **训练**: `flowmatching_velocity` 前向 + `flowmatching_train_step`（显式 t/noise，累积梯度）、`flowmatching_zero_grad` / `flowmatching_sgd_step`
 - **采样**: `flowmatching_sample`（给定初值，Euler / Heun 两种积分器）
-- 边界：只移植确定性的前向/反向/采样，RNG 由调用方提供初值（与 Python 的随机采样入口不同）
+- 边界：只实现确定性的前向/反向/采样，RNG 由调用方提供初值（与 Python 的随机采样入口不同）
 
 ### 语音合成（TextToMel + Griffin-Lim 声码器）
 - **Griffin-Lim**: `tts_griffin_lim`（由幅度谱迭代估计相位还原波形，窗平方和归一化；`tts_wave_free` 释放）；RNG 为与 Python `random.Random(seed)` 逐位一致的 MT19937
 - **Mel 反演**: `tts_mel_to_linear`（Mel 滤波器组的最小二乘逆，负值截零）
 - **声学模型**: `text_to_mel_create` / `text_to_mel_forward` / `text_to_mel_param_count`（Embedding + 两次 same-padding Conv1d + ReLU + 线性输出，按 duration 展开 token）
-- 边界：TextToMel 只移植推理前向，不移植训练反向；Griffin-Lim 为纯数值算法，不依赖模型结构
+- 边界：TextToMel 只实现推理前向，不实现训练反向；Griffin-Lim 为纯数值算法，不依赖模型结构
 
 ### Pix2Pix（可训练图像到图像）
 - **判别器**: `p2p_disc_create` / `p2p_disc_forward`（三层 PatchGAN，LeakyReLU(0.2)）/ `p2p_disc_backward`（返回输入图像梯度）/ `p2p_disc_sgd_step`
@@ -132,7 +132,7 @@ auto model = ai::quick_train(X, y, "regression", {32}, 200);
 | 函数 | 说明 |
 |------|------|
 | `gv_fade_in(low, high, c, lh, lw, alpha, out)` | Progressive growing 淡入：`(1-alpha)*upsample2x(low) + alpha*high` |
-| `gv_progressive_alpha(step, total, &alpha)` | 阶段系数 `min(1, max(0, step/total))` |
+| `gv_progressive_alpha(step, total, &alpha)` | 淡化系数 `min(1, max(0, step/total))` |
 | `gv_progressive_stages(...)` | 把递增分辨率展开成 `(low, high, alpha)` 调度 |
 | `gv_adain_style(features, c, h, w, style, eps, out, mean, std)` | 逐通道 AdaIN，`style` 长度 `2C` |
 | `gv_truncation_trick(w, w_avg, n, psi, out)` | StyleGAN 截断 `w_avg + psi*(w-w_avg)` |
@@ -153,31 +153,31 @@ auto model = ai::quick_train(X, y, "regression", {32}, 200);
 - `conv2 -> AdaIN(style2) -> ReLU -> 上采样 16×16`；
 - `to_rgb` 后 `tanh` 到 `[-1, 1]`。
 
-API：`sg_create(latent_dim, d_model, base, out_channels)`、`sg_free`、`sg_param_count`、`sg_forward(g, z, out)`、`sg_average_w(g, zs, n, out_w)`、`sg_last_w`。对拍参考由 `tools/stylegan_reference.py` 生成（`StyleGANGenerator(latent_dim=8, d_model=8, base=4)`，参数量 685），`tests/compare_stylegan.c` 比较前向输出与平均 `w`（容差 1e-12）；训练/反向未移植（README 边界）。
+API：`sg_create(latent_dim, d_model, base, out_channels)`、`sg_free`、`sg_param_count`、`sg_forward(g, z, out)`、`sg_average_w(g, zs, n, out_w)`、`sg_last_w`。对拍参考由 `tools/stylegan_reference.py` 生成（`StyleGANGenerator(latent_dim=8, d_model=8, base=4)`，参数量 685），`tests/compare_stylegan.c` 比较前向输出与平均 `w`（容差 1e-12）；训练/反向未实现（README 边界）。
 
-### Progressive Growing（逐阶段增长，前向）
+### Progressive Growing（逐分辨率增长，前向）
 
 `progressive.*` 提供 ProGAN 风格生成器 `ProgressiveGenerator` 的单向推理：
 
-- 阶段 0：`z -> fc(relu) -> (c0, base, base)`，再用 1×1 卷积得到低分辨率 RGB；
+- 初始分辨率：`z -> fc(relu) -> (c0, base, base)`，再用 1×1 卷积得到低分辨率 RGB；
 - 每次 `pg_grow()` 追加一组 `ConvTranspose2d(k=4, s=2, p=1) + ReLU + 1×1 RGB 头`（分辨率翻倍）；
-- `pg_forward(g, z, alpha, out)` 中 `alpha<1` 时按 `fade_in(上一阶段 RGB, 当前 RGB, alpha)` 平滑混合，最后 `tanh`。
+- `pg_forward(g, z, alpha, out)` 中 `alpha<1` 时按 `fade_in(上一分辨率输出, 当前 RGB, alpha)` 平滑混合，最后 `tanh`。
 
-API：`pg_create(latent_dim, channels, n_stages, base, out_channels)`、`pg_free`、`pg_out_shape`、`pg_grow`、`pg_param_count`、`pg_forward`。对拍参考由 `tools/progressive_reference.py` 生成（`latent_dim=8, channels=(8,4), base=2`；参数 818，grow 后 1083），`tests/compare_progressive.c` 比较 base/grow 前向与淡入（容差 1e-12，实测 11/11 逐位相同）；训练/反向未移植。
+API：`pg_create(latent_dim, channels, n_stages, base, out_channels)`、`pg_free`、`pg_out_shape`、`pg_grow`、`pg_param_count`、`pg_forward`。对拍参考由 `tools/progressive_reference.py` 生成（`latent_dim=8, channels=(8,4), base=2`；参数 818，grow 后 1083），`tests/compare_progressive.c` 比较 base/grow 前向与淡入（容差 1e-12，实测 11/11 逐位相同）；训练/反向未实现。
 
 ### CycleGAN（双向循环一致性训练步）
 
 `cyclegan.*` 复用 Pix2Pix 的生成器/判别器，实现一步 CycleGAN 训练：
 
-- 判别器阶段：`D_A` 对 `real_a` 目标 1、对 `fake_a` 目标 0；`D_B` 对 `real_b` 目标 1、对 `fake_b` 目标 0；各自 SGD 更新；
-- 生成器阶段：对抗（`D_A(fake_a)`、`D_B(fake_b)` 目标 1）+ 循环一致（`G_BA(G_AB(a))≈a`、`G_AB(G_BA(b))≈b`，权重 `lambda_cycle`）+ identity（`G_AB(b)≈b`、`G_BA(a)≈a`，权重 `lambda_identity`）；
+- 先更新判别器：`D_A` 对 `real_a` 目标 1、对 `fake_a` 目标 0；`D_B` 对 `real_b` 目标 1、对 `fake_b` 目标 0；各自 SGD 更新；
+- 再更新生成器：对抗（`D_A(fake_a)`、`D_B(fake_b)` 目标 1）+ 循环一致（`G_BA(G_AB(a))≈a`、`G_AB(G_BA(b))≈b`，权重 `lambda_cycle`）+ identity（`G_AB(b)≈b`、`G_BA(a)≈a`，权重 `lambda_identity`）；
 - 参数：`cyclegan_train_step(g_ab, g_ba, d_a, d_b, real_a, real_b, C, H, W, lambda_cycle, lambda_identity, lr_g, lr_d, &step)`，`CycleGanStep` 返回 `d_loss/g_loss/adv_loss/cycle_loss/identity_loss`。
 
-对拍参考由 `tools/cyclegan_reference.py` 生成（两个 `Pix2PixGenerator` + 两个 `PatchDiscriminator`、8×8 图像、一步训练），`tests/compare_cyclegan.c` 比较五项损失、四个网络更新后的全部权重与更新后 fake 输出（容差 1e-9，实测 38/38 逐位相同）。`fit_cyclegan` 的多步循环与随机采样未移植（由调用方组织。
+对拍参考由 `tools/cyclegan_reference.py` 生成（两个 `Pix2PixGenerator` + 两个 `PatchDiscriminator`、8×8 图像、一步训练），`tests/compare_cyclegan.c` 比较五项损失、四个网络更新后的全部权重与更新后 fake 输出（容差 1e-9，实测 38/38 逐位相同）。`fit_cyclegan` 的多步循环与随机采样未实现（由调用方组织）。
 
 ### CLIP 双塔（相似度 / 对称 InfoNCE / 检索 / 线性投影头）
 
-`clip.*` 移植 Python 的多模态双塔组件：
+`clip.*` 实现 Python 的多模态双塔组件：
 
 - `cm_clip_similarity(imgs,n,d,txts,n_txt,d2,sim)`：行归一化后的余弦相似度矩阵；
 - `cm_clip_loss(imgs,n,d,txts,d2,temperature,g_img,g_txt)`：对称 InfoNCE（第 i 对为正样本），返回损失并可回填两侧梯度（含归一化反向）；
@@ -213,7 +213,7 @@ API：`pg_create(latent_dim, channels, n_stages, base, out_channels)`、`pg_free
 
 API：`llama_create / llama_free / llama_param_count / llama_forward`；`llama_emb / llama_block / llama_norm / llama_set_head` 用于灌入跨语言权重；`swiglu_create / swiglu_set_params / swiglu_forward / swiglu_param_count`。对拍参考由 `tools/llama_reference.py` 生成（`vocab=6, d_model=8, heads=2, kv_heads=1, d_ff=12, layers=2, max_len=8, rope=True`，参数 1214），`tests/compare_llama.c` 灌入同一组权重后比较前向 logits（容差 1e-12，实测 maxdiff 1.1e-15）。
 
-边界：只移植前向推理，不含反向、Adam 与生成循环；dropout 固定 0；不提供权重初始化等价性（跨语言对拍必须用访问器灌权重）。
+边界：只实现前向推理，不含反向、Adam 与生成循环；dropout 固定 0；不提供权重初始化等价性（跨语言对拍必须用访问器灌权重）。
 
 ### BERT 式模型（前向）
 
@@ -225,7 +225,7 @@ API：`llama_create / llama_free / llama_param_count / llama_forward`；`llama_e
 
 对拍参考由 `tools/bert_reference.py` 生成（`vocab=6, d_model=8, heads=2, d_ff=12, layers=2, max_len=8`，参数 1200），`tests/compare_bert.c` 按 `_named_params` 名字灌入权重后比较 hidden/MLM/NSP（容差 1e-12，实测 hidden 与 NSP 逐位相同，MLM 最大差 3.3e-16）。
 
-边界：只移植前向推理；无反向、无训练循环；dropout 固定 0；不包含 SQuAD 等下游任务头。
+边界：只实现前向推理；无反向、无训练循环；dropout 固定 0；不包含 SQuAD 等下游任务头。
 
 ### ViT 式视觉 Transformer（前向）
 
@@ -237,11 +237,11 @@ API：`llama_create / llama_free / llama_param_count / llama_forward`；`llama_e
 
 API：`vit_create / vit_free / vit_param_count / vit_forward`；`vit_patch_conv / vit_encoder / vit_norm` 用于灌入跨语言权重，`vit_set_cls_pos / vit_set_head` 设置前置向量与分类头。对拍参考由 `tools/vit_reference.py` 生成（`in_channels=1, image_size=8, patch_size=4, d_model=8, heads=2, d_ff=12, layers=1, num_classes=3`，参数 759），`tests/compare_vit.c` 灌权重后比较 logits（容差 1e-12，实测 maxdiff 8.3e-17）。
 
-边界：只移植前向；无反向、训练与 MAE 预训练；dropout 固定 0；`image_size` 必须能被 `patch_size` 整除。
+边界：只实现前向；无反向、训练与 MAE 预训练；dropout 固定 0；`image_size` 必须能被 `patch_size` 整除。
 
 ### ELECTRA 判别器（前向）
 
-`electra.*` 移植 ELECTRA 判别器的前向：Embedding 词表为 `vocab_size+1`（多一行 mask token），
+`electra.*` 实现 ELECTRA 判别器的前向：Embedding 词表为 `vocab_size+1`（多一行 mask token），
 `PositionalEncoding → TransformerEncoder`，最后用两个输出的差值做逐位置二分类打分：
 
 - `score[t] = (b_d[1]-b_d[0]) + Σ_j (W_d[1][j]-W_d[0][j]) * h[t][j]`；
@@ -252,11 +252,11 @@ API：`electra_disc_create / electra_disc_free / electra_disc_param_count / elec
 对拍参考由 `tools/electra_reference.py` 生成（vocab=6, d=8, heads=2, d_ff=12, layers=2, max_len=8；
 参数 1138；输入含 mask token id=6），`tests/compare_electra.c` 比较 score/prob（逐位相同）。
 
-边界：只移植判别器前向；生成器（MaskedLM）训练、BCE 反向与预训练流程未移植；dropout 固定 0。
+边界：只实现判别器前向；生成器（MaskedLM）训练、BCE 反向与预训练流程未实现；dropout 固定 0。
 
 ### RWKV 式模型（前向）
 
-`rwkv.*` 移植 RWKV 语言模型的单向推理（Embedding → N×RWKVBlock → LayerNorm → 词表头）：
+`rwkv.*` 实现 RWKV 语言模型的单向推理（Embedding → N×RWKVBlock → LayerNorm → 词表头）：
 
 - time-mixing：`ln1` 后投影出 r/k/v；逐通道状态 `state = decay*state + k*v`（`decay = exp(-exp(w_raw))`），
   输出 `y = r*(state + u*v)`，再经 `Wo` 加残差；
@@ -270,11 +270,11 @@ API：`rwkv_create(vocab_size, d_model, d_ff, num_layers, max_len, seed)`、`rwk
 `tools/rwkv_reference.py` 生成，`tests/compare_rwkv.c` 灌权重后比较 logits（容差 1e-12；
 C 侧 LayerNorm 用 Neumaier 补偿求和，与 Python 普通求和最多差几个 1e-15）。
 
-边界：只移植前向；无反向、训练与生成；dropout 固定 0；序列长度不能超过 `max_len`。
+边界：只实现前向；无反向、训练与生成；dropout 固定 0；序列长度不能超过 `max_len`。
 
 ### RetNet 式模型（前向）
 
-`retnet.*` 移植 RetNet 语言模型的单向推理（Embedding → N×RetNetBlock → LayerNorm → 词表头）：
+`retnet.*` 实现 RetNet 语言模型的单向推理（Embedding → N×RetNetBlock → LayerNorm → 词表头）：
 
 - 保留层（retention）：`ln1` 后投影出 q/k/v；逐头 `gamma_h = 1 - 2^(-5-h)`（固定、不训练），
   `out[t] = Σ_{j<=t} gamma^(t-j)·(q_t·k_j)·v_j / denom_t`，其中 `denom_t = Σ gamma^(t-j)`；
@@ -288,11 +288,11 @@ API：`retnet_create(vocab_size, d_model, num_heads, d_ff, num_layers, max_len, 
 `tools/retnet_reference.py` 生成，`tests/compare_retnet.c` 比较 logits（容差 1e-12；
 C 侧 LayerNorm 用 Neumaier 补偿求和）。
 
-边界：只移植前向；无反向、训练与生成；dropout 固定 0；序列长度不能超过 `max_len`。
+边界：只实现前向；无反向、训练与生成；dropout 固定 0；序列长度不能超过 `max_len`。
 
 ### xLSTM 式模型（前向）
 
-`xlstm.*` 移植 xLSTM 语言模型的单向推理（Embedding → N×XLSTMBlock → LayerNorm → 词表头）：
+`xlstm.*` 实现 xLSTM 语言模型的单向推理（Embedding → N×XLSTMBlock → LayerNorm → 词表头）：
 
 - sLSTM cell（简化版）：`Wg` 投影出 i/f/z/o 四组门；
   `i = exp(clamp(i_pre,-10,5))`、`f = sigmoid(f_pre)`、`z = tanh(z_pre)`、`o = sigmoid(o_pre)`；
@@ -305,11 +305,11 @@ API：`xlstm_create(vocab_size, d_model, d_ff, num_layers, max_len, seed)`、`xl
 `tools/xlstm_reference.py` 生成，`tests/compare_xlstm.c` 比较 logits（容差 1e-12；
 C 侧 LayerNorm 用 Neumaier 补偿求和）。
 
-边界：只移植前向；门只由当前输入计算（不拼接 h_{t-1}）；无反向/训练/生成；dropout 固定 0。
+边界：只实现前向；门只由当前输入计算（不拼接 h_{t-1}）；无反向/训练/生成；dropout 固定 0。
 
 ### Mamba 式模型（前向）
 
-`mamba.*` 移植 Mamba 语言模型的单向推理（Embedding → N×MambaBlock → 词表头）：
+`mamba.*` 实现 Mamba 语言模型的单向推理（Embedding → N×MambaBlock → 词表头）：
 
 - block：`in_proj` 投影出 x/z 两路；x 经 `_CausalConv1d`（权重 `[O][C][k]`、左补 `k-1`）与 SiLU 得 u；
 - `delta = softplus(u @ delta_proj)`、`B = u @ b_proj`、`C = u @ c_proj`，选择性扫描逐时刻递推
@@ -322,12 +322,12 @@ API：`mamba_create(vocab_size, d_model, d_state, d_conv, expand, num_layers, ma
 `tools/mamba_reference.py` 生成，`tests/compare_mamba.c` 比较 logits（容差 1e-12；
 C 侧卷积求和顺序与 Python 略有差异）。
 
-边界：只移植前向；`A` 直接作为参数（不做 `-exp(A_log)` 参数化）；顺序递推而非并行扫描；
+边界：只实现前向；`A` 直接作为参数（不做 `-exp(A_log)` 参数化）；顺序递推而非并行扫描；
 无反向/训练/生成；dropout 固定 0。
 
 ### DeBERTa 式模型（前向）
 
-`deberta.*` 移植 DeBERTa 风格语言模型的单向推理（Embedding → N×DeBERTaBlock → LayerNorm → 词表头）：
+`deberta.*` 实现 DeBERTa 风格语言模型的单向推理（Embedding → N×DeBERTaBlock → LayerNorm → 词表头）：
 
 - 单头解耦相对注意力（因果，`j <= t`）：`s(t,j) = scale · (q_t·k_j + q_t·Rk[d] + k_j·Rq[d])`，
   `d = min(t-j, max_rel)`；`Rk` 为 content-to-position 表、`Rq` 为 position-to-content 表；
@@ -338,7 +338,7 @@ API：`deberta_create(vocab_size, d_model, d_ff, num_layers, max_len, max_rel, s
 （`DeBERTaModel(vocab=6, d=8, d_ff=12, layers=2, max_len=8, max_rel=4, seed=21)`，参数 1470）由
 `tools/deberta_reference.py` 生成，`tests/compare_deberta.c` 比较 logits（容差 1e-12）。
 
-边界：只移植前向；单头（正式 DeBERTa 为多头），每个相对距离共享一对位置向量；只建模因果的
+边界：只实现前向；单头（正式 DeBERTa 为多头），每个相对距离共享一对位置向量；只建模因果的
 过去距离；无反向/训练/生成；dropout 固定 0。
 
 ### 环境要求
@@ -514,9 +514,9 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── flowmatching.*   #   Flow Matching（整流流速度场 + Euler/Heun 采样）
 │   ├── tts.*            #   语音合成（TextToMel 前向 / Griffin-Lim / Mel 反演）
 │   ├── pix2pix.*       #   图像到图像 Pix2Pix（PatchGAN + 卷积/转置卷积生成器）
-│   ├── gan_variants.*  #   GAN 辅助：淡入/逐阶段/AdaIN/截断/循环损失/R1-R2
+│   ├── gan_variants.*  #   GAN 辅助：淡入/逐分辨率/AdaIN/截断/循环损失/R1-R2
 │   ├── stylegan.*      #   简化 StyleGAN 生成器前向（映射网络 + AdaIN）
-│   ├── progressive.*   #   ProGAN 风格逐阶段增长生成器前向（fade_in）
+│   ├── progressive.*   #   ProGAN 风格逐分辨率增长生成器前向（fade_in）
 │   ├── cyclegan.*      #   CycleGAN 一步训练（循环一致性 + identity）
 │   ├── clip.*          #   CLIP 双塔相似度 / 对称 InfoNCE / 线性投影头
 │   ├── parallel.*      #   分布式训练数值模拟（FSDP / ZeRO / 张量并行 / 序列并行）
@@ -550,9 +550,9 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ---
 
-## 与 Python 仓库的同步范围
+## 与 Python 版本的功能对照
 
-本项目是 `D:scode\Python-standard-library-only-AI-main` 的 C17 移植版，按 AGENTS.md 分批同步并在 `make check` 中逐位对拍（无法逐位一致的浮点仅因 libm 差异，按 JSON 中声明的容差判定）。已同步的能力：
+本项目对应 Python 主仓库（`D:scode\Python-standard-library-only-AI-main`）的 C17 引擎；下表能力均提供 C 实现，并通过 `make check` 与 Python 参考逐位比对（无法逐位一致的浮点仅因 libm 差异，按 JSON 中声明的容差判定）。
 
 - **指标族**：文本 METEOR 完整版/chrF/WER/CER；音频 STOI/PESQ；视觉 LPIPS/FVD；CLIP 双塔相似度/对称 InfoNCE/检索/线性投影头；
 - **解码与导出**：CTC 前缀 beam search；MLP → ONNX 导出/解析/执行；Medusa 多头 / EAGLE 特征草稿投机解码；
@@ -562,7 +562,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 - **语音**：TextToMel 前向、Griffin-Lim 声码器、Mel 反演（含 Python `random.Random` 兼容 MT19937）。
 - **模型类（前向）**：LLaMA（RMSNorm + GQA/RoPE + SwiGLU）、BERT（MLM/NSP）、ViT、ELECTRA、RWKV、RetNet、xLSTM、Mamba（选择性扫描）、DeBERTa（解耦相对注意力）。
 
-尚未逐位移植的部分（C 侧按需扩展，不阻塞现有功能）：T5/DETR 等需要解码器/交叉注意力的模型类、真实分布式执行框架、PEFT 包装类（LoRA 等）与实验追踪/GUI 附属组件；C 侧已有的 GPT/LLM 推理（采样、KV cache、约束解码）与训练循环不在本表重复列出。
+未包含的部分（可按需扩展）：T5/DETR 等需要解码器/交叉注意力的模型类、真实分布式执行框架、PEFT 包装类（LoRA 等）与实验追踪/GUI 附属组件；基础组件（GPT/LLM 推理、训练循环等）见上文各节。
 
 ## 许可证
 

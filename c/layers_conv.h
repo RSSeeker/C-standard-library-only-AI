@@ -1,5 +1,5 @@
 /*
- * layers_conv.h —— CNN 家族（Conv2d / ConvTranspose2d / Conv1d / MaxPool2d / Flatten）的 C17 移植接口
+ * layers_conv.h —— CNN 家族（Conv2d / ConvTranspose2d / Conv1d / MaxPool2d / Flatten）的 C17 实现接口
  *
  * 对应 AI.py 里的同名类：
  *   Conv2d(in_channels, out_channels, kernel_size, stride, padding)
@@ -85,7 +85,7 @@ typedef struct {
     double *gb;
 
     /* Adam 状态：对应 Python 的 m_w / v_w / m_b / v_b。
-     * 本文件不实现优化器，先把状态分配好，留给后续的 optimizer 移植统一使用 */
+     * 本文件不实现优化器，先把状态分配好，供 optimizer 统一使用 */
     double *mW, *vW;
     double *mb, *vb;
 
@@ -233,7 +233,7 @@ typedef struct {
     double *gW;
     double *gb;
 
-    /* Adam 状态（与 Conv2d 一样先分配好，留给后续 optimizer 移植统一使用） */
+    /* Adam 状态（与 Conv2d 一样先分配好，供 optimizer 统一使用） */
     double *mW, *vW;
     double *mb, *vb;
 

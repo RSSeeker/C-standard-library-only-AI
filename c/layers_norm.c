@@ -1,7 +1,7 @@
 /*
  * layers_norm.c —— Dropout / BatchNorm1d / LayerNorm 的 C17 实现
  *
- * 移植自 AI.py:453-591，逐行对照 Python 的运算顺序。三处最容易写错的地方：
+ * 对应 Python 版 AI.py:453-591，逐行对照 Python 的运算顺序。三处最容易写错的地方：
  *   1. BatchNorm1d.forward_batch 的列统计：Python 先 zip(*x_batch) 转置再 sum(col)，
  *      这里同样先转置到列主序缓冲，再用 sum_neumaier 求和（顺序完全一致）。
  *   2. BatchNorm1d.backward 的 s1/s2 只依赖 j（AI.py:548-551 修过的性能问题）：
@@ -886,7 +886,7 @@ Module *rmsnorm_as_module(RMSNorm *self)
 }
 
 /* ======================= 归一化家族：BatchNorm2d / GroupNorm / DropPath =======================
- * 移植自 AI.py：
+ * 对应 Python 版 AI.py：
  *   BatchNorm2d (AI.py:13161) -> bn2d_*
  *   GroupNorm   (AI.py:13332) -> gn_*
  *   InstanceNorm(AI.py:13441) -> inorm_create（groups == channels 的特例）

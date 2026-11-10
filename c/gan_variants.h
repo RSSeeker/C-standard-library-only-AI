@@ -1,7 +1,7 @@
 #ifndef GAN_VARIANTS_H
 #define GAN_VARIANTS_H
 
-/* GAN 变体族辅助函数（同步 Python AI.py 的纯数值实现）
+/* GAN 变体族辅助函数（对应 Python AI.py 的纯数值实现）
  *
  * 所有图像都按通道主序展平：`k * H * W + i * W + j`。
  * 函数返回 0 表示成功，-1 表示参数非法（Python 侧对应 ValueError）。
@@ -17,7 +17,7 @@ int gv_fade_in(const double *low, const double *high, int c, int lh, int lw,
 int gv_progressive_alpha(int step, int total, double *alpha);
 
 /* progressive_stages：把递增分辨率依次展开成 (low, high, alpha) 三元组。
- * 返回阶段数；out 容量不足或输入非法返回 -1。 */
+ * 返回调度步数；out 容量不足或输入非法返回 -1。 */
 int gv_progressive_stages(const int *resolutions, int n, int fade_steps,
                           int *low_out, int *high_out, double *alpha_out,
                           int cap);

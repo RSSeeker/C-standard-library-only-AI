@@ -1,5 +1,5 @@
 /*
- * text_tok.h —— 字节级 BPE 分词器的 C17 移植（Python `BytePairTokenizer`）
+ * text_tok.h —— 字节级 BPE 分词器的 C17 实现（Python `BytePairTokenizer`）
  *
  * 与 Python 版一致的三条语义：
  *   1. 词表从 256 个字节 id 起长，每条合并规则 (a, b) -> 256 + k，只能引用

@@ -10,9 +10,9 @@
  *  判别器 d_a / d_b（复用 Pix2Pix 的 PatchDiscriminator / Pix2PixGenerator）。
  *
  *  一步流程：
- *    1) 判别器阶段：D_A 对 real_a 目标 1、对 fake_a 目标 0；
+ *    1) 更新判别器：D_A 对 real_a 目标 1、对 fake_a 目标 0；
  *                   D_B 对 real_b 目标 1、对 fake_b 目标 0；各自 SGD 更新。
- *    2) 生成器阶段：对抗（D_A(fake_a)、D_B(fake_b) 目标 1）
+ *    2) 更新生成器：对抗（D_A(fake_a)、D_B(fake_b) 目标 1）
  *                 + 循环一致（G_BA(G_AB(a)) ≈ a、G_AB(G_BA(b)) ≈ b）
  *                 + identity（G_AB(b) ≈ b、G_BA(a) ≈ a）；G_AB / G_BA SGD 更新。
  *
