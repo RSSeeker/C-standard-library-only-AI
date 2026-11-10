@@ -272,6 +272,24 @@ C 侧 LayerNorm 用 Neumaier 补偿求和，与 Python 普通求和最多差几�
 
 边界：只移植前向；无反向、训练与生成；dropout 固定 0；序列长度不能超过 `max_len`。
 
+### RetNet 式模型（前向）
+
+`retnet.*` 移植 RetNet 语言模型的单向推理（Embedding → N×RetNetBlock → LayerNorm → 词表头）：
+
+- 保留层（retention）：`ln1` 后投影出 q/k/v；逐头 `gamma_h = 1 - 2^(-5-h)`（固定、不训练），
+  `out[t] = Σ_{j<=t} gamma^(t-j)·(q_t·k_j)·v_j / denom_t`，其中 `denom_t = Σ gamma^(t-j)`；
+  多头拼接后过 `W_o` 加残差；
+- FFN：`ln2 → W1(relu) → W2` 加残差。
+
+API：`retnet_create(vocab_size, d_model, num_heads, d_ff, num_layers, max_len, seed)`、
+`retnet_free`、`retnet_param_count`、`retnet_forward(ids, T, logits)`（结构与权重数组公开，
+可直接灌入 `tools/retnet_reference.py` 导出的 Python 权重）。对拍参考
+（`RetNetModel(vocab=6, d=8, heads=2, d_ff=12, layers=1, max_len=8, seed=3)`，参数 650）由
+`tools/retnet_reference.py` 生成，`tests/compare_retnet.c` 比较 logits（容差 1e-12；
+C 侧 LayerNorm 用 Neumaier 补偿求和）。
+
+边界：只移植前向；无反向、训练与生成；dropout 固定 0；序列长度不能超过 `max_len`。
+
 ### 环境要求
 - **C17 编译器**（GCC 8+ / Clang 7+ / MSVC 2019+）—— 引擎 `c/` 是 C17
 - **C++17 编译器** —— 界面与命令行版
@@ -340,7 +358,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例 + 训练模拟 1 例 + LLaMA 1 例 + BERT 1 例 + ViT 1 例 + ELECTRA 1 例 + RWKV 1 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例 + 训练模拟 1 例 + LLaMA 1 例 + BERT 1 例 + ViT 1 例 + ELECTRA 1 例 + RWKV 1 例 + RetNet 1 例等）
 ```
 
 ---
@@ -429,7 +447,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 
 ```
 .
-├── c/                  # 纯 C17 引擎（95 个文件，约 28,900 行）
+├── c/                  # 纯 C17 引擎（97 个文件，约 29,300 行）
 │   ├── ai.c/.h         #   Layer / MLP / 损失 / 4 种优化器 / 训练循环
 │   ├── tensor.c/.h     #   张量基础
 │   ├── layers_conv.*   #   Conv2d / MaxPool2d / Flatten
@@ -457,6 +475,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── vit.*           #   ViT 式视觉 Transformer 前向
 │   ├── electra.*       #   ELECTRA 判别器前向（逐位置二分类）
 │   ├── rwkv.*          #   RWKV 式模型前向（时间混合 + 通道混合）
+│   ├── retnet.*        #   RetNet 式模型前向（多尺度保留 + FFN）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
