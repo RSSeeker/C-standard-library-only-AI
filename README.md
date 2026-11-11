@@ -409,7 +409,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例 + 训练模拟 1 例 + LLaMA 1 例 + BERT 1 例 + ViT 1 例 + ELECTRA 1 例 + RWKV 1 例 + RetNet 1 例 + xLSTM 1 例 + Mamba 1 例 + DeBERTa 1 例 + 训练辅助 10 例 + RL/μP 工具 40 例 + SAE 3 例 + 树状注意力 5 例 + 幻觉检测 12 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例 + 训练模拟 1 例 + LLaMA 1 例 + BERT 1 例 + ViT 1 例 + ELECTRA 1 例 + RWKV 1 例 + RetNet 1 例 + xLSTM 1 例 + Mamba 1 例 + DeBERTa 1 例 + 训练辅助 10 例 + RL/μP 工具 40 例 + SAE 3 例 + 树状注意力 5 例 + 幻觉检测 12 例 + 块分配器 2 例等）
 ```
 
 ---
@@ -514,6 +514,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── sae.*           #   稀疏自编码器（relu 编码 + L1 稀疏 + 手写反向）
 │   ├── tree_attn.*     #   树状注意力：草稿树 trie / 祖先可见偏置 / 布尔掩码
 │   ├── hallu.*         #   幻觉检测：余弦一致性 / NLI 三分类 / token 级缺口
+│   ├── block_mgr.*     #   PagedAttention 块分配器（fork / COW / swap / 统计）
 │   ├── medusa.*        #   Medusa 多头 / EAGLE 特征草稿投机解码
 │   ├── diffusion.*      #   EDM / DPM-Solver / Consistency 纯数值采样器
 │   ├── flowmatching.*   #   Flow Matching（整流流速度场 + Euler/Heun 采样）
@@ -568,6 +569,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 - **RL/μP 工具**：GRPO 组相对优势、Best-of-N、拒绝采样过滤、整数样本自洽性投票；μP 的 target_std / 分层学习率 / MuPAdam 单步更新；
 - **可解释性**：稀疏自编码器 SAE（重建 MSE + L1 稀疏、手写反向、特征激活统计）；
 - **服务与推理**：树状注意力（共享前缀草稿树、祖先可见偏置、布尔掩码，供投机解码批处理）；
+- **块管理**：PagedAttention 块分配器（分配/扩块/释放、fork 共享引用计数、写时复制、swap_out/swap_in、统计）；
 - **幻觉检测**：余弦相似度 / 句向量相似度矩阵 / NLI 三分类比例 / token 级支撑检测与报告（纯数值，不调用模型）；
 - **语音**：TextToMel 前向、Griffin-Lim 声码器、Mel 反演（含 Python `random.Random` 兼容 MT19937）。
 - **模型类（前向）**：LLaMA（RMSNorm + GQA/RoPE + SwiGLU）、BERT（MLM/NSP）、ViT、ELECTRA、RWKV、RetNet、xLSTM、Mamba（选择性扫描）、DeBERTa（解耦相对注意力）。
