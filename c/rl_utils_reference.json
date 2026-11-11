@@ -1,0 +1,626 @@
+{
+  "cases": [
+    {
+      "kind": "group_adv",
+      "name": "adv_single",
+      "rewards": [
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "group_size": 0,
+      "eps": 1e-08,
+      "normalize": 1,
+      "out": [
+        -1.341640774499874,
+        -0.447213591499958,
+        0.447213591499958,
+        1.341640774499874
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "group_adv",
+      "name": "adv_single_raw",
+      "rewards": [
+        1.0,
+        2.0,
+        3.0,
+        4.0
+      ],
+      "group_size": 0,
+      "eps": 1e-08,
+      "normalize": 0,
+      "out": [
+        -1.5,
+        -0.5,
+        0.5,
+        1.5
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "group_adv",
+      "name": "adv_two_groups",
+      "rewards": [
+        1.0,
+        3.0,
+        2.0,
+        6.0
+      ],
+      "group_size": 2,
+      "eps": 1e-08,
+      "normalize": 1,
+      "out": [
+        -0.9999999900000002,
+        0.9999999900000002,
+        -0.999999995,
+        0.999999995
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "group_adv",
+      "name": "adv_two_groups_raw",
+      "rewards": [
+        1.0,
+        3.0,
+        2.0,
+        6.0
+      ],
+      "group_size": 2,
+      "eps": 1e-08,
+      "normalize": 0,
+      "out": [
+        -1.0,
+        1.0,
+        -2.0,
+        2.0
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "group_adv",
+      "name": "adv_constant",
+      "rewards": [
+        2.5,
+        2.5,
+        2.5
+      ],
+      "group_size": 3,
+      "eps": 1e-08,
+      "normalize": 1,
+      "out": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "group_adv",
+      "name": "adv_single_reward",
+      "rewards": [
+        7.0
+      ],
+      "group_size": 1,
+      "eps": 1e-08,
+      "normalize": 1,
+      "out": [
+        0.0
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "best_of_n",
+      "name": "bon_1",
+      "rewards": [
+        0.1,
+        0.9,
+        0.5,
+        0.9
+      ],
+      "index": 1,
+      "reward": 0.9,
+      "tol": 0.0
+    },
+    {
+      "kind": "best_of_n",
+      "name": "bon_negative",
+      "rewards": [
+        -3.0,
+        -1.0,
+        -2.0
+      ],
+      "index": 1,
+      "reward": -1.0,
+      "tol": 0.0
+    },
+    {
+      "kind": "best_of_n",
+      "name": "bon_single",
+      "rewards": [
+        4.5
+      ],
+      "index": 0,
+      "reward": 4.5,
+      "tol": 0.0
+    },
+    {
+      "kind": "rejection",
+      "name": "rej_threshold",
+      "rewards": [
+        0.1,
+        0.9,
+        0.5,
+        0.7
+      ],
+      "mode": "threshold",
+      "threshold": 0.5,
+      "ratio": 0.0,
+      "kept": [
+        1,
+        2,
+        3
+      ],
+      "count": 3,
+      "tol": 0.0
+    },
+    {
+      "kind": "rejection",
+      "name": "rej_threshold_none",
+      "rewards": [
+        0.1,
+        0.2
+      ],
+      "mode": "threshold",
+      "threshold": 0.99,
+      "ratio": 0.0,
+      "kept": [],
+      "count": 0,
+      "tol": 0.0
+    },
+    {
+      "kind": "rejection",
+      "name": "rej_ratio",
+      "rewards": [
+        0.1,
+        0.9,
+        0.5,
+        0.7
+      ],
+      "mode": "top_ratio",
+      "threshold": 0.0,
+      "ratio": 0.5,
+      "kept": [
+        1,
+        3
+      ],
+      "count": 2,
+      "tol": 0.0
+    },
+    {
+      "kind": "rejection",
+      "name": "rej_ratio_ties",
+      "rewards": [
+        0.5,
+        0.5,
+        0.5,
+        0.5
+      ],
+      "mode": "top_ratio",
+      "threshold": 0.0,
+      "ratio": 0.5,
+      "kept": [
+        0,
+        1
+      ],
+      "count": 2,
+      "tol": 0.0
+    },
+    {
+      "kind": "rejection",
+      "name": "rej_ratio_small",
+      "rewards": [
+        0.2,
+        0.8
+      ],
+      "mode": "top_ratio",
+      "threshold": 0.0,
+      "ratio": 0.1,
+      "kept": [
+        1
+      ],
+      "count": 1,
+      "tol": 0.0
+    },
+    {
+      "kind": "self_consistency",
+      "name": "sc_basic",
+      "samples": [
+        1,
+        2,
+        2,
+        3,
+        2
+      ],
+      "best": 2,
+      "confidence": 0.6,
+      "unique": 3,
+      "keys": [
+        1,
+        2,
+        3
+      ],
+      "counts": [
+        1,
+        3,
+        1
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "self_consistency",
+      "name": "sc_tie",
+      "samples": [
+        5,
+        5,
+        6,
+        6,
+        7
+      ],
+      "best": 5,
+      "confidence": 0.4,
+      "unique": 3,
+      "keys": [
+        5,
+        6,
+        7
+      ],
+      "counts": [
+        2,
+        2,
+        1
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "self_consistency",
+      "name": "sc_single",
+      "samples": [
+        9
+      ],
+      "best": 9,
+      "confidence": 1.0,
+      "unique": 1,
+      "keys": [
+        9
+      ],
+      "counts": [
+        1
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "self_consistency",
+      "name": "sc_all_same",
+      "samples": [
+        4,
+        4,
+        4
+      ],
+      "best": 4,
+      "confidence": 1.0,
+      "unique": 1,
+      "keys": [
+        4
+      ],
+      "counts": [
+        3
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "mup_target_std",
+      "name": "input_4_None",
+      "mup_kind": "input",
+      "fan_in": 4.0,
+      "base_width": 8.0,
+      "width": 0.0,
+      "scale": 1.0,
+      "value": 0.5,
+      "tol": 1e-15
+    },
+    {
+      "kind": "mup_target_std",
+      "name": "input_4_16.0",
+      "mup_kind": "input",
+      "fan_in": 4.0,
+      "base_width": 8.0,
+      "width": 16.0,
+      "scale": 1.0,
+      "value": 0.5,
+      "tol": 1e-15
+    },
+    {
+      "kind": "mup_target_std",
+      "name": "input_32_None",
+      "mup_kind": "input",
+      "fan_in": 32.0,
+      "base_width": 8.0,
+      "width": 0.0,
+      "scale": 1.0,
+      "value": 0.1767766952966369,
+      "tol": 1e-15
+    },
+    {
+      "kind": "mup_target_std",
+      "name": "input_32_16.0",
+      "mup_kind": "input",
+      "fan_in": 32.0,
+      "base_width": 8.0,
+      "width": 16.0,
+      "scale": 1.0,
+      "value": 0.1767766952966369,
+      "tol": 1e-15
+    },
+    {
+      "kind": "mup_target_std",
+      "name": "hidden_4_None",
+      "mup_kind": "hidden",
+      "fan_in": 4.0,
+      "base_width": 8.0,
+      "width": 0.0,
+      "scale": 1.0,
+      "value": 0.7071067811865476,
+      "tol": 1e-15
+    },
+    {
+      "kind": "mup_target_std",
+      "name": "hidden_4_16.0",
+      "mup_kind": "hidden",
+      "fan_in": 4.0,
+      "base_width": 8.0,
+      "width": 16.0,
+      "scale": 1.0,
+      "value": 0.5,
+      "tol": 1e-15
+    },
+    {
+      "kind": "mup_target_std",
+      "name": "hidden_32_None",
+      "mup_kind": "hidden",
+      "fan_in": 32.0,
+      "base_width": 8.0,
+      "width": 0.0,
+      "scale": 1.0,
+      "value": 0.25,
+      "tol": 1e-15
+    },
+    {
+      "kind": "mup_target_std",
+      "name": "hidden_32_16.0",
+      "mup_kind": "hidden",
+      "fan_in": 32.0,
+      "base_width": 8.0,
+      "width": 16.0,
+      "scale": 1.0,
+      "value": 0.17677669529663687,
+      "tol": 1e-15
+    },
+    {
+      "kind": "mup_target_std",
+      "name": "readout_4_None",
+      "mup_kind": "readout",
+      "fan_in": 4.0,
+      "base_width": 8.0,
+      "width": 0.0,
+      "scale": 1.0,
+      "value": 0.5,
+      "tol": 1e-15
+    },
+    {
+      "kind": "mup_target_std",
+      "name": "readout_4_16.0",
+      "mup_kind": "readout",
+      "fan_in": 4.0,
+      "base_width": 8.0,
+      "width": 16.0,
+      "scale": 1.0,
+      "value": 0.7071067811865476,
+      "tol": 1e-15
+    },
+    {
+      "kind": "mup_target_std",
+      "name": "readout_32_None",
+      "mup_kind": "readout",
+      "fan_in": 32.0,
+      "base_width": 8.0,
+      "width": 0.0,
+      "scale": 1.0,
+      "value": 0.1767766952966369,
+      "tol": 1e-15
+    },
+    {
+      "kind": "mup_target_std",
+      "name": "readout_32_16.0",
+      "mup_kind": "readout",
+      "fan_in": 32.0,
+      "base_width": 8.0,
+      "width": 16.0,
+      "scale": 1.0,
+      "value": 0.25000000000000006,
+      "tol": 1e-15
+    },
+    {
+      "kind": "mup_layer_kinds",
+      "name": "kinds_1",
+      "num_layers": 1,
+      "kinds": [
+        "readout"
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "mup_layer_kinds",
+      "name": "kinds_2",
+      "num_layers": 2,
+      "kinds": [
+        "input",
+        "readout"
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "mup_layer_kinds",
+      "name": "kinds_3",
+      "num_layers": 3,
+      "kinds": [
+        "input",
+        "hidden",
+        "readout"
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "mup_layer_kinds",
+      "name": "kinds_5",
+      "num_layers": 5,
+      "kinds": [
+        "input",
+        "hidden",
+        "hidden",
+        "hidden",
+        "readout"
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "mup_lr",
+      "name": "lr_1",
+      "fan_ins": [
+        3
+      ],
+      "base_lr": 0.001,
+      "width": 0.0,
+      "base_width": 1.0,
+      "lrs": [
+        0.003
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "mup_lr",
+      "name": "lr_2",
+      "fan_ins": [
+        3,
+        4
+      ],
+      "base_lr": 0.001,
+      "width": 0.0,
+      "base_width": 1.0,
+      "lrs": [
+        0.001,
+        0.004
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "mup_lr",
+      "name": "lr_4",
+      "fan_ins": [
+        3,
+        4,
+        4,
+        4
+      ],
+      "base_lr": 0.001,
+      "width": 0.0,
+      "base_width": 1.0,
+      "lrs": [
+        0.001,
+        0.00025,
+        0.00025,
+        0.004
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "mup_lr",
+      "name": "lr_explicit",
+      "fan_ins": [
+        3,
+        4,
+        4,
+        4
+      ],
+      "base_lr": 0.002,
+      "width": 10.0,
+      "base_width": 2.0,
+      "lrs": [
+        0.002,
+        0.0004,
+        0.0004,
+        0.01
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "mupadam",
+      "name": "adam_step1",
+      "params": [
+        0.5,
+        -1.0,
+        2.0,
+        0.0
+      ],
+      "grads": [
+        0.1,
+        -0.2,
+        0.3,
+        0.4
+      ],
+      "lr": 0.01,
+      "beta1": 0.9,
+      "beta2": 0.999,
+      "eps": 1e-08,
+      "step_count": 1,
+      "out": [
+        0.4900000009999999,
+        -0.9900000004999999,
+        1.9900000003333334,
+        -0.009999999750000014
+      ],
+      "tol": 1e-15
+    },
+    {
+      "kind": "mupadam",
+      "name": "adam_step3",
+      "params": [
+        0.5,
+        -1.0,
+        2.0,
+        0.0
+      ],
+      "grads": [
+        0.1,
+        -0.2,
+        0.3,
+        0.4
+      ],
+      "lr": 0.01,
+      "beta1": 0.9,
+      "beta2": 0.999,
+      "eps": 1e-08,
+      "step_count": 3,
+      "out": [
+        0.49361186511191907,
+        -0.993611864558967,
+        1.9936118643746497,
+        -0.006388135717509064
+      ],
+      "tol": 1e-15
+    }
+  ]
+}
