@@ -576,7 +576,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 - **KAN**：Kolmogorov-Arnold Network（均匀节点 B 样条边函数、前向 + 手写反向、参数量统计）；
 - **模型类（前向）**：LLaMA（RMSNorm + GQA/RoPE + SwiGLU）、BERT（MLM/NSP）、ViT、ELECTRA、RWKV、RetNet、xLSTM、Mamba（选择性扫描）、DeBERTa（解耦相对注意力）。
 
-未包含的部分（可按需扩展）：T5/DETR 等需要解码器/交叉注意力的模型类、真实分布式执行框架、PEFT 包装类（LoRA 等）与实验追踪/GUI 附属组件；基础组件（GPT/LLM 推理、训练循环等）见上文各节。
+未包含的部分（可按需扩展）：T5/DETR 等需要解码器/交叉注意力的模型类、真实分布式执行框架、PEFT 包装类（LoRA / QLoRA 等）、实验追踪/GUI 附属组件；新增训练型模块（Mamba-2、DiT、FNO / DeepONet、Graphormer、Jamba、Titans、VMamba、DINOv2 / iBOT）只有 Python 版本；需要文件系统或回调接口的组件（命名数据版本库 VersionedStore、MCTS / Tree-of-Thought、LLM-as-judge 等）以及梯度检查点等训练内存管理能力也未移植。基础组件（GPT/LLM 推理、训练循环等）见上文各节。
 
 ## 许可证
 
