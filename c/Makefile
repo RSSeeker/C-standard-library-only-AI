@@ -133,6 +133,8 @@ check: compare_python
 	$(MAKE) tests/compare_sae && ./tests/compare_sae sae_reference.json
 	python tools/tree_attn_reference.py tree_attn_reference.json
 	$(MAKE) tests/compare_tree_attn && ./tests/compare_tree_attn tree_attn_reference.json
+	python tools/hallu_reference.py hallu_reference.json
+	$(MAKE) tests/compare_hallu && ./tests/compare_hallu hallu_reference.json
 	python tools/conv_reference.py conv_reference.json
 	$(MAKE) tests/compare_conv && ./tests/compare_conv conv_reference.json
 	python tools/llm_reference.py llm_reference.json
@@ -155,6 +157,6 @@ clean:
 	      norm_reference.json conv_reference.json llm_reference.json \
 	      adamw_reference.json lion_reference.json adafactor_reference.json \
 	      sched_extra_reference.json rmsnorm_reference.json activations_reference.json \
-	      loss_reference.json metrics_reference.json augment_reference.json ffn_reference.json adapt_reference.json heads_reference.json text_tok_reference.json text_metrics_reference.json audio_metrics_reference.json visual_metrics_reference.json ctc_beam_reference.json onnx_mlp_reference.json offline_rl_reference.json egnn_reference.json spec_decode_reference.json diffusion_reference.json flowmatching_reference.json tts_reference.json pix2pix_reference.json gan_variants_reference.json stylegan_reference.json progressive_reference.json cyclegan_reference.json clip_reference.json train_sim_reference.json llama_reference.json bert_reference.json vit_reference.json electra_reference.json rwkv_reference.json retnet_reference.json xlstm_reference.json mamba_reference.json deberta_reference.json train_utils_reference.json rl_utils_reference.json sae_reference.json tree_attn_reference.json
+	      loss_reference.json metrics_reference.json augment_reference.json ffn_reference.json adapt_reference.json heads_reference.json text_tok_reference.json text_metrics_reference.json audio_metrics_reference.json visual_metrics_reference.json ctc_beam_reference.json onnx_mlp_reference.json offline_rl_reference.json egnn_reference.json spec_decode_reference.json diffusion_reference.json flowmatching_reference.json tts_reference.json pix2pix_reference.json gan_variants_reference.json stylegan_reference.json progressive_reference.json cyclegan_reference.json clip_reference.json train_sim_reference.json llama_reference.json bert_reference.json vit_reference.json electra_reference.json rwkv_reference.json retnet_reference.json xlstm_reference.json mamba_reference.json deberta_reference.json train_utils_reference.json rl_utils_reference.json sae_reference.json tree_attn_reference.json hallu_reference.json
 
 .PHONY: all test check clean

@@ -1,0 +1,349 @@
+{
+  "cases": [
+    {
+      "kind": "cosine",
+      "name": "cos_parallel",
+      "a": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "b": [
+        2.0,
+        0.0,
+        0.0
+      ],
+      "out": 1.0,
+      "tol": 0.0
+    },
+    {
+      "kind": "cosine",
+      "name": "cos_orthogonal",
+      "a": [
+        1.0,
+        0.0
+      ],
+      "b": [
+        0.0,
+        1.0
+      ],
+      "out": 0.0,
+      "tol": 0.0
+    },
+    {
+      "kind": "cosine",
+      "name": "cos_zero",
+      "a": [
+        0.0,
+        0.0
+      ],
+      "b": [
+        1.0,
+        2.0
+      ],
+      "out": 0.0,
+      "tol": 0.0
+    },
+    {
+      "kind": "cosine",
+      "name": "cos_generic",
+      "a": [
+        0.3,
+        -1.2,
+        2.0,
+        0.5
+      ],
+      "b": [
+        -0.7,
+        0.4,
+        1.1,
+        -2.0
+      ],
+      "out": 0.08763093567554793,
+      "tol": 0.0
+    },
+    {
+      "kind": "matrix",
+      "name": "matrix_mixed",
+      "premise": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "n_premise": 2,
+      "hypothesis": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.6,
+        0.8,
+        0.0
+      ],
+      "n_hypothesis": 3,
+      "dim": 3,
+      "out": [
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.6,
+        0.8
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "nli",
+      "name": "nli_mixed",
+      "premise": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "n_premise": 2,
+      "hypothesis": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.6,
+        0.8,
+        0.0
+      ],
+      "n_hypothesis": 3,
+      "dim": 3,
+      "entail_threshold": 0.75,
+      "contradiction_threshold": 0.35,
+      "entail_ratio": 1.0,
+      "contradiction_ratio": 0.0,
+      "neutral_ratio": 0.0,
+      "score": 1.0,
+      "labels": [
+        0,
+        0,
+        0
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "nli",
+      "name": "nli_low_thresholds",
+      "premise": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "n_premise": 2,
+      "hypothesis": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.6,
+        0.8,
+        0.0
+      ],
+      "n_hypothesis": 3,
+      "dim": 3,
+      "entail_threshold": 0.2,
+      "contradiction_threshold": 0.05,
+      "entail_ratio": 1.0,
+      "contradiction_ratio": 0.0,
+      "neutral_ratio": 0.0,
+      "score": 1.0,
+      "labels": [
+        0,
+        0,
+        0
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "detect",
+      "name": "detect_partial",
+      "answer": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.8,
+        0.6,
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "n_answer": 5,
+      "source": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "n_source": 2,
+      "dim": 3,
+      "threshold": 0.5,
+      "flagged": [
+        2,
+        4
+      ],
+      "spans": [
+        2,
+        2,
+        4,
+        4
+      ],
+      "n_spans": 2,
+      "hallucination_ratio": 0.4,
+      "similarities": [
+        1.0,
+        1.0,
+        0.0,
+        0.8,
+        0.0
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "detect",
+      "name": "detect_supported",
+      "answer": [
+        1.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "n_answer": 2,
+      "source": [
+        1.0,
+        0.0
+      ],
+      "n_source": 1,
+      "dim": 2,
+      "threshold": 0.0,
+      "flagged": [],
+      "spans": [],
+      "n_spans": 0,
+      "hallucination_ratio": 0.0,
+      "similarities": [
+        1.0,
+        0.0
+      ],
+      "tol": 0.0
+    },
+    {
+      "kind": "report",
+      "name": "report_supported",
+      "answer": [
+        1.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "n_answer": 2,
+      "source": [
+        1.0,
+        0.0
+      ],
+      "n_source": 1,
+      "dim": 2,
+      "threshold": 0.0,
+      "unsupported": [],
+      "n_unsupported": 0,
+      "verdict": 0,
+      "tol": 0.0
+    },
+    {
+      "kind": "report",
+      "name": "report_partial",
+      "answer": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.8,
+        0.6,
+        0.0
+      ],
+      "n_answer": 4,
+      "source": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "n_source": 2,
+      "dim": 3,
+      "threshold": 0.5,
+      "unsupported": [
+        "c"
+      ],
+      "n_unsupported": 1,
+      "verdict": 1,
+      "tol": 0.0
+    },
+    {
+      "kind": "report",
+      "name": "report_unsupported",
+      "answer": [
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "n_answer": 3,
+      "source": [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "n_source": 2,
+      "dim": 3,
+      "threshold": 0.99,
+      "unsupported": [
+        "a",
+        "b"
+      ],
+      "n_unsupported": 2,
+      "verdict": 2,
+      "tol": 0.0
+    }
+  ]
+}
