@@ -1,0 +1,259 @@
+{
+  "cases": [
+    {
+      "name": "basic",
+      "num_blocks": 6,
+      "block_size": 2,
+      "swap_capacity": -1,
+      "ops": [
+        {
+          "op": "new_request",
+          "rid": 0
+        },
+        {
+          "op": "ensure",
+          "rid": 0,
+          "tokens": 3,
+          "table": [
+            0,
+            1
+          ]
+        },
+        {
+          "op": "allocate",
+          "rid": 0,
+          "count": 2,
+          "table": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "op": "fork",
+          "src": 0,
+          "dst_arg": -1,
+          "dst": 1
+        },
+        {
+          "op": "cow",
+          "rid": 1,
+          "index": 0,
+          "block": 4
+        },
+        {
+          "op": "cow",
+          "rid": 1,
+          "index": 1,
+          "block": 5
+        },
+        {
+          "op": "stats",
+          "stats": {
+            "used_blocks": 6,
+            "free_blocks": 0,
+            "shared_blocks": 2,
+            "swapped_blocks": 0,
+            "requests": 2,
+            "copy_on_write": 2
+          }
+        },
+        {
+          "op": "free",
+          "rid": 0,
+          "released": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "op": "stats",
+          "stats": {
+            "used_blocks": 4,
+            "free_blocks": 2,
+            "shared_blocks": 0,
+            "swapped_blocks": 0,
+            "requests": 1,
+            "copy_on_write": 2
+          }
+        },
+        {
+          "op": "swap_out",
+          "rid": 1,
+          "released": [
+            4,
+            5,
+            2,
+            3
+          ]
+        },
+        {
+          "op": "stats",
+          "stats": {
+            "used_blocks": 0,
+            "free_blocks": 6,
+            "shared_blocks": 0,
+            "swapped_blocks": 4,
+            "requests": 1,
+            "copy_on_write": 2
+          }
+        },
+        {
+          "op": "swap_in",
+          "rid": 1,
+          "old": [
+            4,
+            5,
+            2,
+            3
+          ],
+          "new": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "op": "stats",
+          "stats": {
+            "used_blocks": 4,
+            "free_blocks": 2,
+            "shared_blocks": 0,
+            "swapped_blocks": 0,
+            "requests": 1,
+            "copy_on_write": 2
+          }
+        },
+        {
+          "op": "tables",
+          "flat": [
+            1,
+            4,
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "op": "free",
+          "rid": 1,
+          "released": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        {
+          "op": "stats",
+          "stats": {
+            "used_blocks": 0,
+            "free_blocks": 6,
+            "shared_blocks": 0,
+            "swapped_blocks": 0,
+            "requests": 0,
+            "copy_on_write": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "swap_capacity",
+      "num_blocks": 4,
+      "block_size": 2,
+      "swap_capacity": 1,
+      "ops": [
+        {
+          "op": "new_request",
+          "rid": 0
+        },
+        {
+          "op": "ensure",
+          "rid": 0,
+          "tokens": 4,
+          "table": [
+            0,
+            1
+          ]
+        },
+        {
+          "op": "stats",
+          "stats": {
+            "used_blocks": 2,
+            "free_blocks": 2,
+            "shared_blocks": 0,
+            "swapped_blocks": 0,
+            "requests": 1,
+            "copy_on_write": 0
+          }
+        },
+        {
+          "op": "swap_out",
+          "rid": 0,
+          "released": [
+            0,
+            1
+          ]
+        },
+        {
+          "op": "stats",
+          "stats": {
+            "used_blocks": 0,
+            "free_blocks": 4,
+            "shared_blocks": 0,
+            "swapped_blocks": 2,
+            "requests": 1,
+            "copy_on_write": 0
+          }
+        },
+        {
+          "op": "swap_in",
+          "rid": 0,
+          "old": [
+            0,
+            1
+          ],
+          "new": [
+            0,
+            1
+          ]
+        },
+        {
+          "op": "stats",
+          "stats": {
+            "used_blocks": 2,
+            "free_blocks": 2,
+            "shared_blocks": 0,
+            "swapped_blocks": 0,
+            "requests": 1,
+            "copy_on_write": 0
+          }
+        },
+        {
+          "op": "free",
+          "rid": 0,
+          "released": [
+            0,
+            1
+          ]
+        },
+        {
+          "op": "stats",
+          "stats": {
+            "used_blocks": 0,
+            "free_blocks": 4,
+            "shared_blocks": 0,
+            "swapped_blocks": 0,
+            "requests": 0,
+            "copy_on_write": 0
+          }
+        }
+      ]
+    }
+  ]
+}
