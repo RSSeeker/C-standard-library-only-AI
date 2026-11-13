@@ -4,7 +4,10 @@
 """
 import json
 import os
+import random
 import sys
+
+random.seed(20261113)  # 固定进程级随机流，保证参考 JSON 可复现
 
 REPO = os.environ.get("AI_PY_REPO", r"D:\vscode\Python-standard-library-only-AI-main")
 if REPO not in sys.path:

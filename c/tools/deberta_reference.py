@@ -1,6 +1,9 @@
 """Generate DeBERTa forward reference for tests/compare_deberta.c."""
 import json
+import random
 import sys
+
+random.seed(20261113)  # 固定进程级随机流，保证参考 JSON 可复现
 
 sys.path.insert(0, "D:/vscode/Python-standard-library-only-AI-main")
 import AI  # noqa: E402

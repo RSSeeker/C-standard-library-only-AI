@@ -6,7 +6,10 @@
 """
 
 import json
+import random
 import sys
+
+random.seed(20261113)  # 固定进程级随机流，保证参考 JSON 可复现
 
 import _py_path  # noqa: F401  (把 Python 主仓库加入 sys.path)
 

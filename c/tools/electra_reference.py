@@ -1,7 +1,10 @@
 """生成 ELECTRA 判别器前向的跨语言对拍参考（C: tests/compare_electra.c）。"""
 import json
 import os
+import random
 import sys
+
+random.seed(20261113)  # 固定进程级随机流，保证参考 JSON 可复现
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY_ROOT = r"D:\vscode\Python-standard-library-only-AI-main"

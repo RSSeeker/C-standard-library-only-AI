@@ -9,6 +9,8 @@ import os
 import random
 import sys
 
+random.seed(20261113)  # 固定进程级随机流，保证参考 JSON 可复现
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 C_DIR = os.path.dirname(HERE)
 REPO = os.path.dirname(C_DIR)
