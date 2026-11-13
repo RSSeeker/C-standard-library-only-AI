@@ -6,9 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "json.h"
-#include "parallel.h"
-#include "quant.h"
+#include "../json.h"
+#include "../parallel.h"
+#include "../quant.h"
 
 static int g_checks = 0;
 static int g_fails = 0;

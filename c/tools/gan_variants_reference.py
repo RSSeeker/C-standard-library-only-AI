@@ -9,6 +9,8 @@ import json
 import os
 import sys
 
+import _py_path  # noqa: F401  (把 Python 主仓库加入 sys.path)
+
 
 def _img(c, h, w, base):
     out = []

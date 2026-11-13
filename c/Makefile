@@ -12,8 +12,22 @@
 #   make clean
 
 CC      ?= gcc
+
+# Windows 上 make 的内置默认 CC 是 cc（不一定存在）；默认值才改成 gcc，
+# 用户显式设的 CC 环境变量仍然生效。
+ifeq ($(origin CC),default)
+CC := gcc
+endif
 CFLAGS  ?= -std=c17 -O2 -Wall -Wextra
 LDLIBS  ?= -lm
+
+# Windows/MinGW 下 gcc 产出 .exe；目标名必须带后缀，否则 make 每次都重编译。
+ifeq ($(OS),Windows_NT)
+EXE := .exe
+else
+EXE :=
+endif
+
 
 # 核心库 = 除各程序入口之外的所有 .c（新增模块后无需改这里）
 MAINS   = demo.c bench.c compare_python.c check_noalloc.c
@@ -22,20 +36,25 @@ CORE    = $(filter-out $(MAINS), $(wildcard *.c))
 BINS    = demo bench compare_python check_noalloc
 TESTS   = $(patsubst tests/%.c,%,$(wildcard tests/test_*.c))
 
-all: $(BINS) $(addprefix tests/,$(TESTS))
+all: $(addsuffix $(EXE),$(BINS)) $(addsuffix $(EXE),$(addprefix tests/,$(TESTS)))
 
-%: %.c $(CORE)
+%$(EXE): %.c $(CORE)
 	$(CC) $(CFLAGS) -o $@ $< $(CORE) $(LDLIBS)
 
-tests/%: tests/%.c $(CORE)
+tests/%$(EXE): tests/%.c $(CORE)
 	$(CC) $(CFLAGS) -o $@ $< $(CORE) $(LDLIBS)
+
+ifeq ($(EXE),.exe)
+# 兼容 check 里 `$(MAKE) tests/compare_x` 的旧写法：转发到 .exe 目标
+tests/%: tests/%$(EXE) ;
+endif
 
 # 训练循环零分配检查需要链接器的 --wrap 支持（GNU ld / lld）
-check_noalloc: check_noalloc.c $(CORE)
+check_noalloc$(EXE): check_noalloc.c $(CORE)
 	$(CC) $(CFLAGS) -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc \
 		-o $@ $< $(CORE) $(LDLIBS)
 
-test: $(addprefix tests/,$(TESTS))
+test: $(addsuffix $(EXE),$(addprefix tests/,$(TESTS)))
 	@echo "=== C 自测 ==="
 	@for t in $(TESTS); do \
 		echo "--- $$t ---"; \
@@ -43,7 +62,7 @@ test: $(addprefix tests/,$(TESTS))
 	done
 	@echo "全部通过"
 
-check: compare_python
+check: compare_python$(EXE)
 	@echo "=== 与 Python 版数值等价比对 ==="
 	python tools/c_reference.py reference.txt
 	./compare_python reference.txt

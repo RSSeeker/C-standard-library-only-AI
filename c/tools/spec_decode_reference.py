@@ -8,7 +8,7 @@
 import json
 import sys
 
-sys.path.insert(0, "..")
+import _py_path  # noqa: F401  (把 Python 主仓库加入 sys.path)
 import AI  # noqa: E402
 
 

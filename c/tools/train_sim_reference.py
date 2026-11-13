@@ -10,7 +10,7 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _py_path  # noqa: F401  (把 Python 主仓库加入 sys.path)
 
 import AI  # noqa: E402
 

@@ -7,6 +7,8 @@ import math
 import random
 import sys
 
+import _py_path  # noqa: F401  (把 Python 主仓库加入 sys.path)
+
 import AI
 
 

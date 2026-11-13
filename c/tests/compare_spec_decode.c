@@ -14,9 +14,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "json.h"
-#include "llm.h"
-#include "medusa.h"
+#include "../json.h"
+#include "../llm.h"
+#include "../medusa.h"
 
 static int g_checks = 0;
 static int g_fail = 0;

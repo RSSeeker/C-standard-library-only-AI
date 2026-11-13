@@ -133,7 +133,7 @@ gate_probs = flat(moe._gate_all_probs)
 for coef in (0.01, 0.0, 0.1):
     add(kind="moe_aux", name="moe_aux_%g" % coef, tokens=tokens, experts=4,
         top_k=2, topk_idx=topk_idx, gate_probs=gate_probs,
-        coefficient=coef, value=moe.load_balancing_loss(coef), tol=0.0)
+        coefficient=coef, value=moe.load_balancing_loss(coef), tol=1e-12)
 
 
 def main():

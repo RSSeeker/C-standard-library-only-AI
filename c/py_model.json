@@ -5,6 +5,7 @@
     5,
     3
   ],
+  "task": null,
   "layers": [
     {
       "fan_in": 4,

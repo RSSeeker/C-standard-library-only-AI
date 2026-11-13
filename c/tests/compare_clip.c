@@ -8,8 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "clip.h"
-#include "json.h"
+#include "../clip.h"
+#include "../json.h"
 
 static int g_checks = 0;
 static int g_fails = 0;
