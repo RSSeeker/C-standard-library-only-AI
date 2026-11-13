@@ -409,7 +409,7 @@ ai_cli help                # 全部子命令
 ```bash
 build/test_engine.exe     # C++ 引擎 21 项回归测试（训练收敛 / 存档往返 / 瘦身 / 早停 / 蒸馏）
 cd c && make test         # C 引擎测试（含有限差分梯度校验、跨语言逐位比对、零分配验证）
-cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例 + 训练模拟 1 例 + LLaMA 1 例 + BERT 1 例 + ViT 1 例 + ELECTRA 1 例 + RWKV 1 例 + RetNet 1 例 + xLSTM 1 例 + Mamba 1 例 + DeBERTa 1 例 + 训练辅助 10 例 + RL/μP 工具 40 例 + SAE 3 例 + 树状注意力 5 例 + 幻觉检测 12 例 + 块分配器 2 例 + KAN 2 例 + FIM/span corruption 68 例 + QK-Norm/DyT 35 例 + RoPE 扩展 96 例 + 线性注意力/长卷积 53 例 + RWKV-5/6/7 time-mixing 34 例等）
+cd c && make check        # 与 Python 版逐位对拍（文本 41 例 + 音频 15 例 + 视觉 10 例 + CTC 16 例 + ONNX 5 例 + 离线 RL 2 例 + EGNN 1 例 + 投机解码 6 例 + 扩散 17 例 + 整流流 7 例 + 语音合成 1 例 + Pix2Pix 1 例 + 变体 15 例 + StyleGAN 1 例 + ProGAN 1 例 + CycleGAN 1 例 + CLIP 1 例 + 训练模拟 1 例 + LLaMA 1 例 + BERT 1 例 + ViT 1 例 + ELECTRA 1 例 + RWKV 1 例 + RetNet 1 例 + xLSTM 1 例 + Mamba 1 例 + DeBERTa 1 例 + 训练辅助 10 例 + RL/μP 工具 40 例 + SAE 3 例 + 树状注意力 5 例 + 幻觉检测 12 例 + 块分配器 2 例 + KAN 2 例 + FIM/span corruption 68 例 + QK-Norm/DyT 35 例 + RoPE 扩展 96 例 + 线性注意力/长卷积 53 例 + RWKV-5/6/7 time-mixing 34 例 + 模型合并 40 例等）
 ```
 
 ---
@@ -543,6 +543,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 │   ├── mamba.*         #   Mamba 式模型前向（选择性扫描）
 │   ├── deberta.*       #   DeBERTa 式模型前向（解耦相对注意力）
 │   ├── model_io.*      #   与 Python 版互通的 JSON 存档
+│   ├── model_merge.*   #   模型合并（model soup / SLERP / TIES / DARE）
 │   ├── model_high.*    #   高层封装
 │   ├── text.*          #   文本处理与生成
 │   ├── text_metrics.*  #   文本指标（METEOR / chrF / WER / CER）
@@ -576,6 +577,7 @@ rnn.fit(X, Y, 50, 16, 0.2);
 - **位置编码扩展**：ABF（base×factor 缩放）与 LongRoPE（低频段逆频率缩放）逆频率计算、2D / 3D RoPE 分轴旋转与逆变换（行主序网格，纯数值，C 扁平入参下行长不一致/非有限值类校验未对拍）；
 - **线性注意力与长卷积**：naive O(T²) 展开、lightning 标量衰减递推、GLA（`exp(-exp(g))` 门控）、DeltaNet（beta 门控 delta 规则），以及 Hyena 因果长卷积与逐元素门控（纯数值；`decay**(t-j)` 的 pow 与 CPython UCRT 存在 ≤2 ULP 的 libm 差异，按 1e-12 容差对拍，其余用例逐位相同）；
 - **RWKV time-mixing**：RWKV-5 固定逐 channel 衰减 `S=diag(decay)S+k⊗v`、RWKV-6 数据相关衰减（`alpha=exp(-exp(w))`）、RWKV-7 的 delta 修正增量写入（先读旧状态再修正）；纯前向，无反向/生成。`exp(-exp(w))` 走 libm 有 ≤1 ULP 差异，RWKV-6/7 用例按 1e-12 容差对拍，RWKV-5 逐位相同；
+- **模型合并**：model soup 逐元素均值、SLERP 球面插值（含零范数/近平行退化分支）、TIES（trim 剪枝 + 符号一致合并 + density 选择）、DARE（随机丢弃 + rescale，含 Python `random.Random` 兼容 MT19937，C 侧要求显式 seed，`seed=None` 的全局 random 路径未移植；C 扁平张量入参下形状不一致/非有限值类校验未对拍；SLERP 的 `sqrt/acos/sin` 走 libm 有 ≤1 ULP 差异，按 1e-12 容差对拍，其余逐位相同）；
 - **训练目标**：FIM（Fill-in-the-Middle，PSM/SPM 两种排列）与 T5 span corruption（span 掩码 + 目标序列构造，含 Python `random.Random` 兼容 MT19937；C 侧要求显式 seed，`seed=None` 的随机路径未移植）；
 - **RL/μP 工具**：GRPO 组相对优势、Best-of-N、拒绝采样过滤、整数样本自洽性投票；μP 的 target_std / 分层学习率 / MuPAdam 单步更新；
 - **可解释性**：稀疏自编码器 SAE（重建 MSE + L1 稀疏、手写反向、特征激活统计）；
