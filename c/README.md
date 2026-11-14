@@ -43,6 +43,7 @@
 | `save_model` / `load_model`（JSON） | `json.c` + `model_io.c` | 已完成，双向互通 |
 | `StepLR` / `ExponentialLR` / `CosineAnnealingLR` / `clip_grad_by_*` | `sched.c` | 已完成（`pow` 有 1 ULP 差异，见下） |
 | `make_classifier` / `make_regressor` / `quick_train` | `model_high.c` | 已完成 |
+| `streaming_kv_keep` / `h2o_kv_keep` / `snapkv_kv_keep` / `kv_cache_evict` | `kv_evict.c` | 已完成：21 个用例 39 项检查**全部逐位相同**（容差 0，覆盖三种策略的保留下标、淘汰数与收缩后的 K/V） |
 
 ---
 
@@ -187,8 +188,10 @@ python tools/rmsnorm_reference.py     && ./tests/compare_rmsnorm        # 36 数
 python tools/activations_reference.py && ./tests/compare_activations    # 27 数组
 python tools/loss_reference.py       && ./tests/compare_loss            # 24 用例 48 数组
 python tools/metrics_reference.py    && ./tests/compare_metrics         # 32 用例 141 项
+python tools/kv_evict_reference.py   && ./tests/compare_kv_evict       # 21 用例 39 项，全部逐位
 ```
 
+- **KV cache 淘汰（StreamingLLM / H2O / SnapKV）：21 个用例 39 项检查全部逐位相同**（容差 0）。`streaming_kv_keep` 保留 sink 前缀与最近窗口；`h2o_kv_keep` 按列累计注意力选 top；`snapkv_kv_keep` 只用最后 `obs` 行 query 聚合；`kv_cache_evict` 同时校验保留下标、淘汰数与收缩后的 K/V 拷贝。选 top 的并列规则严格按 `(-score, index)`，与 Python 的 `sorted` 一致。
 - **Lion / Adafactor / WarmupLR / ReduceLROnPlateau / RMSNorm：全部逐位相同**
   （最大差异 0.000e+00）。Lion 只有乘法与符号判断；Adafactor 只用 `pow(t,-0.8)`（t≤20 在
   本机与 Python 逐位一致）与 `sqrt`；调度器与 RMSNorm 只用到四则运算和 `sqrt`。
